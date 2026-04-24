@@ -12,6 +12,11 @@
  * Default gameplay binds are set in IN_Init:
  *   RT (R2) = attack, LT (L2) = zoom, Cross = jump, Circle = crouch,
  *   Square = prev weapon, Triangle = next weapon, L1/R1 = strafe
+ *
+ * Text input:
+ *   Select + Triangle = toggle console (K_CONSOLE)
+ *   Select + Cross (in-game) = open chat (messagemode)
+ *   Triangle (in console or chat) = open PS3 on-screen keyboard
  */
 
 #include <stdio.h>
@@ -23,6 +28,7 @@
 #include "qcommon/qcommon.h"
 #include "keycodes.h"
 #include "../input/ps3_input.h"
+#include "../input/ps3_osk.h"
 
 extern void ps3_log(const char *msg);
 
@@ -113,11 +119,13 @@ static const int q3_key_map[NUM_PS3_BUTTONS] = {
     K_JOY8,             /* 17: R2 analog (trigger-as-button) */
 };
 
-/* Button indices for dual-mapping (Cross/Circle send extra UI keys).
- * Cannot use BTN_CROSS/BTN_CIRCLE -- those are padData bitfield names
+/* Button indices for special handling.
+ * Cannot use BTN_CROSS/BTN_CIRCLE etc. -- those are padData bitfield names
  * defined in PSL1GHT's <io/pad.h>. */
-#define PS3_BTN_IDX_CROSS   0
-#define PS3_BTN_IDX_CIRCLE  1
+#define PS3_BTN_IDX_CROSS     0
+#define PS3_BTN_IDX_CIRCLE    1
+#define PS3_BTN_IDX_TRIANGLE  3
+#define PS3_BTN_IDX_SELECT   11
 
 /* Trigger threshold (0-255 analog range, same as Xbox 360 port) */
 #define TRIGGER_THRESHOLD 30
@@ -192,6 +200,17 @@ void PS3_Input_Frame(void)
     int btn_cur[NUM_PS3_BUTTONS];
     int i;
 
+    /* While the OSK overlay is active, the firmware owns the controller.
+     * Still poll pad data so we can track button state for edge detection,
+     * but don't send any events to Q3. */
+    if (PS3_OSK_IsActive()) {
+        ioPadGetInfo(&ps3_pad_info);
+        if (ps3_pad_info.status[0] && ioPadGetData(0, &ps3_pad_data) == 0) {
+            read_buttons(&ps3_pad_data, ps3_btn_prev);
+        }
+        return;
+    }
+
     ioPadGetInfo(&ps3_pad_info);
 
     /* Use first connected controller */
@@ -220,11 +239,53 @@ void PS3_Input_Frame(void)
      *   - Always send their K_JOY* keycode (for gameplay binds)
      *   - Additionally send K_ENTER / K_ESCAPE when UI is active
      *     (so the Q3 menu system recognizes confirm/back)
+     *
+     * Triangle has context-sensitive behavior:
+     *   - Select + Triangle = toggle console (K_CONSOLE)
+     *   - Triangle in console or chat = open on-screen keyboard
+     *   - Triangle otherwise = normal K_JOY4 (weapnext)
+     *
+     * Cross has context-sensitive behavior:
+     *   - Select + Cross (in-game) = open chat (messagemode)
+     *   - Cross in menus = K_JOY1 + K_ENTER
+     *   - Cross otherwise = normal K_JOY1 (jump)
      * ---------------------------------------------------------------- */
     read_buttons(&ps3_pad_data, btn_cur);
 
     int catchers = Key_GetCatcher();
     int in_menu = (catchers & (KEYCATCH_UI | KEYCATCH_CGAME)) ? 1 : 0;
+    int in_text = (catchers & (KEYCATCH_CONSOLE | KEYCATCH_MESSAGE)) ? 1 : 0;
+
+    /* Detect Triangle press edge (0 -> 1) for combo/OSK handling */
+    int triangle_pressed = (btn_cur[PS3_BTN_IDX_TRIANGLE] &&
+                            !ps3_btn_prev[PS3_BTN_IDX_TRIANGLE]);
+    int triangle_consumed = 0;
+
+    if (triangle_pressed) {
+        if (btn_cur[PS3_BTN_IDX_SELECT]) {
+            /* Select + Triangle = toggle console */
+            Com_QueueEvent(0, SE_KEY, K_CONSOLE, qtrue, 0, NULL);
+            Com_QueueEvent(0, SE_KEY, K_CONSOLE, qfalse, 0, NULL);
+            triangle_consumed = 1;
+        } else if (in_text) {
+            /* Triangle in console or chat = open OSK.
+             * Auto-submit in chat so the message sends immediately. */
+            qboolean in_chat = (catchers & KEYCATCH_MESSAGE) ? qtrue : qfalse;
+            PS3_OSK_Open(128, in_chat);
+            triangle_consumed = 1;
+        }
+    }
+
+    /* Detect Cross press edge (0 -> 1) for chat combo */
+    int cross_pressed = (btn_cur[PS3_BTN_IDX_CROSS] &&
+                         !ps3_btn_prev[PS3_BTN_IDX_CROSS]);
+    int cross_consumed = 0;
+
+    if (cross_pressed && btn_cur[PS3_BTN_IDX_SELECT] && !in_menu && !in_text) {
+        /* Select + Cross in gameplay = open chat */
+        Cbuf_ExecuteText(EXEC_APPEND, "messagemode\n");
+        cross_consumed = 1;
+    }
 
     for (i = 0; i < NUM_PS3_BUTTONS; i++) {
         /* Skip the digital L2/R2 bitfields; use analog threshold instead */
@@ -234,6 +295,20 @@ void PS3_Input_Frame(void)
         int prev = ps3_btn_prev[i];
 
         if (cur != prev) {
+            /* If Triangle was consumed by console toggle or OSK, suppress
+             * only its normal K_JOY4 keycode for this press edge */
+            if (i == PS3_BTN_IDX_TRIANGLE && triangle_consumed && cur) {
+                ps3_btn_prev[i] = cur;
+                continue;
+            }
+
+            /* If Cross was consumed by chat combo, suppress its
+             * K_JOY1 and K_ENTER for this press edge */
+            if (i == PS3_BTN_IDX_CROSS && cross_consumed && cur) {
+                ps3_btn_prev[i] = cur;
+                continue;
+            }
+
             /* Primary keycode (always sent) */
             Com_QueueEvent(0, SE_KEY, q3_key_map[i],
                            cur ? qtrue : qfalse, 0, NULL);

@@ -180,6 +180,7 @@ PS3_SRCS := \
   code/sys/ps3_sys.c \
   code/sys/ps3_glimp.c \
   code/input/ps3_input.c \
+  code/input/ps3_osk.c \
   code/audio/ps3_snd.c \
   code/renderer/ps3_renderer.c \
   code/renderer/qgl_ps3.c \

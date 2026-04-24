@@ -10,6 +10,7 @@ translation layer (OpenGL 1.1 fixed-function to GCM/RSX).
 - All textures render correctly (map, icons, models, particles)
 - Networking works (LAN discovery, internet server browser, master server)
 - DualShock 3 with dual-stick analog input
+- On-screen keyboard for text input (console commands, chat, server address, player name)
 - Cinematic (intro video) playback with audio
 - 60 fps vsync-locked at 720p
 
@@ -152,6 +153,19 @@ from the Q3 menu.
 | **R3** | Scoreboard |
 | **Select** | Scoreboard |
 | **Start** | Menu (Escape) |
+| **Select + Cross** | Open chat |
+| **Select + Triangle** | Toggle console |
+
+#### Text input (console, chat)
+
+| Input | Action |
+|---|---|
+| **Triangle** | Open PS3 on-screen keyboard |
+| **Cross** | Submit / confirm typed text |
+
+When the console or chat is open, pressing Triangle opens the PS3 system
+on-screen keyboard. Type your text, press Enter on the OSK to confirm,
+then press Cross to submit the command or message.
 
 #### Menus
 

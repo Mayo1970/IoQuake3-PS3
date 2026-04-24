@@ -26,6 +26,7 @@
 /* PS3-specific subsystems */
 #include "../sys/ps3_glimp.h"
 #include "../input/ps3_input.h"
+#include "../input/ps3_osk.h"
 #include "../audio/ps3_snd.h"
 
 /* Renderer interface for pre-init */
@@ -45,13 +46,20 @@ static volatile int ps3_running = 1;
 
 static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
 {
-    (void)param; (void)userdata;
+    (void)userdata;
     switch (status) {
         case SYSUTIL_EXIT_GAME:
             ps3_running = 0;
             break;
         case SYSUTIL_DRAW_BEGIN:
         case SYSUTIL_DRAW_END:
+            break;
+        case SYSUTIL_OSK_LOADED:
+        case SYSUTIL_OSK_DONE:
+        case SYSUTIL_OSK_UNLOADED:
+        case SYSUTIL_OSK_INPUT_ENTERED:
+        case SYSUTIL_OSK_INPUT_CANCELED:
+            PS3_OSK_SysutilCallback(status, param);
             break;
         default:
             break;
@@ -150,6 +158,10 @@ int main(int argc, char *argv[])
     PS3_Input_Init();
     printf("[ps3] Input OK\n");
     PS3LOG("Input init done");
+
+    /* On-screen keyboard (4 MB memory container) */
+    PS3_OSK_Init();
+    PS3LOG("OSK init done");
 
     /* Network -- PS3 has BSD sockets via PSL1GHT.
      * Network init is simpler than Wii; the system handles DHCP/WiFi. */
@@ -297,6 +309,7 @@ int main(int argc, char *argv[])
     }
 
     /* Cleanup */
+    PS3_OSK_Shutdown();
     PS3_Snd_Shutdown();
     PS3_Input_Shutdown();
     PS3_RSX_Shutdown();
