@@ -1,0 +1,4 @@
+/* Stub SDL_loadso.h for ioquake3-PS3 */
+#ifndef _SDL_LOADSO_H_STUB
+#define _SDL_LOADSO_H_STUB
+#endif

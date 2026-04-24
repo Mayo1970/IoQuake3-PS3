@@ -6,6 +6,7 @@
 *.ko
 *.obj
 *.elf
+*.current
 
 # Linker output
 *.ilk
@@ -53,3 +54,17 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# PS3-specific build artifacts
+*.self
+*.bin
+*.pkg
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+build/
+build_log.txt
+.claude/
+CLAUDE.md
