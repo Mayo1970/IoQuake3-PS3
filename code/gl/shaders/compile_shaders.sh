@@ -31,9 +31,9 @@ fi
 # Check common locations for NVIDIA Cg Toolkit
 CGC=""
 for candidate in \
+    "${CGC_PATH:-}" \
     "/c/Program Files (x86)/NVIDIA Corporation/Cg/bin/cgc.exe" \
     "/c/Program Files/NVIDIA Corporation/Cg/bin/cgc.exe" \
-    "/e/Users/Matteo/Desktop/quake3/DEVkits/Cg64/bin/cgc.exe" \
     "$(which cgc.exe 2>/dev/null || true)" \
     "$(which cgc 2>/dev/null || true)"; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then

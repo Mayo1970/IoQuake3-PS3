@@ -60,6 +60,9 @@ dkms.conf
 *.bin
 *.pkg
 
+# Upstream ioq3 source (sibling clone, not part of this repo)
+ioq3/
+
 # Python bytecode
 __pycache__/
 *.pyc

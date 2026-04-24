@@ -173,6 +173,9 @@ Only needed if you modify the `.vcg` / `.fcg` source files in
 ```bash
 cd code/gl/shaders
 ./compile_shaders.sh
+
+# If cgc.exe is not in a standard location:
+CGC_PATH=/path/to/cgc.exe ./compile_shaders.sh
 ```
 
 This uses a two-step pipeline:
