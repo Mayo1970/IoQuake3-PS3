@@ -1,19 +1,4 @@
-/*
- * ioquake3-PS3: audio/ps3_snd.c
- * Audio backend using PSL1GHT's libaudio.
- *
- * ioQ3's software mixer (snd_dma.c / snd_mix.c) fills a 16-bit PCM ring
- * buffer. A dedicated audio thread waits for the PS3 audio server event,
- * then converts one block of 16-bit samples to 32-bit float and writes
- * it into the audio port's circular buffer.
- *
- * PS3 audio hardware:
- *   - 48 kHz native sample rate (fixed)
- *   - 256 samples per block (fixed by hardware: AUDIO_BLOCK_SAMPLES)
- *   - Stereo (2 channels)
- *   - 32-bit float internally, range [-1.0, 1.0], interleaved L/R
- *   - Event-driven: audio server sends event when next block is needed
- */
+/* ps3_snd.c -- PSL1GHT libaudio backend for ioQ3's software mixer. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,16 +17,7 @@
 
 extern void ps3_log(const char *msg);
 
-/* ----------------------------------------------------------------
- * Configuration
- *
- * PS3 audio blocks are 256 samples (fixed). At 48 kHz stereo, each
- * block is 256 * 2 * sizeof(float) = 2048 bytes for the port buffer.
- *
- * We use a ring buffer of 4096 sample-pairs (~85 ms at 48 kHz).
- * ioQ3's mixer writes 16-bit PCM into this ring; our audio thread
- * reads from it and converts to float for the audio port.
- * ---------------------------------------------------------------- */
+/* 4096 sample-pairs (~85 ms at 48 kHz). Mixer writes PCM, audio thread reads. */
 #define PS3_AUDIO_RATE       48000
 #define PS3_AUDIO_CHANNELS   2
 #define PS3_AUDIO_BITS       16
@@ -52,35 +28,14 @@ static audioPortConfig  ps3_audio_config;
 static u32              ps3_audio_port = 0;
 static volatile int     ps3_audio_running = 0;
 
-/* Event queue for audio server notifications */
 static sys_event_queue_t ps3_audio_eventQ;
 static sys_ipc_key_t     ps3_audio_queueKey;
-
-/* Audio thread */
 static sys_ppu_thread_t  ps3_audio_thread;
 static volatile int      ps3_audio_quit = 0;
-
-/* Ring buffer shared between ioQ3 mixer and audio thread */
 static byte ps3_audio_buffer[PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS * (PS3_AUDIO_BITS / 8)];
-
-/* Block counter: incremented each time the audio thread writes a block
- * to the hardware port. SNDDMA_GetDMAPos derives the read position
- * directly from this so the mixer and audio thread stay synchronized. */
 static volatile u32 ps3_audio_blocks_written = 0;
 
-/* ----------------------------------------------------------------
- * Audio thread: waits for events from the audio server, then
- * converts one block of 16-bit PCM to 32-bit float and writes
- * it into the audio port's circular buffer.
- *
- * PSL1GHT audio port layout:
- *   - audioPortConfig.readIndex is a u32 holding a POINTER to a
- *     u64 that the audio server updates in real-time with the
- *     current block index being read.
- *   - audioPortConfig.audioDataStart is a u32 holding a POINTER
- *     to the base of the port's float buffer.
- *   - We write to the block AFTER the one being read.
- * ---------------------------------------------------------------- */
+/* Audio thread: converts 16-bit PCM blocks to 32-bit float for the audio port. */
 static void ps3_audio_thread_func(void *arg)
 {
     (void)arg;
@@ -91,8 +46,7 @@ static void ps3_audio_thread_func(void *arg)
     int diag_count = 0;
     int timeout_count = 0;
 
-    /* Cache port config pointers -- these are memory-mapped and stay valid
-     * for the lifetime of the audio port. */
+    /* Memory-mapped port config pointers, valid for port lifetime */
     volatile u64 *readIndexPtr = (volatile u64 *)((u64)ps3_audio_config.readIndex);
     f32 *dataStart = (f32 *)((u64)ps3_audio_config.audioDataStart);
     u64 numBlocks = ps3_audio_config.numBlocks;
@@ -127,13 +81,13 @@ static void ps3_audio_thread_func(void *arg)
 
         if (ps3_audio_quit) break;
 
-        /* Dereference the live readIndex pointer to get current block */
+        /* Current block from live readIndex */
         u64 currentBlock = *readIndexPtr;
         u32 writeBlock = (u32)((currentBlock + 1) % numBlocks);
 
         f32 *dst = dataStart + writeBlock * PS3_AUDIO_CHANNELS * PS3_AUDIO_BLOCK_SIZE;
 
-        /* Read position in our 16-bit PCM ring buffer */
+        /* Ring buffer read position */
         u32 ring_pos = (ps3_audio_blocks_written * (u32)block_samples) % (u32)total_interleaved;
 
         for (int i = 0; i < block_samples; i++) {
@@ -159,9 +113,7 @@ static void ps3_audio_thread_func(void *arg)
     sysThreadExit(0);
 }
 
-/* ----------------------------------------------------------------
- * SNDDMA interface -- called by ioQ3's sound system
- * ---------------------------------------------------------------- */
+/* SNDDMA interface */
 qboolean SNDDMA_Init(void)
 {
     audioPortParam params;
@@ -216,7 +168,7 @@ qboolean SNDDMA_Init(void)
         ps3_log(buf);
     }
 
-    /* Create and register the event queue for audio notifications */
+    /* Event queue for audio server notifications */
     ret = audioCreateNotifyEventQueue(&ps3_audio_eventQ, &ps3_audio_queueKey);
     if (ret != 0) {
         char buf[64];
@@ -236,7 +188,6 @@ qboolean SNDDMA_Init(void)
         return qfalse;
     }
 
-    /* Drain any pending events before starting */
     sysEventQueueDrain(ps3_audio_eventQ);
 
     ret = audioPortStart(ps3_audio_port);
@@ -249,7 +200,7 @@ qboolean SNDDMA_Init(void)
         return qfalse;
     }
 
-    /* Fill in dma_t for ioQ3's mixer */
+    /* dma_t for ioQ3's mixer */
     memset(&dma, 0, sizeof(dma));
     dma.channels         = PS3_AUDIO_CHANNELS;
     dma.samples          = PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS;
@@ -262,7 +213,6 @@ qboolean SNDDMA_Init(void)
     memset(ps3_audio_buffer, 0, sizeof(ps3_audio_buffer));
     ps3_audio_blocks_written = 0;
 
-    /* Start the audio thread */
     ps3_audio_quit = 0;
     ps3_audio_running = 1;
 
@@ -298,14 +248,6 @@ qboolean SNDDMA_Init(void)
 int SNDDMA_GetDMAPos(void)
 {
     if (!ps3_audio_running) return 0;
-
-    /* Return hardware read position derived from the audio thread's block
-     * counter. This keeps the mixer's write cursor and the audio thread's
-     * read cursor synchronized through the same counter.
-     *
-     * Each block consumes PS3_AUDIO_BLOCK_SIZE sample-pairs.
-     * We return interleaved sample count so S_GetSoundtime's division
-     * by dma.channels yields the correct sample-pair offset. */
     u32 blocks = ps3_audio_blocks_written;
     u32 pairs = (blocks * PS3_AUDIO_BLOCK_SIZE) % PS3_AUDIO_SAMPLES;
     return (int)(pairs * PS3_AUDIO_CHANNELS);
@@ -315,11 +257,9 @@ void SNDDMA_Shutdown(void)
 {
     if (!ps3_audio_running) return;
 
-    /* Signal the audio thread to exit */
     ps3_audio_quit = 1;
     ps3_audio_running = 0;
 
-    /* Wait for thread to finish */
     u64 retval;
     sysThreadJoin(ps3_audio_thread, &retval);
 
@@ -332,35 +272,17 @@ void SNDDMA_Shutdown(void)
     ps3_log("SNDDMA_Shutdown: done");
 }
 
-void SNDDMA_BeginPainting(void)
-{
-    /* No locking needed -- the mixer and audio thread access different
-     * regions of the ring buffer (mixer writes ahead, thread reads behind). */
-}
+void SNDDMA_BeginPainting(void) {}
+void SNDDMA_Submit(void) {}
 
-void SNDDMA_Submit(void)
-{
-    /* No-op: the audio thread handles feeding the hardware via event queue.
-     * The mixer writes directly into dma.buffer (= ps3_audio_buffer); the
-     * audio thread reads from it independently. */
-}
-
-/* VoIP capture stubs -- no microphone support on PS3 homebrew */
+/* VoIP capture stubs */
 void SNDDMA_StartCapture(void) {}
 int  SNDDMA_AvailableCaptureSamples(void) { return 0; }
 void SNDDMA_Capture(int samples, byte *data) { (void)samples; (void)data; }
 void SNDDMA_StopCapture(void) {}
 void SNDDMA_MasterGain(float val) { (void)val; }
 
-/* ----------------------------------------------------------------
- * S_Init dispatch -- replaces snd_main.c which depends on SDL/OpenAL.
- *
- * We bypass snd_main.c entirely and forward S_* calls directly to
- * S_Base_* (the software DMA mixer in snd_dma.c).
- * Pattern follows the Wii port.
- * ---------------------------------------------------------------- */
-
-/* Declarations from snd_dma.c not exposed in snd_local.h */
+/* S_Init dispatch -- bypasses snd_main.c, forwards to S_Base_* directly. */
 extern void S_Update_(void);
 extern void S_Base_Shutdown(void);
 extern void S_Base_StartSound(vec3_t origin, int entityNum, int entchannel, sfxHandle_t sfx);
@@ -378,10 +300,7 @@ extern void S_Base_ClearSoundBuffer(void);
 extern void S_Base_DisableSounds(void);
 extern void S_Base_RawSamples(int stream, int samples, int rate, int width, int s_channels, const byte *data, float volume, int entityNum);
 
-/* Codec init from snd_codec.c */
 extern void S_CodecInit(void);
-
-/* Cvars normally defined by snd_main.c -- snd_dma.c/snd_mix.c reference these */
 cvar_t *s_volume;
 cvar_t *s_muted;
 cvar_t *s_musicVolume;
@@ -429,13 +348,8 @@ void        S_StopBackgroundTrack(void)                                { }
 void        S_RawSamples(int stream,int samples,int rate,int width,int channels,const byte *d,float v,int e)
                                                                        { S_Base_RawSamples(stream,samples,rate,width,channels,d,v,e); }
 
-/* ----------------------------------------------------------------
- * PS3 audio init/shutdown -- called from ps3_main.c
- * ---------------------------------------------------------------- */
-void PS3_Snd_Init(void)
-{
-    /* Actual audio init happens in SNDDMA_Init when S_Init calls S_Base_Init */
-}
+/* Init/shutdown called from ps3_main.c. Actual audio init in SNDDMA_Init. */
+void PS3_Snd_Init(void) {}
 
 void PS3_Snd_Shutdown(void)
 {

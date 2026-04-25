@@ -1,33 +1,15 @@
-/*
- * ps3_platform.h -- force-included before every TU via -include
- *
- * Defines platform constants, endianness, memory tuning, and compatibility
- * shims for building ioQuake3 against PSL1GHT on the PS3.
- *
- * If patch_q_platform.py has added a __PS3__ block to q_platform.h, that
- * block takes priority. This header uses #ifndef guards as a fallback
- * and to provide additional PS3-specific overrides.
- */
+/* ps3_platform.h -- force-included via -include. Platform constants and shims. */
 
 #ifndef PS3_PLATFORM_H
 #define PS3_PLATFORM_H
 
-/* ----------------------------------------------------------------
- * Tell q_platform.h we are a known OS.
- * We pretend to be __linux__ because ioq3's Linux branch has the
- * least harmful side effects on a POSIX-ish newlib system.
- * If patch_q_platform.py was applied, the __PS3__ block fires
- * first and this fallback is never reached.
- * ---------------------------------------------------------------- */
+/* Pretend __linux__ -- ioq3's Linux path has least side effects on newlib. */
 #if !defined(__linux__) && !defined(WIN32) && !defined(MACOS_X) && \
     !defined(__FreeBSD__) && !defined(__OpenBSD__) && !defined(__PS3__)
 #  define __linux__
 #endif
 
-/* ----------------------------------------------------------------
- * Endianness -- Cell BE PPU is big-endian.
- * Define BEFORE q_platform.h evaluates byte order.
- * ---------------------------------------------------------------- */
+/* Cell BE PPU is big-endian. Must be defined before q_platform.h. */
 #ifndef __BIG_ENDIAN
 #  define __BIG_ENDIAN 4321
 #endif
@@ -45,9 +27,7 @@
 #undef  Q3_LITTLE_ENDIAN
 #define Q3_BIG_ENDIAN
 
-/* ----------------------------------------------------------------
- * Platform strings
- * ---------------------------------------------------------------- */
+/* Platform strings */
 #ifndef OS_STRING
 #  define OS_STRING "ps3"
 #endif
@@ -61,27 +41,19 @@
 #  define DLL_EXT ".sprx"
 #endif
 
-/* ----------------------------------------------------------------
- * ID_INLINE
- * ---------------------------------------------------------------- */
+
 #ifndef ID_INLINE
 #  define ID_INLINE __inline__
 #endif
 #pragma GCC diagnostic ignored "-Wattributes"
 
-/* ----------------------------------------------------------------
- * Misc ioQ3 / newlib compatibility
- * ---------------------------------------------------------------- */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
 
-/* ----------------------------------------------------------------
- * libjpeg INT32/INT16 fix for PPC64 (LP64 ABI)
- * jmorecfg.h does "typedef long INT32" which is 64-bit on PPC64,
- * corrupting JPEG decoding. We define XMD_H (via Makefile -DXMD_H)
- * to suppress those typedefs and provide correct 32/16-bit ones.
- * ---------------------------------------------------------------- */
+/* libjpeg fix: "typedef long INT32" is 64-bit on PPC64, corrupts decoding.
+ * XMD_H suppresses jmorecfg.h's typedefs; we provide correct ones here. */
 #ifdef XMD_H
 #  ifndef _BASETSD_H_     /* avoid conflict with Windows basetsd.h */
     typedef int             INT32;
@@ -93,7 +65,7 @@
 #  define MAP_FAILED ((void *)-1)
 #endif
 
-/* mmap/mprotect stubs -- PS3 homebrew has no mmap; all memory is RWX */
+/* mmap stubs -- PS3 has no mmap; all memory is RWX */
 #ifndef PROT_READ
 #  define PROT_READ     1
 #  define PROT_WRITE    2
@@ -110,48 +82,23 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 /* ioq3's unzip.c uses 64-bit file offsets; newlib on PS3 doesn't have them */
 #define IOAPI_NO_64BIT
 
-/* ----------------------------------------------------------------
- * Warning suppression
- * ---------------------------------------------------------------- */
+
 #pragma GCC diagnostic ignored "-Wunused-function"
 #pragma GCC diagnostic ignored "-Wmissing-braces"
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 
-/* ----------------------------------------------------------------
- * Network configuration
- * PS3's PSL1GHT provides BSD-compatible sockets. No need for the
- * heavy shimming the Wii port requires. IPv6 is disabled because
- * PSL1GHT only implements IPv4.
- * ---------------------------------------------------------------- */
+/* Network -- BSD sockets via PSL1GHT, IPv4 only */
 #define HAVE_SA_LEN          0
 #undef  HAVE_SOCKADDR_SA_LEN
 #define NET_ENABLE_IPV6      0
 
-/* Network socket shim -- only include for net_ip.c to avoid
- * header conflicts with huffman.c's internal send() */
+/* Only included for net_ip.c -- avoids conflicts with huffman.c's send() */
 #ifdef PS3_INCLUDE_NET
 #include "sys/ps3_net.h"
 #endif
 
-/* ----------------------------------------------------------------
- * Memory tuning
- *
- * PS3 has 256 MB XDR (main) + 256 MB GDDR3 (video).
- * The RSX command buffer and textures consume GDDR3.
- * XDR is shared between OS, game code, and the hunk.
- *
- * Stock ioq3 defaults:
- *   com_hunkMegs  = 128  (wants 128 MB contiguous)
- *   com_zoneMegs  = 24
- *
- * PS3 budget (XDR):
- *   ~50 MB OS/system overhead
- *   ~80 MB hunk
- *   ~24 MB zone
- *   ~20 MB code + BSS + stack
- *   ~80 MB headroom for malloc, network buffers, audio
- * ---------------------------------------------------------------- */
+/* Memory tuning for 256 MB XDR + 256 MB GDDR3 */
 #undef  MIN_DEDICATED_COMHUNKMEGS
 #undef  MIN_COMHUNKMEGS
 #undef  DEF_COMHUNKMEGS
@@ -161,15 +108,7 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #define DEF_COMHUNKMEGS           "80"
 #define DEF_COMZONEMEGS           "24"
 
-/* ----------------------------------------------------------------
- * client_t / netchan memory reduction
- *
- * PS3 has more RAM than Wii, but we still reduce these to save
- * zone memory and leave more room for textures/audio.
- *
- * Stock: MAX_RELIABLE_COMMANDS=64, PACKET_BACKUP=32
- * PS3:   MAX_RELIABLE_COMMANDS=32, PACKET_BACKUP=32 (keep stock)
- * ---------------------------------------------------------------- */
+/* Reduced netchan constants to save zone memory */
 #ifndef MAX_RELIABLE_COMMANDS
 #define MAX_RELIABLE_COMMANDS   32      /* stock: 64 */
 #endif
@@ -183,8 +122,7 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #define MAX_DOWNLOAD_WINDOW     16      /* stock: 48 */
 #endif
 
-/* Audio streaming -- reduce from 16 MB BSS to something reasonable.
- * PS3 has enough RAM to keep a decent buffer. */
+/* Audio streaming -- reduced from stock to save BSS */
 #ifndef MAX_RAW_STREAMS
 #define MAX_RAW_STREAMS  1      /* stock: MAX_CLIENTS*2+1 = 129 */
 #endif
@@ -192,18 +130,10 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #define MAX_RAW_SAMPLES  8192   /* stock: 16384 */
 #endif
 
-/* ----------------------------------------------------------------
- * GL compatibility -- intercept SDL_opengl.h from qgl.h.
- * Our stub headers in code/sys/include/ provide the GL types
- * and constants that the renderer expects.
- * ---------------------------------------------------------------- */
+/* Intercept SDL_opengl.h -- our stub headers provide GL types */
 #define USE_INTERNAL_SDL_HEADERS
 
-/* ----------------------------------------------------------------
- * PSL1GHT / RSX compatibility
- * Some PSL1GHT headers define color macros that collide with
- * ioQ3's console color character constants.
- * ---------------------------------------------------------------- */
+/* PSL1GHT color macros collide with ioQ3's console color constants */
 #undef COLOR_BLACK
 #undef COLOR_RED
 #undef COLOR_GREEN

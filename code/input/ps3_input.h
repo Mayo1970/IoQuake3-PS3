@@ -1,7 +1,4 @@
-/*
- * ioquake3-PS3: input/ps3_input.h
- * DualShock 3 input declarations.
- */
+/* ps3_input.h -- DS3 controller input via libpad. */
 
 #ifndef PS3_INPUT_H
 #define PS3_INPUT_H

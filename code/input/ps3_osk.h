@@ -1,7 +1,4 @@
-/*
- * ioquake3-PS3: input/ps3_osk.h
- * PS3 system on-screen keyboard (XMB overlay) for text input.
- */
+/* ps3_osk.h -- PS3 system on-screen keyboard via sysutil/osk. */
 
 #ifndef PS3_OSK_H
 #define PS3_OSK_H
@@ -9,10 +6,7 @@
 #include <ppu-types.h>
 #include "qcommon/q_shared.h"
 
-/* Call once at startup after sysutil is available. */
 void     PS3_OSK_Init(void);
-
-/* Call once at shutdown. */
 void     PS3_OSK_Shutdown(void);
 
 /* Open the on-screen keyboard. No-op if already open.

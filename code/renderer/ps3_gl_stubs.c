@@ -1,7 +1,4 @@
-/*
- * ioquake3-PS3: renderer/ps3_gl_stubs.c
- * Provides GL version globals required by renderergl1.
- */
+/* ps3_gl_stubs.c -- GL version globals required by renderergl1. */
 
 #include "renderercommon/qgl.h"
 

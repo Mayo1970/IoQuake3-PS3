@@ -1,15 +1,4 @@
-/*
- * ioquake3-PS3: renderer/ps3_renderer.c
- * Renderer glue layer.
- *
- * Owns the global refimport_t ri and provides a two-phase GetRefAPI():
- *   1. Pre-boot: called with rimp==NULL, returns stub refexport_t (all no-ops)
- *      so Com_Printf -> SCR_UpdateScreen doesn't crash before FS is up.
- *   2. Real init: called with valid rimp from CL_InitRef, wires up QGL
- *      function pointers and returns the real renderer's refexport_t.
- *
- * This is the same pattern used by the Wii port.
- */
+/* ps3_renderer.c -- Renderer glue layer. */
 
 #include <stdio.h>
 #include <string.h>
@@ -22,18 +11,10 @@
 
 extern void ps3_log(const char *msg);
 
-/* ----------------------------------------------------------------
- * Global refimport_t -- the sole definition.
- * tr_main.c's definition is renamed by our patches.
- * ---------------------------------------------------------------- */
+/* Global refimport_t -- tr_main.c's definition is renamed by our patches. */
 refimport_t ri;
 
-/* ----------------------------------------------------------------
- * Pre-boot stubs
- * Before Com_Init, the renderer is not fully initialized.
- * These no-ops prevent crashes when ioQ3 tries to render
- * during early startup.
- * ---------------------------------------------------------------- */
+/* Pre-boot stubs -- no-ops to prevent crashes before Com_Init. */
 static void stub_Shutdown(qboolean destroyWindow)       { (void)destroyWindow; }
 static void stub_BeginRegistration(glconfig_t *config)   { (void)config; }
 static qhandle_t stub_RegisterModel(const char *n)       { (void)n; return 0; }
@@ -119,17 +100,12 @@ static refexport_t *PS3_StubRefExport(void)
     return &ps3_stub_re;
 }
 
-/* ----------------------------------------------------------------
- * GetRefAPI -- the real renderer's entry point is renamed to
- * tr_init_GetRefAPI_unused by our patches; we call it here.
- * ---------------------------------------------------------------- */
+/* GetRefAPI -- real entry point is renamed to tr_init_GetRefAPI_unused. */
 extern refexport_t *tr_init_GetRefAPI_unused(int apiVersion, refimport_t *rimp);
 
 extern void QGL_Init(void);
 extern void PS3_RSX_BeginFrame(void);
 
-/* Wrapper around upstream RE_BeginFrame that also calls PS3_RSX_BeginFrame
-   to set the RSX render target and reset per-frame GL state. */
 static void (*upstream_BeginFrame)(stereoFrame_t stereoFrame) = NULL;
 
 static void PS3_RE_BeginFrame(stereoFrame_t stereoFrame)
@@ -141,13 +117,13 @@ static void PS3_RE_BeginFrame(stereoFrame_t stereoFrame)
 
 refexport_t *GetRefAPI(int apiVersion, refimport_t *rimp)
 {
-    /* Pre-boot phase: rimp is NULL, return stubs */
+    /* Pre-boot: return stubs */
     if (!rimp) {
         ps3_log("GetRefAPI: pre-boot stub");
         return PS3_StubRefExport();
     }
 
-    /* Real init phase: wire up QGL and call the real renderer */
+    /* Real init */
     ri = *rimp;
     ps3_log("GetRefAPI: real init");
 
@@ -155,7 +131,7 @@ refexport_t *GetRefAPI(int apiVersion, refimport_t *rimp)
 
     refexport_t *re = tr_init_GetRefAPI_unused(apiVersion, rimp);
 
-    /* Hook BeginFrame to inject PS3_RSX_BeginFrame */
+    /* Inject PS3_RSX_BeginFrame before each frame */
     upstream_BeginFrame = re->BeginFrame;
     re->BeginFrame = PS3_RE_BeginFrame;
 

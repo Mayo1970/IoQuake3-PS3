@@ -1,23 +1,4 @@
-/*
- * ioquake3-PS3: input/ps3_input.c
- * DualShock 3 (SIXAXIS) controller input via PSL1GHT's libpad.
- *
- * Button mapping follows the Xbox 360 port's approach:
- *   - D-pad sends classic keycodes (K_UPARROW etc.) for menu navigation
- *   - Cross = K_ENTER (confirm), Circle = K_ESCAPE (back)
- *   - Face/shoulder buttons send K_JOY* for bindable gameplay actions
- *   - Left stick: SE_MOUSE in menus (cursor), SE_JOYSTICK_AXIS in gameplay
- *   - Right stick: SE_JOYSTICK_AXIS in gameplay (mouselook via j_* cvars)
- *
- * Default gameplay binds are set in IN_Init:
- *   RT (R2) = attack, LT (L2) = zoom, Cross = jump, Circle = crouch,
- *   Square = prev weapon, Triangle = next weapon, L1/R1 = strafe
- *
- * Text input:
- *   Select + Triangle = toggle console (K_CONSOLE)
- *   Select + Cross (in-game) = open chat (messagemode)
- *   Triangle (in console or chat) = open PS3 on-screen keyboard
- */
+/* ps3_input.c -- DS3 controller input via libpad. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,14 +13,12 @@
 
 extern void ps3_log(const char *msg);
 
-/* Key_GetCatcher is declared in client.h but we avoid pulling that in */
+/* Avoid pulling in client.h just for these */
 extern int Key_GetCatcher(void);
-
-/* Key_SetBinding / Key_GetBinding for default binds */
 extern void Key_SetBinding(int keynum, const char *binding);
 extern char *Key_GetBinding(int keynum);
 
-/* Set a default bind only if the key is not already bound by q3config.cfg */
+/* Set a default bind only if the key is unbound (preserves q3config.cfg) */
 static void PS3_SetDefaultBind(int keynum, const char *binding)
 {
     char *existing = Key_GetBinding(keynum);
@@ -47,57 +26,30 @@ static void PS3_SetDefaultBind(int keynum, const char *binding)
         Key_SetBinding(keynum, binding);
 }
 
-/* ----------------------------------------------------------------
- * Constants
- * ---------------------------------------------------------------- */
+/* Constants */
 #define STICK_CENTER    128
 #define STICK_DEADZONE  30
 #define STICK_RANGE     (128 - STICK_DEADZONE)
 
-/* Mouse cursor speed for analog stick in menus (pixels per frame at full tilt).
- * Xbox 360 port uses >>13 on 16-bit range = ~4 px/frame.
- * We scale from our 0-98 range to similar values. */
+/* Pixels per frame at full stick deflection (menu cursor) */
 #define MENU_CURSOR_SPEED  5.0f
 
-/* Number of buttons we track */
-#define NUM_PS3_BUTTONS 18  /* 16 digital + 2 triggers */
+#define NUM_PS3_BUTTONS 18  /* 16 digital + 2 analog triggers */
 
-/* ----------------------------------------------------------------
- * State
- * ---------------------------------------------------------------- */
+/* State */
 static padInfo  ps3_pad_info;
 static padData  ps3_pad_data;
 static qboolean ps3_pad_connected = qfalse;
 static qboolean ps3_quit_pressed  = qfalse;
 
-/* Float accumulator for sub-pixel analog precision (menu cursor) */
-static float ps3_cursor_accum_x = 0.0f;
+static float ps3_cursor_accum_x = 0.0f;  /* sub-pixel remainder */
 static float ps3_cursor_accum_y = 0.0f;
-
-/* Previous button states for edge detection */
 static int ps3_btn_prev[NUM_PS3_BUTTONS];
-
-/* Previous axis values to avoid redundant events */
 static int ps3_axis_prev[4]; /* LX, LY, RX, RY */
 
-/* ----------------------------------------------------------------
- * Button-to-keycode mapping
- *
- * Following the Xbox 360 port pattern:
- *   - D-pad -> classic arrow keys (menu navigation)
- *   - Cross -> K_JOY1 (gameplay: jump) + K_ENTER in menus
- *   - Circle -> K_JOY2 (gameplay: crouch) + K_ESCAPE in menus
- *   - Start -> K_ESCAPE (open/close menu)
- *   - Select -> K_JOY11 (scoreboard)
- *   - Face/shoulder/trigger -> K_JOY* (bindable gameplay)
- *
- * Cross and Circle use dual mapping: they always send K_JOY*
- * for gameplay binds, and additionally send K_ENTER/K_ESCAPE
- * when the UI/cgame catcher is active. This is handled in
- * PS3_Input_Frame with special-case logic.
- * ---------------------------------------------------------------- */
-
-/* Primary keycode for each button (always sent) */
+/* Button-to-keycode mapping.
+ * Cross/Circle have dual mapping: always send K_JOY*, and additionally
+ * send K_ENTER/K_ESCAPE when UI is active (see PS3_Input_Frame). */
 static const int q3_key_map[NUM_PS3_BUTTONS] = {
     K_JOY1,             /*  0: Cross    -> jump (gameplay bind) */
     K_JOY2,             /*  1: Circle   -> crouch (gameplay bind) */
@@ -119,22 +71,16 @@ static const int q3_key_map[NUM_PS3_BUTTONS] = {
     K_JOY8,             /* 17: R2 analog (trigger-as-button) */
 };
 
-/* Button indices for special handling.
- * Cannot use BTN_CROSS/BTN_CIRCLE etc. -- those are padData bitfield names
- * defined in PSL1GHT's <io/pad.h>. */
+/* Button indices -- can't reuse BTN_CROSS etc., those are padData bitfield names */
 #define PS3_BTN_IDX_CROSS     0
 #define PS3_BTN_IDX_CIRCLE    1
 #define PS3_BTN_IDX_TRIANGLE  3
 #define PS3_BTN_IDX_SELECT   11
 
-/* Trigger threshold (0-255 analog range, same as Xbox 360 port) */
+/* Analog trigger threshold (0-255) */
 #define TRIGGER_THRESHOLD 30
 
-/*
- * Read all buttons from padData bitfields into an array.
- * Returns 1 (pressed) or 0 (released) for each.
- * Indices 16-17 are L2/R2 treated as digital via threshold.
- */
+/* Read all buttons into an array. Indices 16-17 are L2/R2 via analog threshold. */
 static void read_buttons(const padData *pd, int out[NUM_PS3_BUTTONS])
 {
     out[0]  = pd->BTN_CROSS;
@@ -154,24 +100,18 @@ static void read_buttons(const padData *pd, int out[NUM_PS3_BUTTONS])
     out[14] = pd->BTN_LEFT;
     out[15] = pd->BTN_RIGHT;
 
-    /* Analog triggers as digital buttons: OR of digital bitfield and
-     * analog pressure threshold. If pressure mode is not enabled by the
-     * system, PRE_L2/PRE_R2 are 0 and the digital bitfield carries the
-     * button state. If pressure mode IS enabled, the analog threshold
-     * provides earlier/smoother detection. */
+    /* OR digital bitfield with analog pressure so triggers work whether
+     * or not pressure mode is enabled (PRE_* are 0 when it's off). */
     out[16] = (out[6] || pd->PRE_L2 > TRIGGER_THRESHOLD) ? 1 : 0;
     out[17] = (out[7] || pd->PRE_R2 > TRIGGER_THRESHOLD) ? 1 : 0;
 }
 
-/* ----------------------------------------------------------------
- * Init / Shutdown
- * ---------------------------------------------------------------- */
+/* Init / Shutdown */
 void PS3_Input_Init(void)
 {
-    ioPadInit(7); /* max 7 controllers */
+    ioPadInit(7);
 
-    /* Enable pressure-sensitive mode for analog trigger values (PRE_L2/PRE_R2).
-     * Without this, PRE_* fields are always 0 and only the 1-bit BTN_* fields work. */
+    /* Enable pressure mode so PRE_L2/PRE_R2 are populated (otherwise always 0) */
     ioPadSetPressMode(0, PAD_PRESS_MODE_ON);
 
     memset(ps3_btn_prev, 0, sizeof(ps3_btn_prev));
@@ -188,21 +128,14 @@ void PS3_Input_Shutdown(void)
     ioPadEnd();
 }
 
-/* ----------------------------------------------------------------
- * Per-frame polling
- *
- * Called from main loop before Com_Frame.
- * Injects SE_KEY, SE_MOUSE, SE_JOYSTICK_AXIS events into Q3's
- * event queue via Com_QueueEvent.
- * ---------------------------------------------------------------- */
+/* Per-frame polling */
 void PS3_Input_Frame(void)
 {
     int btn_cur[NUM_PS3_BUTTONS];
     int i;
 
-    /* While the OSK overlay is active, the firmware owns the controller.
-     * Still poll pad data so we can track button state for edge detection,
-     * but don't send any events to Q3. */
+    /* While OSK is active, poll pad data for edge detection but don't
+     * send events -- firmware owns the controller. */
     if (PS3_OSK_IsActive()) {
         ioPadGetInfo(&ps3_pad_info);
         if (ps3_pad_info.status[0] && ioPadGetData(0, &ps3_pad_data) == 0) {
@@ -213,7 +146,6 @@ void PS3_Input_Frame(void)
 
     ioPadGetInfo(&ps3_pad_info);
 
-    /* Use first connected controller */
     if (ps3_pad_info.status[0] == 0) {
         ps3_pad_connected = qfalse;
         return;
@@ -223,40 +155,16 @@ void PS3_Input_Frame(void)
     if (ioPadGetData(0, &ps3_pad_data) != 0)
         return;
 
-    /* No new data since last poll */
     if (ps3_pad_data.len == 0)
         return;
 
-    /* ----------------------------------------------------------------
-     * Digital buttons -> SE_KEY events
-     *
-     * Edge detection: only send events on state change.
-     * Button indices 6-7 (L2/R2 digital bitfield) are skipped
-     * in favor of indices 16-17 (analog threshold) to avoid
-     * duplicate events.
-     *
-     * Cross and Circle use dual mapping:
-     *   - Always send their K_JOY* keycode (for gameplay binds)
-     *   - Additionally send K_ENTER / K_ESCAPE when UI is active
-     *     (so the Q3 menu system recognizes confirm/back)
-     *
-     * Triangle has context-sensitive behavior:
-     *   - Select + Triangle = toggle console (K_CONSOLE)
-     *   - Triangle in console or chat = open on-screen keyboard
-     *   - Triangle otherwise = normal K_JOY4 (weapnext)
-     *
-     * Cross has context-sensitive behavior:
-     *   - Select + Cross (in-game) = open chat (messagemode)
-     *   - Cross in menus = K_JOY1 + K_ENTER
-     *   - Cross otherwise = normal K_JOY1 (jump)
-     * ---------------------------------------------------------------- */
+    /* Digital buttons -> SE_KEY (edge-detected) */
     read_buttons(&ps3_pad_data, btn_cur);
 
     int catchers = Key_GetCatcher();
     int in_menu = (catchers & (KEYCATCH_UI | KEYCATCH_CGAME)) ? 1 : 0;
     int in_text = (catchers & (KEYCATCH_CONSOLE | KEYCATCH_MESSAGE)) ? 1 : 0;
 
-    /* Detect Triangle press edge (0 -> 1) for combo/OSK handling */
     int triangle_pressed = (btn_cur[PS3_BTN_IDX_TRIANGLE] &&
                             !ps3_btn_prev[PS3_BTN_IDX_TRIANGLE]);
     int triangle_consumed = 0;
@@ -276,7 +184,6 @@ void PS3_Input_Frame(void)
         }
     }
 
-    /* Detect Cross press edge (0 -> 1) for chat combo */
     int cross_pressed = (btn_cur[PS3_BTN_IDX_CROSS] &&
                          !ps3_btn_prev[PS3_BTN_IDX_CROSS]);
     int cross_consumed = 0;
@@ -288,32 +195,28 @@ void PS3_Input_Frame(void)
     }
 
     for (i = 0; i < NUM_PS3_BUTTONS; i++) {
-        /* Skip the digital L2/R2 bitfields; use analog threshold instead */
+        /* Skip digital L2/R2; analog threshold indices 16-17 handle them */
         if (i == 6 || i == 7) continue;
 
         int cur  = btn_cur[i] ? 1 : 0;
         int prev = ps3_btn_prev[i];
 
         if (cur != prev) {
-            /* If Triangle was consumed by console toggle or OSK, suppress
-             * only its normal K_JOY4 keycode for this press edge */
+            /* Triangle consumed by console toggle or OSK */
             if (i == PS3_BTN_IDX_TRIANGLE && triangle_consumed && cur) {
                 ps3_btn_prev[i] = cur;
                 continue;
             }
 
-            /* If Cross was consumed by chat combo, suppress its
-             * K_JOY1 and K_ENTER for this press edge */
+            /* Cross consumed by chat combo */
             if (i == PS3_BTN_IDX_CROSS && cross_consumed && cur) {
                 ps3_btn_prev[i] = cur;
                 continue;
             }
 
-            /* Primary keycode (always sent) */
             Com_QueueEvent(0, SE_KEY, q3_key_map[i],
                            cur ? qtrue : qfalse, 0, NULL);
 
-            /* Dual mapping for Cross/Circle in menu context */
             if (i == PS3_BTN_IDX_CROSS && in_menu) {
                 Com_QueueEvent(0, SE_KEY, K_ENTER,
                                cur ? qtrue : qfalse, 0, NULL);
@@ -326,51 +229,35 @@ void PS3_Input_Frame(void)
         ps3_btn_prev[i] = cur;
     }
 
-    /* ----------------------------------------------------------------
-     * Analog sticks
-     *
-     * Menu mode (KEYCATCH_UI or KEYCATCH_CGAME active):
-     *   Left stick -> SE_MOUSE (cursor movement, like Xbox 360 port)
-     *   Right stick -> ignored in menus
-     *
-     * Gameplay mode:
-     *   Left stick -> SE_JOYSTICK_AXIS 0,1 (strafe/forward via j_* cvars)
-     *   Right stick -> SE_JOYSTICK_AXIS 4,3 (yaw/pitch via j_* cvars)
-     *   Axis numbering matches Xbox 360 port: 0=LX, 1=LY, 3=RY, 4=RX
-     * ---------------------------------------------------------------- */
+    /* Analog sticks */
     {
         int lx_raw = (int)ps3_pad_data.ANA_L_H - STICK_CENTER;
         int ly_raw = (int)ps3_pad_data.ANA_L_V - STICK_CENTER;
         int rx_raw = (int)ps3_pad_data.ANA_R_H - STICK_CENTER;
         int ry_raw = (int)ps3_pad_data.ANA_R_V - STICK_CENTER;
 
-        /* Deadzone */
         if (abs(lx_raw) < STICK_DEADZONE) lx_raw = 0;
         if (abs(ly_raw) < STICK_DEADZONE) ly_raw = 0;
         if (abs(rx_raw) < STICK_DEADZONE) rx_raw = 0;
         if (abs(ry_raw) < STICK_DEADZONE) ry_raw = 0;
 
-        /* Reuse catchers from button section above */
         if (in_menu) {
-            /* ----- Menu mode: left stick -> mouse cursor ----- */
+            /* Left stick -> mouse cursor */
             if (lx_raw != 0 || ly_raw != 0) {
                 float fx = (float)lx_raw / (float)STICK_RANGE;
                 float fy = (float)ly_raw / (float)STICK_RANGE;
 
-                /* Clamp */
                 if (fx >  1.0f) fx =  1.0f;
                 if (fx < -1.0f) fx = -1.0f;
                 if (fy >  1.0f) fy =  1.0f;
                 if (fy < -1.0f) fy = -1.0f;
 
-                /* Non-linear response: square the input for fine control
-                 * at small deflections, fast movement at full tilt */
+                /* Squared response curve for fine control at small deflections */
                 float ax = fx * fx * MENU_CURSOR_SPEED;
                 float ay = fy * fy * MENU_CURSOR_SPEED;
                 if (fx < 0) ax = -ax;
                 if (fy < 0) ay = -ay;
 
-                /* Accumulate sub-pixel remainder */
                 ps3_cursor_accum_x += ax;
                 ps3_cursor_accum_y += ay;
 
@@ -383,15 +270,13 @@ void PS3_Input_Frame(void)
                     Com_QueueEvent(0, SE_MOUSE, dx, dy, 0, NULL);
             }
         } else {
-            /* ----- Gameplay mode: both sticks -> joystick axes ----- */
-
-            /* Scale PS3 stick range (0-98 after deadzone) to Q3 range (-32768..32767) */
+            /* Both sticks -> joystick axes, scaled to Q3's +/-32K range */
             int jlx = lx_raw * 256;
             int jly = ly_raw * 256;  /* positive = down = forward */
             int jrx = rx_raw * 256;
             int jry = ry_raw * 256;
 
-            /* Only send events on change (like Xbox 360 port) */
+            /* Only send on change */
             if (jlx != ps3_axis_prev[0]) {
                 Com_QueueEvent(0, SE_JOYSTICK_AXIS, 0, jlx, 0, NULL);
                 ps3_axis_prev[0] = jlx;
@@ -422,41 +307,29 @@ qboolean PS3_Input_QuitPressed(void)
     return ps3_quit_pressed;
 }
 
-/* ----------------------------------------------------------------
- * ioQ3 input interface
- * ---------------------------------------------------------------- */
+/* ioQ3 input interface */
 void IN_Init(void *windowData)
 {
     (void)windowData;
 
-    /* Set default controller binds for gameplay.
-     * These can be overridden by the user via the console or q3config.cfg.
-     * Follows the Xbox 360 port layout adapted for DualShock 3. */
-
-    /* Face buttons */
+    /* Default DS3 binds (overridable via console / q3config.cfg) */
     PS3_SetDefaultBind(K_JOY1,  "+moveup");      /* Cross    = jump */
     PS3_SetDefaultBind(K_JOY2,  "+movedown");    /* Circle   = crouch */
     PS3_SetDefaultBind(K_JOY3,  "weapprev");     /* Square   = prev weapon */
     PS3_SetDefaultBind(K_JOY4,  "weapnext");     /* Triangle = next weapon */
 
-    /* Shoulder buttons */
     PS3_SetDefaultBind(K_JOY5,  "+moveleft");    /* L1 = strafe left */
     PS3_SetDefaultBind(K_JOY6,  "+moveright");   /* R1 = strafe right */
 
-    /* Triggers */
     PS3_SetDefaultBind(K_JOY7,  "+zoom");        /* L2 = zoom */
     PS3_SetDefaultBind(K_JOY8,  "+attack");      /* R2 = fire */
 
-    /* Stick clicks */
     PS3_SetDefaultBind(K_JOY9,  "+speed");       /* L3 = run/walk toggle */
     PS3_SetDefaultBind(K_JOY10, "+scores");      /* R3 = scoreboard */
 
-    /* Select */
     PS3_SetDefaultBind(K_JOY11, "+scores");      /* Select = scoreboard */
 
-    /* Joystick axis cvars: match Xbox 360 port axis layout.
-     * These should already be set from the command line, but
-     * ensure they're correct for twin-stick FPS. */
+    /* Axis cvars for twin-stick FPS (matches Xbox 360 axis numbering) */
     Cvar_Set("in_joystick", "1");
     Cvar_Set("in_joystickUseAnalog", "1");
     Cvar_Set("j_pitch_axis", "3");        /* right stick Y */
@@ -473,7 +346,7 @@ void IN_Init(void *windowData)
 
 void IN_Frame(void)
 {
-    /* Polling done in PS3_Input_Frame from main loop */
+    /* Polling is done in PS3_Input_Frame */
 }
 
 void IN_Shutdown(void)

@@ -1,8 +1,4 @@
-/*
- * ioquake3-PS3: sys/ps3_main.c
- * PS3 platform entry point.
- * Initialises RSX, mounts filesystem, then hands off to ioQ3's Com_Init.
- */
+/* ps3_main.c -- PS3 entry point. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,29 +15,23 @@
 #include <sys/process.h>
 #include <net/net.h>
 
-/* ioQuake3 qcommon interface */
 #include "qcommon/q_shared.h"
 #include "qcommon/qcommon.h"
 
-/* PS3-specific subsystems */
 #include "../sys/ps3_glimp.h"
 #include "../input/ps3_input.h"
 #include "../input/ps3_osk.h"
 #include "../audio/ps3_snd.h"
 
-/* Renderer interface for pre-init */
 #include "GL/gl.h"
 #include "renderercommon/tr_types.h"
 #include "renderercommon/tr_public.h"
 extern refexport_t *GetRefAPI(int apiVersion, refimport_t *rimp);
 
-/* PSL1GHT process parameters:
- * Priority 1001 (default), stack 1 MB, heap 128 MB */
+/* Priority 1001 (default), stack 1 MB */
 SYS_PROCESS_PARAM(1001, 0x100000);
 
-/* --------------------------------------------------------------------------
- * XMB system callback -- handles quit request from PS button
- * -------------------------------------------------------------------------- */
+/* XMB system callback */
 static volatile int ps3_running = 1;
 
 static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
@@ -66,11 +56,7 @@ static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
     }
 }
 
-/* --------------------------------------------------------------------------
- * Debug logging -- file output to PS3 HDD
- *
- * File:  /dev_hdd0/game/IOQ3PS300/USRDIR/log.txt  (always active)
- * -------------------------------------------------------------------------- */
+/* Debug logging */
 static const char *ps3_log_path = "/dev_hdd0/game/IOQ3PS300/USRDIR/log.txt";
 
 void ps3_log(const char *msg)
@@ -85,24 +71,12 @@ void ps3_log(const char *msg)
     ps3_log(_lb); \
 } while (0)
 
-/* --------------------------------------------------------------------------
- * Filesystem setup
- *
- * PS3 homebrew installed via PKG lands in:
- *   /dev_hdd0/game/TITLEID/USRDIR/
- *
- * Game data (baseq3/pak0.pk3 etc.) should be placed in:
- *   /dev_hdd0/game/IOQ3PS300/USRDIR/baseq3/
- *
- * Alternatively, data can be on USB:
- *   /dev_usb000/quake3/baseq3/
- * -------------------------------------------------------------------------- */
+/* Filesystem setup -- tries HDD first, then USB */
 static const char *ps3_base_path  = "/dev_hdd0/game/IOQ3PS300/USRDIR";
 static const char *ps3_usb_path   = "/dev_usb000/quake3";
 
 static qboolean PS3_SetupFilesystem(void)
 {
-    /* Check if game data exists on HDD first */
     FILE *f = fopen("/dev_hdd0/game/IOQ3PS300/USRDIR/baseq3/pak0.pk3", "rb");
     if (f) {
         fclose(f);
@@ -126,23 +100,18 @@ static qboolean PS3_SetupFilesystem(void)
     return qfalse;
 }
 
-/* --------------------------------------------------------------------------
- * Main
- * -------------------------------------------------------------------------- */
+/* Main */
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
-    /* Register XMB quit callback */
     sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, ps3_sysutil_callback, NULL);
 
     printf("ioquake3-PS3 starting...\n");
 
-    /* Truncate log from previous run */
     { FILE *f = fopen(ps3_log_path, "w"); if (f) fclose(f); }
     PS3LOG("main() reached");
 
-    /* Filesystem -- must succeed before any file I/O */
     if (!PS3_SetupFilesystem()) {
         printf("FATAL: could not find game data. Halting.\n");
         PS3LOG("FATAL: filesystem setup failed");
@@ -154,32 +123,26 @@ int main(int argc, char *argv[])
     }
     PS3LOG("Filesystem ready");
 
-    /* Input (DualShock 3) */
     PS3_Input_Init();
     printf("[ps3] Input OK\n");
     PS3LOG("Input init done");
 
-    /* On-screen keyboard (4 MB memory container) */
     PS3_OSK_Init();
     PS3LOG("OSK init done");
 
-    /* Network -- PS3 has BSD sockets via PSL1GHT.
-     * Network init is simpler than Wii; the system handles DHCP/WiFi. */
-    /* netInitialize() is called later by NET_Init via net_ip.c */
+    /* netInitialize() is called later by NET_Init */
     PS3LOG("Network deferred to NET_Init");
 
-    /* Audio */
     PS3_Snd_Init();
     printf("[ps3] Audio OK\n");
     PS3LOG("Audio init done");
 
-    /* RSX / display init -- must be up before Com_Init because
-     * Com_Init -> CL_Init -> BeginRegistration -> BeginFrame fires immediately */
+    /* RSX must be up before Com_Init -- CL_Init triggers BeginFrame immediately */
     PS3_RSX_Init();
     printf("[ps3] RSX init done\n");
     PS3LOG("RSX init done");
 
-    /* Log memory layout for BSS corruption diagnosis */
+    /* BSS corruption diagnosis */
     {
         extern void *ps3gl_ptr;  /* actually ps3gl_state_t* but avoid header dep */
         extern gcmContextData *ps3gl_get_ctx(void);
@@ -187,14 +150,12 @@ int main(int argc, char *argv[])
                ps3gl_ptr, &ps3gl_ptr, (void*)ps3gl_get_ctx());
     }
 
-    /* Pre-initialize renderer export table before Com_Init so that
-     * Com_Printf -> SCR_UpdateScreen -> re.BeginFrame doesn't crash */
+    /* Pre-init renderer so Com_Printf -> SCR_UpdateScreen doesn't crash */
     extern refexport_t re;
     refexport_t *ref = GetRefAPI(REF_API_VERSION, NULL);
     if (ref) re = *ref;
     PS3LOG("GetRefAPI done");
 
-    /* Build command line for Com_Init */
     static char cmdline[2048];
     snprintf(cmdline, sizeof(cmdline),
         "+set fs_basepath %s "
@@ -204,12 +165,12 @@ int main(int argc, char *argv[])
         "+set fs_game baseq3 "
         "+set com_hunkMegs 80 "
         "+set com_zoneMegs 24 "
-        /* --- display --- */
+        /* display */
         "+set r_mode -1 "
         "+set r_customwidth 1280 "
         "+set r_customheight 720 "
         "+set r_picmip 1 "
-        /* --- rendering quality --- */
+        /* rendering quality */
         "+set r_dynamic 1 "
         "+set r_flares 0 "
         "+set r_fastsky 0 "
@@ -218,13 +179,13 @@ int main(int argc, char *argv[])
         "+set r_simpleMipMaps 1 "
         "+set r_drawSun 0 "
         "+set r_primitives 2 "
-        /* --- frame rate: 0 = no software limiter, vsync paces us at 60 Hz --- */
+        /* 0 = no software limiter; vsync paces at 60 Hz */
         "+set com_maxfps 0 "
         "+set pmove_fixed 1 "
-        /* --- audio --- */
+        /* audio */
         "+set s_khz 48 "
         "+set com_soundMegs 8 "
-        /* --- server / misc --- */
+        /* server / misc */
         "+set sv_pure 0 "
         "+set sv_maxclients 8 "
         "+set in_joystick 1 "
@@ -240,7 +201,7 @@ int main(int argc, char *argv[])
         ps3_base_path, ps3_base_path
     );
 
-    /* Create qkey file (2048 bytes) if missing */
+    /* Create qkey file if missing */
     {
         char qkeypath[256];
         snprintf(qkeypath, sizeof(qkeypath), "%s/qkey", ps3_base_path);
@@ -259,7 +220,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Verify ps3gl_ptr before Com_Init */
+    /* BSS corruption check */
     {
         extern void *ps3gl_ptr;
         PS3LOG("pre-ComInit: ps3gl_ptr=%p", ps3gl_ptr);
@@ -271,9 +232,7 @@ int main(int argc, char *argv[])
     printf("[ps3] Com_Init done\n");
     PS3LOG("Com_Init done");
 
-    /* Initialize PSL1GHT network stack before ioq3's NET_Init.
-     * Must load the net module and call netInitialize()/netCtlInit()
-     * before any socket operations. */
+    /* PSL1GHT net module must be loaded before ioq3's NET_Init */
     {
         s32 mod_ret = sysModuleLoad(SYSMODULE_NET);
         PS3LOG("sysModuleLoad(NET) returned %d", (int)mod_ret);
@@ -284,7 +243,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Sanity check: RSX context pointer should survive Com_Init */
+    /* BSS corruption check: RSX context should survive Com_Init */
     {
         extern gcmContextData *ps3gl_get_ctx(void);
         PS3LOG("post-ComInit ctx check: ps3gl_get_ctx=%p", (void*)ps3gl_get_ctx());
@@ -294,7 +253,6 @@ int main(int argc, char *argv[])
     printf("[ps3] NET_Init done\n");
     PS3LOG("NET_Init done");
 
-    /* Main loop */
     PS3LOG("Entering main loop");
     while (ps3_running) {
         sysUtilCheckCallback();
@@ -308,7 +266,6 @@ int main(int argc, char *argv[])
         Com_Frame();
     }
 
-    /* Cleanup */
     PS3_OSK_Shutdown();
     PS3_Snd_Shutdown();
     PS3_Input_Shutdown();
