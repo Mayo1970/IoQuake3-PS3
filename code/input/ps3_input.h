@@ -7,5 +7,6 @@ void     PS3_Input_Init(void);
 void     PS3_Input_Shutdown(void);
 void     PS3_Input_Frame(void);
 qboolean PS3_Input_QuitPressed(void);
+void     PS3_SetRumble(uint8_t large, uint8_t small_motor, int durationMs);
 
 #endif /* PS3_INPUT_H */

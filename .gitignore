@@ -1,73 +1,73 @@
-# Prerequisites
+# Build artifacts
 *.d
-
-# Object files
 *.o
 *.ko
 *.obj
 *.elf
 *.current
-
-# Linker output
 *.ilk
 *.map
 *.exp
-
-# Precompiled Headers
 *.gch
 *.pch
-
-# Libraries
 *.lib
 *.a
 *.la
 *.lo
-
-# Shared objects (inc. Windows DLLs)
 *.dll
 *.so
 *.so.*
 *.dylib
-
-# Executables
 *.exe
 *.out
 *.app
 *.i*86
 *.x86_64
 *.hex
-
-# Debug files
 *.dSYM/
 *.su
 *.idb
 *.pdb
-
-# Kernel Module Compile Results
 *.mod*
 *.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
-
-# debug information files
 *.dwo
 
-# PS3-specific build artifacts
+# PS3 build outputs
 *.self
 *.bin
 *.pkg
-
-# Upstream ioq3 source (sibling clone, not part of this repo)
-ioq3/
+build/
+build_oa/
+build_ta/
+build_log.txt
 
 # Python bytecode
 __pycache__/
 *.pyc
 
-build/
-build_log.txt
+# Game data (user-provided; never commit)
+baseq3/
+baseoa/
+missionpack/
+*.pk3
+qkey
+q3key
+
+# Legacy patch pipeline
+legacy_patches/
+
+# AI assistant / editor cruft
 .claude/
+.cursor/
+.aider*
 CLAUDE.md
+AGENTS.md
+ONBOARDING.md
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/

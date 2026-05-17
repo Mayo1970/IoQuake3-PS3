@@ -16,13 +16,15 @@
 #include "../audio/ps3_snd.h"
 
 extern void ps3_log(const char *msg);
+extern void S_Base_StartBackgroundTrack(const char *intro, const char *loop);
+extern void S_Base_StopBackgroundTrack(void);
 
-/* 4096 sample-pairs (~85 ms at 48 kHz). Mixer writes PCM, audio thread reads. */
+/* Ring buffer: ~85 ms at 48 kHz. Mixer writes PCM, audio thread reads. */
 #define PS3_AUDIO_RATE       48000
 #define PS3_AUDIO_CHANNELS   2
 #define PS3_AUDIO_BITS       16
-#define PS3_AUDIO_SAMPLES    4096   /* sample-pairs in ring buffer */
-#define PS3_AUDIO_BLOCK_SIZE 256    /* PS3 hardware block size (samples per ch) */
+#define PS3_AUDIO_SAMPLES    4096
+#define PS3_AUDIO_BLOCK_SIZE 256    /* PS3 hardware block size */
 
 static audioPortConfig  ps3_audio_config;
 static u32              ps3_audio_port = 0;
@@ -35,7 +37,7 @@ static volatile int      ps3_audio_quit = 0;
 static byte ps3_audio_buffer[PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS * (PS3_AUDIO_BITS / 8)];
 static volatile u32 ps3_audio_blocks_written = 0;
 
-/* Audio thread: converts 16-bit PCM blocks to 32-bit float for the audio port. */
+/* Converts s16 PCM blocks to f32 for the hardware port. */
 static void ps3_audio_thread_func(void *arg)
 {
     (void)arg;
@@ -46,7 +48,6 @@ static void ps3_audio_thread_func(void *arg)
     int diag_count = 0;
     int timeout_count = 0;
 
-    /* Memory-mapped port config pointers, valid for port lifetime */
     volatile u64 *readIndexPtr = (volatile u64 *)((u64)ps3_audio_config.readIndex);
     f32 *dataStart = (f32 *)((u64)ps3_audio_config.audioDataStart);
     u64 numBlocks = ps3_audio_config.numBlocks;
@@ -81,13 +82,11 @@ static void ps3_audio_thread_func(void *arg)
 
         if (ps3_audio_quit) break;
 
-        /* Current block from live readIndex */
         u64 currentBlock = *readIndexPtr;
         u32 writeBlock = (u32)((currentBlock + 1) % numBlocks);
 
         f32 *dst = dataStart + writeBlock * PS3_AUDIO_CHANNELS * PS3_AUDIO_BLOCK_SIZE;
 
-        /* Ring buffer read position */
         u32 ring_pos = (ps3_audio_blocks_written * (u32)block_samples) % (u32)total_interleaved;
 
         for (int i = 0; i < block_samples; i++) {
@@ -113,7 +112,6 @@ static void ps3_audio_thread_func(void *arg)
     sysThreadExit(0);
 }
 
-/* SNDDMA interface */
 qboolean SNDDMA_Init(void)
 {
     audioPortParam params;
@@ -121,7 +119,7 @@ qboolean SNDDMA_Init(void)
 
     ps3_log("SNDDMA_Init: loading SYSMODULE_AUDIO");
     ret = sysModuleLoad(SYSMODULE_AUDIO);
-    if (ret != 0 && ret != 0x8001112E) { /* 0x8001112E = already loaded */
+    if (ret != 0 && ret != 0x8001112E) { /* already loaded */
         char buf[64];
         snprintf(buf, sizeof(buf), "SNDDMA_Init: sysModuleLoad(AUDIO) failed: 0x%08x", (unsigned)ret);
         ps3_log(buf);
@@ -168,7 +166,6 @@ qboolean SNDDMA_Init(void)
         ps3_log(buf);
     }
 
-    /* Event queue for audio server notifications */
     ret = audioCreateNotifyEventQueue(&ps3_audio_eventQ, &ps3_audio_queueKey);
     if (ret != 0) {
         char buf[64];
@@ -200,12 +197,11 @@ qboolean SNDDMA_Init(void)
         return qfalse;
     }
 
-    /* dma_t for ioQ3's mixer */
     memset(&dma, 0, sizeof(dma));
     dma.channels         = PS3_AUDIO_CHANNELS;
     dma.samples          = PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS;
     dma.fullsamples      = PS3_AUDIO_SAMPLES;
-    dma.submission_chunk = PS3_AUDIO_SAMPLES / 4; /* 1024 pairs, ~21ms lead */
+    dma.submission_chunk = PS3_AUDIO_SAMPLES / 4;
     dma.samplebits       = PS3_AUDIO_BITS;
     dma.speed            = PS3_AUDIO_RATE;
     dma.buffer           = ps3_audio_buffer;
@@ -218,10 +214,7 @@ qboolean SNDDMA_Init(void)
 
     static char audio_thread_name[] = "AudioThread";
     ret = sysThreadCreate(&ps3_audio_thread, ps3_audio_thread_func, NULL,
-                          1001, /* priority (slightly lower than main thread) */
-                          0x4000, /* 16 KB stack */
-                          THREAD_JOINABLE,
-                          audio_thread_name);
+                          1001, 0x4000, THREAD_JOINABLE, audio_thread_name);
     if (ret != 0) {
         char buf[64];
         snprintf(buf, sizeof(buf), "SNDDMA_Init: sysThreadCreate failed: 0x%08x", (unsigned)ret);
@@ -275,15 +268,15 @@ void SNDDMA_Shutdown(void)
 void SNDDMA_BeginPainting(void) {}
 void SNDDMA_Submit(void) {}
 
-/* VoIP capture stubs */
 void SNDDMA_StartCapture(void) {}
 int  SNDDMA_AvailableCaptureSamples(void) { return 0; }
 void SNDDMA_Capture(int samples, byte *data) { (void)samples; (void)data; }
 void SNDDMA_StopCapture(void) {}
 void SNDDMA_MasterGain(float val) { (void)val; }
 
-/* S_Init dispatch -- bypasses snd_main.c, forwards to S_Base_* directly. */
+/* snd_main.c is not compiled on PS3; dispatch goes straight to S_Base_*. */
 extern void S_Update_(void);
+extern void S_Base_Update(void);
 extern void S_Base_Shutdown(void);
 extern void S_Base_StartSound(vec3_t origin, int entityNum, int entchannel, sfxHandle_t sfx);
 extern void S_Base_StartLocalSound(sfxHandle_t sfx, int channelNum);
@@ -329,7 +322,7 @@ void S_Shutdown(void)
     Com_Memset(&s_snd_if, 0, sizeof(s_snd_if));
 }
 
-void        S_Update(void)                                             { S_Update_(); }
+void        S_Update(void)                                             { S_Base_Update(); }
 void        S_BeginRegistration(void)                                  { S_Base_BeginRegistration(); }
 sfxHandle_t S_RegisterSound(const char *n, qboolean comp)             { return S_Base_RegisterSound(n, comp); }
 void        S_StartSound(vec3_t o,int n,int c,sfxHandle_t h)          { S_Base_StartSound(o,n,c,h); }
@@ -343,12 +336,12 @@ void        S_UpdateEntityPosition(int n,const vec3_t o)              { S_Base_U
 void        S_Respatialize(int n,const vec3_t o,vec3_t ax[3],int i)   { S_Base_Respatialize(n,o,ax,i); }
 void        S_ClearSoundBuffer(void)                                   { S_Base_ClearSoundBuffer(); }
 void        S_DisableSounds(void)                                      { S_Base_DisableSounds(); }
-void        S_StartBackgroundTrack(const char *i,const char *l)       { (void)i;(void)l; }
-void        S_StopBackgroundTrack(void)                                { }
+void        S_StartBackgroundTrack(const char *i,const char *l)       { S_Base_StartBackgroundTrack(i,l); }
+void        S_StopBackgroundTrack(void)                                { S_Base_StopBackgroundTrack(); }
 void        S_RawSamples(int stream,int samples,int rate,int width,int channels,const byte *d,float v,int e)
                                                                        { S_Base_RawSamples(stream,samples,rate,width,channels,d,v,e); }
 
-/* Init/shutdown called from ps3_main.c. Actual audio init in SNDDMA_Init. */
+/* Audio is brought up lazily by SNDDMA_Init via S_Init. */
 void PS3_Snd_Init(void) {}
 
 void PS3_Snd_Shutdown(void)

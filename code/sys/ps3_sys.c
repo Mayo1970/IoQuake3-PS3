@@ -1,10 +1,5 @@
-/*
- * ioquake3-PS3: sys/ps3_sys.c
- *
- * Implements the complete Sys_* interface required by ioQ3 for the PS3
- * platform.  This file replaces upstream sys_main.c + sys_unix.c.
- * Also provides CON_*, mmap/munmap, fill_fopen_filefunc, and linker wraps.
- */
+/* ps3_sys.c -- Sys_* / CON_* / mmap / minizip / linker wraps for PS3.
+ * Replaces upstream sys_main.c + sys_unix.c. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +15,7 @@
 
 #include <ppu-types.h>
 #include <sys/systime.h>
+#include <sys/memory.h>
 #include <sysutil/sysutil.h>
 
 #include "qcommon/q_shared.h"
@@ -27,29 +23,22 @@
 #include "sys/sys_local.h"
 #include "keycodes.h"
 
-/* PS3-specific subsystems */
 #include "../sys/ps3_glimp.h"
 #include "../input/ps3_input.h"
 #include "../audio/ps3_snd.h"
 
-/* Renderer public interface */
 #include "renderercommon/tr_types.h"
 #include "renderercommon/tr_public.h"
 
-/* External logging from ps3_main.c */
 extern void ps3_log(const char *msg);
 
-/* Forward declarations */
 void Sys_SetFloatEnv(void);
 
-/* MAX_FOUND_FILES -- defined in upstream sys_unix.c, not in a header */
+/* MAX_FOUND_FILES is defined in upstream sys_unix.c, not in any header. */
 #ifndef MAX_FOUND_FILES
 #define MAX_FOUND_FILES 0x1000
 #endif
 
-/* ==================================================================
- * Binary path / install path
- * ================================================================== */
 static char binaryPath[MAX_OSPATH]  = { 0 };
 static char installPath[MAX_OSPATH] = { 0 };
 
@@ -80,10 +69,7 @@ char *Sys_DefaultAppPath(void)
     return Sys_BinaryPath();
 }
 
-/* ==================================================================
- * Filesystem paths -- all point to USRDIR on PS3 HDD
- * ================================================================== */
-static const char *ps3_basepath = "/dev_hdd0/game/IOQ3PS300/USRDIR";
+static const char *ps3_basepath = "/dev_hdd0/data/ioq3";
 
 char *Sys_Cwd(void)
 {
@@ -99,10 +85,8 @@ qboolean Sys_Mkdir(const char *path)
     if (mkdir(path, 0777) == 0)
         return qtrue;
 
-    /* mkdir failed -- check if directory already exists.
-     * PSL1GHT's mkdir on PS3 mount points (e.g. /dev_hdd0) may return
-     * EACCES or EPERM instead of EEXIST, so a simple errno check is
-     * not sufficient. Fall back to stat(). */
+    /* PSL1GHT's mkdir on mount points returns EACCES/EPERM instead of
+     * EEXIST when the dir already exists, so fall back to stat(). */
     if (errno == EEXIST)
         return qtrue;
 
@@ -121,7 +105,7 @@ FILE *Sys_FOpen(const char *ospath, const char *mode)
 FILE *Sys_Mkfifo(const char *ospath)
 {
     (void)ospath;
-    return NULL; /* no FIFOs on PS3 */
+    return NULL;
 }
 
 char *Sys_DefaultHomePath(void)
@@ -137,9 +121,6 @@ char *Sys_SteamPath(void)          { return ""; }
 char *Sys_GogPath(void)            { return ""; }
 char *Sys_MicrosoftStorePath(void) { return ""; }
 
-/* ==================================================================
- * Time
- * ================================================================== */
 static u64 ps3_time_base = 0;
 
 int Sys_Milliseconds(void)
@@ -163,34 +144,11 @@ int Sys_FileTime(char *path)
     return (int)st.st_mtime;
 }
 
-/* ==================================================================
- * Process management
- * ================================================================== */
-int Sys_PID(void)
-{
-    return 1; /* single process on PS3 */
-}
+int Sys_PID(void) { return 1; }
+qboolean Sys_PIDIsRunning(int pid) { (void)pid; return qtrue; }
+void Sys_InitPIDFile(const char *gamedir) { (void)gamedir; }
+void Sys_RemovePIDFile(const char *gamedir) { (void)gamedir; }
 
-qboolean Sys_PIDIsRunning(int pid)
-{
-    (void)pid;
-    return qtrue;
-}
-
-void Sys_InitPIDFile(const char *gamedir)
-{
-    (void)gamedir;
-    /* No PID files on PS3 */
-}
-
-void Sys_RemovePIDFile(const char *gamedir)
-{
-    (void)gamedir;
-}
-
-/* ==================================================================
- * Path utilities
- * ================================================================== */
 const char *Sys_Basename(char *path)
 {
     char *p = strrchr(path, '/');
@@ -213,9 +171,6 @@ const char *Sys_Dirname(char *path)
     return dir;
 }
 
-/* ==================================================================
- * Directory listing
- * ================================================================== */
 void Sys_ListFilteredFiles(const char *basedir, char *subdirs,
                            char *filter, char **list, int *numfiles)
 {
@@ -350,9 +305,6 @@ void Sys_FreeFileList(char **list)
     Z_Free(list);
 }
 
-/* ==================================================================
- * Error / Print / Dialog
- * ================================================================== */
 void Sys_Print(const char *msg)
 {
     fputs(msg, stdout);
@@ -389,7 +341,6 @@ void Sys_Quit(void)
 
 void Sys_AnsiColorPrint(const char *msg)
 {
-    /* No ANSI terminals on PS3; just print the raw text */
     Sys_Print(msg);
 }
 
@@ -407,9 +358,6 @@ void Sys_ErrorDialog(const char *error)
     ps3_log(error);
 }
 
-/* ==================================================================
- * Random bytes
- * ================================================================== */
 qboolean Sys_RandomBytes(byte *string, int len)
 {
     struct timeval tv;
@@ -422,40 +370,102 @@ qboolean Sys_RandomBytes(byte *string, int len)
     return qtrue;
 }
 
-/* ==================================================================
- * User info
- * ================================================================== */
+/* Local XMB user (works offline) -> PSN nickname -> "player".
+ * NICKNAME (0x113) needs sign-in; CURRENT_USERNAME (0x131) is always available.
+ * Each param requires its own buffer size or sysUtil returns INVALID_VALUE. */
 char *Sys_GetCurrentUser(void)
 {
-    return "player";
+    static char username[SYSUTIL_SYSTEMPARAM_NICKNAME_SIZE];
+    static int  resolved = 0;
+
+    if (!resolved) {
+        char line[200];
+        int  ret_u, ret_n;
+
+        resolved = 1;
+        username[0] = '\0';
+
+        ret_u = sysUtilGetSystemParamString(
+            SYSUTIL_SYSTEMPARAM_ID_CURRENT_USERNAME,
+            username, SYSUTIL_SYSTEMPARAM_CURRENT_USERNAME_SIZE);
+        username[SYSUTIL_SYSTEMPARAM_CURRENT_USERNAME_SIZE - 1] = '\0';
+        snprintf(line, sizeof(line),
+                 "[user] CURRENT_USERNAME(0x131) ret=%d name='%s'",
+                 ret_u, username);
+        ps3_log(line);
+
+        ret_n = 0;
+        if (ret_u != 0 || username[0] == '\0') {
+            username[0] = '\0';
+            ret_n = sysUtilGetSystemParamString(
+                SYSUTIL_SYSTEMPARAM_ID_NICKNAME,
+                username, SYSUTIL_SYSTEMPARAM_NICKNAME_SIZE);
+            username[SYSUTIL_SYSTEMPARAM_NICKNAME_SIZE - 1] = '\0';
+            snprintf(line, sizeof(line),
+                     "[user] NICKNAME(0x113) ret=%d name='%s'",
+                     ret_n, username);
+            ps3_log(line);
+            if (ret_n != 0)
+                username[0] = '\0';
+        }
+    }
+
+    if (username[0] == '\0')
+        return "player";
+    return username;
 }
 
-/* ==================================================================
- * CPU features
- * ================================================================== */
 cpuFeatures_t Sys_GetProcessorFeatures(void)
 {
     return (cpuFeatures_t)CF_ALTIVEC;
 }
 
-/* ==================================================================
- * Platform init / exit / misc
- * ================================================================== */
-void Sys_PlatformInit(void)
+/* PSL1GHT has no free-memory syscall; create+destroy is the only probe. */
+static unsigned ps3_probe_free_user_mem_mb(void)
 {
-    Sys_SetFloatEnv();
+    unsigned lo = 1, hi = 200, best = 0;
+
+    while (lo <= hi) {
+        unsigned mid = (lo + hi) / 2;
+        sys_mem_container_t c;
+        size_t sz = (size_t)mid * 1024u * 1024u;
+
+        if (sysMemContainerCreate(&c, sz) == 0) {
+            sysMemContainerDestroy(c);
+            best = mid;
+            lo = mid + 1;
+        } else {
+            if (mid == 0) break;
+            hi = mid - 1;
+        }
+    }
+    return best;
 }
 
-void Sys_PlatformExit(void)
+void Sys_PlatformInit(void)
 {
-    /* Cleanup handled in ps3_main.c */
+    char line[160];
+    unsigned free_mb;
+
+    Sys_SetFloatEnv();
+
+    /* Real ceiling before Com_InitHunkMemory; raise DEF_COMHUNKMEGS only if
+     * this stays comfortably above hunk+zone. */
+    free_mb = ps3_probe_free_user_mem_mb();
+    snprintf(line, sizeof(line),
+             "[mem] free user memory at Sys_PlatformInit: ~%u MB "
+             "(current DEF_COMHUNKMEGS=%d, DEF_COMZONEMEGS=%d)",
+             free_mb, DEF_COMHUNKMEGS, DEF_COMZONEMEGS);
+    ps3_log(line);
+    printf("%s\n", line);
 }
+
+void Sys_PlatformExit(void) {}
 
 void Sys_SetFloatEnv(void)
 {
-    /* Ensure FPU is in a known state */
 #ifdef __GNUC__
-    /* PPC: set FPSCR to default (round-to-nearest, no exceptions) */
+    /* PPC FPSCR -> round-to-nearest, no exceptions. */
     union { unsigned long long u; double d; } fpscr;
     fpscr.u = 0;
     __asm__ __volatile__("mtfsf 255,%0" :: "f"(fpscr.d));
@@ -481,10 +491,7 @@ void Sys_Sleep(int msec)
     usleep(msec * 1000);
 }
 
-qboolean Sys_SetMaxFileLimit(void)
-{
-    return qtrue; /* not applicable on PS3 */
-}
+qboolean Sys_SetMaxFileLimit(void) { return qtrue; }
 
 qboolean Sys_OpenFolderInPlatformFileManager(const char *path)
 {
@@ -498,38 +505,26 @@ qboolean Sys_OpenFolderInFileManager(const char *path, qboolean create)
     return qfalse;
 }
 
-/* ==================================================================
- * Sys_Init -- called from Com_Init
- * ================================================================== */
-void Sys_In_Restart_f(void)
-{
-    /* No input restart on PS3 */
-}
+void Sys_In_Restart_f(void) {}
 
 void Sys_Init(void)
 {
+    const char *user = Sys_GetCurrentUser();
+
     Cmd_AddCommand("in_restart", Sys_In_Restart_f);
 
-    Cvar_Set("username", Sys_GetCurrentUser());
+    Cvar_Set("username", user);
     Cvar_Set("arch", ARCH_STRING);
+
+    /* Saved q3config.cfg still wins on next boot via CVAR_ARCHIVE. */
+    if (user && *user && Q_stricmp(user, "player") != 0) {
+        Cvar_Set("name", user);
+    }
 }
 
-/* ==================================================================
- * Console input / clipboard
- * ================================================================== */
-char *Sys_ConsoleInput(void)
-{
-    return NULL; /* no TTY on PS3 */
-}
+char *Sys_ConsoleInput(void) { return NULL; }
+char *Sys_GetClipboardData(void) { return NULL; }
 
-char *Sys_GetClipboardData(void)
-{
-    return NULL; /* no clipboard on PS3 */
-}
-
-/* ==================================================================
- * DLL extension check
- * ================================================================== */
 qboolean Sys_DllExtension(const char *name)
 {
     const char *p;
@@ -540,11 +535,7 @@ qboolean Sys_DllExtension(const char *name)
     return qfalse;
 }
 
-/* ==================================================================
- * Dynamic library loading -- disabled on PS3.
- * ioQ3 uses these for renderer DLL and game DLLs.
- * We link everything statically.
- * ================================================================== */
+/* Everything links statically on PS3. */
 void *Sys_LoadDll(const char *name, qboolean useSystemLib)
 {
     (void)name; (void)useSystemLib;
@@ -576,54 +567,28 @@ char *Sys_GetDLLName(const char *name)
     return NULL;
 }
 
-/* ==================================================================
- * Command-line parsing (N/A on PS3)
- * ================================================================== */
-void Sys_ParseArgs(int argc, char **argv)
-{
-    (void)argc; (void)argv;
-}
+void Sys_ParseArgs(int argc, char **argv) { (void)argc; (void)argv; }
 
-/* ==================================================================
- * Console stubs (no TTY on PS3)
- * ================================================================== */
 void CON_Shutdown(void) {}
 void CON_Init(void) {}
 char *CON_Input(void) { return NULL; }
 void CON_Print(const char *msg) { printf("%s", msg); }
 
-/* con_log.c functions -- provide stubs if not linking con_log.c */
 unsigned int CON_LogSize(void) { return 0; }
 unsigned int CON_LogWrite(const char *in) { (void)in; return 0; }
 unsigned int CON_LogRead(char *out, unsigned int outSize) { (void)out; (void)outSize; return 0; }
 
-/* ==================================================================
- * Signal handling -- PS3 homebrew doesn't use Unix signals
- * ================================================================== */
 void Sys_SigHandler(int signal)
 {
     (void)signal;
     Sys_Quit();
 }
 
-/* ==================================================================
- * GLimp stubs -- Sys_ wrappers called from sys_main.c
- * Real RSX implementation is in ps3_glimp.c
- * ================================================================== */
-void Sys_GLimpInit(void)
-{
-    /* RSX init happens in PS3_RSX_Init() called from ps3_main.c */
-}
+/* Real RSX bring-up is in PS3_RSX_Init() called from ps3_main.c. */
+void Sys_GLimpInit(void) {}
+void Sys_GLimpSafeInit(void) {}
 
-void Sys_GLimpSafeInit(void)
-{
-    /* Same as above */
-}
-
-/* ==================================================================
- * mmap / munmap for QVM / hunk allocation
- * PS3 homebrew: just use memalign.
- * ================================================================== */
+/* PS3 homebrew has no mmap; back QVM/hunk allocations with memalign. */
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 {
     (void)addr; (void)prot; (void)flags; (void)fd; (void)offset;
@@ -640,10 +605,7 @@ int munmap(void *addr, size_t length)
     return 0;
 }
 
-/* ==================================================================
- * fill_fopen_filefunc -- minizip file callback interface
- * Used by unzip.c for pk3 reading.
- * ================================================================== */
+/* minizip file callbacks for pk3 reading via unzip.c. */
 #include "qcommon/unzip.h"
 
 static voidpf ZCALLBACK fopen_file_func(voidpf opaque, const char *filename, int mode)
@@ -714,9 +676,6 @@ void fill_fopen_filefunc(zlib_filefunc_def *pzlib_filefunc_def)
     pzlib_filefunc_def->opaque      = NULL;
 }
 
-/* ==================================================================
- * AVI stubs -- no video recording on PS3
- * ================================================================== */
 qboolean CL_VideoRecording(void)               { return qfalse; }
 qboolean CL_OpenAVIForWriting(const char *f)   { (void)f; return qfalse; }
 qboolean CL_CloseAVI(void)                     { return qfalse; }
@@ -724,33 +683,10 @@ void     CL_TakeVideoFrame(void)               { }
 void     CL_WriteAVIVideoFrame(const byte *d, int s) { (void)d; (void)s; }
 void     CL_WriteAVIAudioFrame(const byte *d, int s) { (void)d; (void)s; }
 
-/* ==================================================================
- * MD5 stub -- no GUID/md5 verification needed on PS3
- * ================================================================== */
-char *Com_MD5File(const char *filename, int length,
-                  const char *prefix, int pLen)
-{
-    (void)filename; (void)length; (void)prefix; (void)pLen;
-    return "";
-}
+/* qkey is created in ps3_main.c; suppress the CD key dialog. */
+void __wrap_CL_GenerateQKey(void) {}
 
-/* ==================================================================
- * Linker wraps -- intercept specific ioQ3 functions
- *
- * __wrap_CL_GenerateQKey: bypass CD key dialog
- * __wrap_Com_Printf: mirror output to log file
- * ================================================================== */
-
-/* Bypass CD key generation dialog */
-void __wrap_CL_GenerateQKey(void)
-{
-    /* qkey file is created in ps3_main.c, nothing to do */
-}
-
-/* Mirror Com_Printf to log file.
- * The real Com_Printf calls Sys_Print, which already calls ps3_log.
- * We only need to forward to __real_Com_Printf here. The wrap exists
- * so we can intercept the call if needed (e.g., filtering, redirection). */
+/* __real_Com_Printf -> Sys_Print -> ps3_log already. Wrap kept for interposition. */
 extern void QDECL __real_Com_Printf(const char *fmt, ...) __attribute__((format(printf,1,2)));
 void QDECL __wrap_Com_Printf(const char *fmt, ...)
 {
@@ -759,8 +695,6 @@ void QDECL __wrap_Com_Printf(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-
-    /* Call real Com_Printf (which calls Sys_Print -> ps3_log) */
     __real_Com_Printf("%s", buf);
 }
 

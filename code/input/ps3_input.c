@@ -13,12 +13,11 @@
 
 extern void ps3_log(const char *msg);
 
-/* Avoid pulling in client.h just for these */
 extern int Key_GetCatcher(void);
 extern void Key_SetBinding(int keynum, const char *binding);
 extern char *Key_GetBinding(int keynum);
 
-/* Set a default bind only if the key is unbound (preserves q3config.cfg) */
+/* Preserves any binding loaded from q3config.cfg. */
 static void PS3_SetDefaultBind(int keynum, const char *binding)
 {
     char *existing = Key_GetBinding(keynum);
@@ -26,17 +25,12 @@ static void PS3_SetDefaultBind(int keynum, const char *binding)
         Key_SetBinding(keynum, binding);
 }
 
-/* Constants */
 #define STICK_CENTER    128
 #define STICK_DEADZONE  30
 #define STICK_RANGE     (128 - STICK_DEADZONE)
-
-/* Pixels per frame at full stick deflection (menu cursor) */
 #define MENU_CURSOR_SPEED  5.0f
-
 #define NUM_PS3_BUTTONS 18  /* 16 digital + 2 analog triggers */
 
-/* State */
 static padInfo  ps3_pad_info;
 static padData  ps3_pad_data;
 static qboolean ps3_pad_connected = qfalse;
@@ -45,42 +39,91 @@ static qboolean ps3_quit_pressed  = qfalse;
 static float ps3_cursor_accum_x = 0.0f;  /* sub-pixel remainder */
 static float ps3_cursor_accum_y = 0.0f;
 static int ps3_btn_prev[NUM_PS3_BUTTONS];
-static int ps3_axis_prev[4]; /* LX, LY, RX, RY */
+static int ps3_axis_prev[4];
 
-/* Button-to-keycode mapping.
- * Cross/Circle have dual mapping: always send K_JOY*, and additionally
- * send K_ENTER/K_ESCAPE when UI is active (see PS3_Input_Frame). */
+static cvar_t *ps3_rumbleEnable = NULL;
+static cvar_t *ps3_rumbleScale  = NULL;
+static int     s_rumbleExpiryMs = 0;
+static int     s_rumbleActive   = 0;
+
+void PS3_SetRumble(uint8_t large, uint8_t small_motor, int durationMs)
+{
+    if (!ps3_rumbleEnable || !ps3_rumbleEnable->integer) return;
+
+    float scale = ps3_rumbleScale ? ps3_rumbleScale->value : 1.0f;
+    if (scale < 0.0f) scale = 0.0f;
+    if (scale > 1.0f) scale = 1.0f;
+
+    int lg = (int)(large       * scale);
+    int sm = (int)(small_motor * scale);
+    if (lg > 255) lg = 255;
+    if (sm > 255) sm = 255;
+
+    padActParam act;
+    memset(&act, 0, sizeof(act));
+    act.large_motor = (uint8_t)lg;
+    act.small_motor = (sm > 0) ? 1 : 0;
+    ioPadSetActDirect(0, &act);
+
+    int now    = Sys_Milliseconds();
+    int expiry = now + durationMs;
+    if (expiry > s_rumbleExpiryMs) s_rumbleExpiryMs = expiry;
+    s_rumbleActive = 1;
+}
+
+static void PS3_RumbleTick(void)
+{
+    if (!s_rumbleActive) return;
+    if (Sys_Milliseconds() < s_rumbleExpiryMs) return;
+
+    padActParam act;
+    memset(&act, 0, sizeof(act));
+    ioPadSetActDirect(0, &act);
+    s_rumbleActive   = 0;
+    s_rumbleExpiryMs = 0;
+}
+
+static void PS3_RumbleStop(void)
+{
+    padActParam act;
+    memset(&act, 0, sizeof(act));
+    ioPadSetActDirect(0, &act);
+    s_rumbleActive   = 0;
+    s_rumbleExpiryMs = 0;
+}
+
+/* Cross/Circle dual-map: always K_JOY*, plus K_ENTER/K_ESCAPE when UI active. */
 static const int q3_key_map[NUM_PS3_BUTTONS] = {
-    K_JOY1,             /*  0: Cross    -> jump (gameplay bind) */
-    K_JOY2,             /*  1: Circle   -> crouch (gameplay bind) */
-    K_JOY3,             /*  2: Square   -> prev weapon */
-    K_JOY4,             /*  3: Triangle -> next weapon */
-    K_JOY5,             /*  4: L1       -> strafe left */
-    K_JOY6,             /*  5: R1       -> strafe right */
-    K_JOY7,             /*  6: L2       -> zoom (digital bitfield) */
-    K_JOY8,             /*  7: R2       -> attack (digital bitfield) */
-    K_JOY9,             /*  8: L3       -> crouch (alt) */
-    K_JOY10,            /*  9: R3       -> scoreboard */
-    K_ESCAPE,           /* 10: Start    -> open menu / escape */
-    K_JOY11,            /* 11: Select   -> scoreboard */
-    K_UPARROW,          /* 12: D-Up     -> menu up */
-    K_DOWNARROW,        /* 13: D-Down   -> menu down */
-    K_LEFTARROW,        /* 14: D-Left   -> menu left (sliders) */
-    K_RIGHTARROW,       /* 15: D-Right  -> menu right (sliders) */
-    K_JOY7,             /* 16: L2 analog (trigger-as-button) */
-    K_JOY8,             /* 17: R2 analog (trigger-as-button) */
+    K_JOY1,             /*  0: Cross    */
+    K_JOY2,             /*  1: Circle   */
+    K_JOY3,             /*  2: Square   */
+    K_JOY4,             /*  3: Triangle */
+    K_JOY5,             /*  4: L1       */
+    K_JOY6,             /*  5: R1       */
+    K_JOY7,             /*  6: L2       */
+    K_JOY8,             /*  7: R2       */
+    K_JOY9,             /*  8: L3       */
+    K_JOY10,            /*  9: R3       */
+    K_ESCAPE,           /* 10: Start    */
+    K_JOY11,            /* 11: Select   */
+    K_UPARROW,          /* 12: D-Up     */
+    K_DOWNARROW,        /* 13: D-Down   */
+    K_LEFTARROW,        /* 14: D-Left   */
+    K_RIGHTARROW,       /* 15: D-Right  */
+    K_JOY7,             /* 16: L2 analog */
+    K_JOY8,             /* 17: R2 analog */
 };
 
-/* Button indices -- can't reuse BTN_CROSS etc., those are padData bitfield names */
+/* Can't reuse BTN_CROSS -- those are padData bitfield member names. */
 #define PS3_BTN_IDX_CROSS     0
 #define PS3_BTN_IDX_CIRCLE    1
 #define PS3_BTN_IDX_TRIANGLE  3
+#define PS3_BTN_IDX_L3        8
+#define PS3_BTN_IDX_R3        9
 #define PS3_BTN_IDX_SELECT   11
 
-/* Analog trigger threshold (0-255) */
 #define TRIGGER_THRESHOLD 30
 
-/* Read all buttons into an array. Indices 16-17 are L2/R2 via analog threshold. */
 static void read_buttons(const padData *pd, int out[NUM_PS3_BUTTONS])
 {
     out[0]  = pd->BTN_CROSS;
@@ -100,18 +143,16 @@ static void read_buttons(const padData *pd, int out[NUM_PS3_BUTTONS])
     out[14] = pd->BTN_LEFT;
     out[15] = pd->BTN_RIGHT;
 
-    /* OR digital bitfield with analog pressure so triggers work whether
-     * or not pressure mode is enabled (PRE_* are 0 when it's off). */
+    /* OR with analog pressure so triggers work even with pressure mode off. */
     out[16] = (out[6] || pd->PRE_L2 > TRIGGER_THRESHOLD) ? 1 : 0;
     out[17] = (out[7] || pd->PRE_R2 > TRIGGER_THRESHOLD) ? 1 : 0;
 }
 
-/* Init / Shutdown */
 void PS3_Input_Init(void)
 {
     ioPadInit(7);
 
-    /* Enable pressure mode so PRE_L2/PRE_R2 are populated (otherwise always 0) */
+    /* PRE_L2/PRE_R2 read 0 unless pressure mode is on. */
     ioPadSetPressMode(0, PAD_PRESS_MODE_ON);
 
     memset(ps3_btn_prev, 0, sizeof(ps3_btn_prev));
@@ -120,22 +161,23 @@ void PS3_Input_Init(void)
     ps3_quit_pressed = qfalse;
     ps3_cursor_accum_x = 0.0f;
     ps3_cursor_accum_y = 0.0f;
-    printf("[ps3] Pad input initialized (pressure mode on)\n");
+    s_rumbleActive   = 0;
+    s_rumbleExpiryMs = 0;
+    printf("[ps3] Pad input initialized (pressure mode on, rumble enabled)\n");
 }
 
 void PS3_Input_Shutdown(void)
 {
+    PS3_RumbleStop();
     ioPadEnd();
 }
 
-/* Per-frame polling */
 void PS3_Input_Frame(void)
 {
     int btn_cur[NUM_PS3_BUTTONS];
     int i;
 
-    /* While OSK is active, poll pad data for edge detection but don't
-     * send events -- firmware owns the controller. */
+    /* OSK owns the pad while open -- only keep edge state in sync. */
     if (PS3_OSK_IsActive()) {
         ioPadGetInfo(&ps3_pad_info);
         if (ps3_pad_info.status[0] && ioPadGetData(0, &ps3_pad_data) == 0) {
@@ -155,10 +197,11 @@ void PS3_Input_Frame(void)
     if (ioPadGetData(0, &ps3_pad_data) != 0)
         return;
 
-    if (ps3_pad_data.len == 0)
-        return;
+    /* Don't bail on len==0: ps3_pad_data still holds last poll's values,
+     * and skipping the analog accumulator freezes the menu cursor at 60fps. */
 
-    /* Digital buttons -> SE_KEY (edge-detected) */
+    PS3_RumbleTick();
+
     read_buttons(&ps3_pad_data, btn_cur);
 
     int catchers = Key_GetCatcher();
@@ -171,13 +214,10 @@ void PS3_Input_Frame(void)
 
     if (triangle_pressed) {
         if (btn_cur[PS3_BTN_IDX_SELECT]) {
-            /* Select + Triangle = toggle console */
             Com_QueueEvent(0, SE_KEY, K_CONSOLE, qtrue, 0, NULL);
             Com_QueueEvent(0, SE_KEY, K_CONSOLE, qfalse, 0, NULL);
             triangle_consumed = 1;
         } else if (in_text) {
-            /* Triangle in console or chat = open OSK.
-             * Auto-submit in chat so the message sends immediately. */
             qboolean in_chat = (catchers & KEYCATCH_MESSAGE) ? qtrue : qfalse;
             PS3_OSK_Open(128, in_chat);
             triangle_consumed = 1;
@@ -189,26 +229,39 @@ void PS3_Input_Frame(void)
     int cross_consumed = 0;
 
     if (cross_pressed && btn_cur[PS3_BTN_IDX_SELECT] && !in_menu && !in_text) {
-        /* Select + Cross in gameplay = open chat */
         Cbuf_ExecuteText(EXEC_APPEND, "messagemode\n");
         cross_consumed = 1;
     }
 
+    /* L3+R3 (edge-detected): toggle rumble enable. */
+    if (btn_cur[PS3_BTN_IDX_L3] && btn_cur[PS3_BTN_IDX_R3] &&
+        (!ps3_btn_prev[PS3_BTN_IDX_L3] || !ps3_btn_prev[PS3_BTN_IDX_R3])) {
+        int on = ps3_rumbleEnable ? !ps3_rumbleEnable->integer : 1;
+        Cvar_SetValue("ps3_rumbleEnable", on ? 1.0f : 0.0f);
+        Com_Printf("Rumble: %s\n", on ? "ON" : "OFF");
+        if (on) {
+            PS3_SetRumble(200, 1, 200);
+        } else {
+            PS3_RumbleStop();
+        }
+        ps3_btn_prev[PS3_BTN_IDX_L3] = 1;
+        ps3_btn_prev[PS3_BTN_IDX_R3] = 1;
+        goto skip_buttons;
+    }
+
     for (i = 0; i < NUM_PS3_BUTTONS; i++) {
-        /* Skip digital L2/R2; analog threshold indices 16-17 handle them */
+        /* Digital L2/R2 are handled via the analog-threshold indices 16/17. */
         if (i == 6 || i == 7) continue;
 
         int cur  = btn_cur[i] ? 1 : 0;
         int prev = ps3_btn_prev[i];
 
         if (cur != prev) {
-            /* Triangle consumed by console toggle or OSK */
             if (i == PS3_BTN_IDX_TRIANGLE && triangle_consumed && cur) {
                 ps3_btn_prev[i] = cur;
                 continue;
             }
 
-            /* Cross consumed by chat combo */
             if (i == PS3_BTN_IDX_CROSS && cross_consumed && cur) {
                 ps3_btn_prev[i] = cur;
                 continue;
@@ -228,8 +281,8 @@ void PS3_Input_Frame(void)
         }
         ps3_btn_prev[i] = cur;
     }
+    skip_buttons:;
 
-    /* Analog sticks */
     {
         int lx_raw = (int)ps3_pad_data.ANA_L_H - STICK_CENTER;
         int ly_raw = (int)ps3_pad_data.ANA_L_V - STICK_CENTER;
@@ -242,7 +295,6 @@ void PS3_Input_Frame(void)
         if (abs(ry_raw) < STICK_DEADZONE) ry_raw = 0;
 
         if (in_menu) {
-            /* Left stick -> mouse cursor */
             if (lx_raw != 0 || ly_raw != 0) {
                 float fx = (float)lx_raw / (float)STICK_RANGE;
                 float fy = (float)ly_raw / (float)STICK_RANGE;
@@ -252,11 +304,9 @@ void PS3_Input_Frame(void)
                 if (fy >  1.0f) fy =  1.0f;
                 if (fy < -1.0f) fy = -1.0f;
 
-                /* Squared response curve for fine control at small deflections */
-                float ax = fx * fx * MENU_CURSOR_SPEED;
-                float ay = fy * fy * MENU_CURSOR_SPEED;
-                if (fx < 0) ax = -ax;
-                if (fy < 0) ay = -ay;
+                /* Linear; squared curves underflow accum to 0 and stutter. */
+                float ax = fx * MENU_CURSOR_SPEED;
+                float ay = fy * MENU_CURSOR_SPEED;
 
                 ps3_cursor_accum_x += ax;
                 ps3_cursor_accum_y += ay;
@@ -270,13 +320,12 @@ void PS3_Input_Frame(void)
                     Com_QueueEvent(0, SE_MOUSE, dx, dy, 0, NULL);
             }
         } else {
-            /* Both sticks -> joystick axes, scaled to Q3's +/-32K range */
+            /* Scaled to Q3's +/-32K joystick axis range. */
             int jlx = lx_raw * 256;
-            int jly = ly_raw * 256;  /* positive = down = forward */
+            int jly = ly_raw * 256;
             int jrx = rx_raw * 256;
             int jry = ry_raw * 256;
 
-            /* Only send on change */
             if (jlx != ps3_axis_prev[0]) {
                 Com_QueueEvent(0, SE_JOYSTICK_AXIS, 0, jlx, 0, NULL);
                 ps3_axis_prev[0] = jlx;
@@ -296,8 +345,8 @@ void PS3_Input_Frame(void)
         }
     }
 
-    /* Check for quit combo: Select + Start */
-    if (btn_cur[10] && btn_cur[11]) {  /* Start && Select */
+    /* Quit combo: Start + Select. */
+    if (btn_cur[10] && btn_cur[11]) {
         ps3_quit_pressed = qtrue;
     }
 }
@@ -307,47 +356,41 @@ qboolean PS3_Input_QuitPressed(void)
     return ps3_quit_pressed;
 }
 
-/* ioQ3 input interface */
 void IN_Init(void *windowData)
 {
     (void)windowData;
 
-    /* Default DS3 binds (overridable via console / q3config.cfg) */
     PS3_SetDefaultBind(K_JOY1,  "+moveup");      /* Cross    = jump */
     PS3_SetDefaultBind(K_JOY2,  "+movedown");    /* Circle   = crouch */
-    PS3_SetDefaultBind(K_JOY3,  "weapprev");     /* Square   = prev weapon */
-    PS3_SetDefaultBind(K_JOY4,  "weapnext");     /* Triangle = next weapon */
+    PS3_SetDefaultBind(K_JOY3,  "weapprev");     /* Square */
+    PS3_SetDefaultBind(K_JOY4,  "weapnext");     /* Triangle */
+    PS3_SetDefaultBind(K_JOY5,  "+moveleft");    /* L1 */
+    PS3_SetDefaultBind(K_JOY6,  "+moveright");   /* R1 */
+    PS3_SetDefaultBind(K_JOY7,  "+zoom");        /* L2 */
+    PS3_SetDefaultBind(K_JOY8,  "+attack");      /* R2 */
+    PS3_SetDefaultBind(K_JOY9,  "+speed");       /* L3 */
+    PS3_SetDefaultBind(K_JOY10, "+scores");      /* R3 */
+    PS3_SetDefaultBind(K_JOY11, "+scores");      /* Select */
 
-    PS3_SetDefaultBind(K_JOY5,  "+moveleft");    /* L1 = strafe left */
-    PS3_SetDefaultBind(K_JOY6,  "+moveright");   /* R1 = strafe right */
+    ps3_rumbleEnable = Cvar_Get("ps3_rumbleEnable", "1",   CVAR_ARCHIVE);
+    ps3_rumbleScale  = Cvar_Get("ps3_rumbleScale",  "1.0", CVAR_ARCHIVE);
 
-    PS3_SetDefaultBind(K_JOY7,  "+zoom");        /* L2 = zoom */
-    PS3_SetDefaultBind(K_JOY8,  "+attack");      /* R2 = fire */
-
-    PS3_SetDefaultBind(K_JOY9,  "+speed");       /* L3 = run/walk toggle */
-    PS3_SetDefaultBind(K_JOY10, "+scores");      /* R3 = scoreboard */
-
-    PS3_SetDefaultBind(K_JOY11, "+scores");      /* Select = scoreboard */
-
-    /* Axis cvars for twin-stick FPS (matches Xbox 360 axis numbering) */
+    /* Axis numbering matches Xbox 360 / twin-stick FPS layout. */
     Cvar_Set("in_joystick", "1");
     Cvar_Set("in_joystickUseAnalog", "1");
-    Cvar_Set("j_pitch_axis", "3");        /* right stick Y */
-    Cvar_Set("j_yaw_axis",   "4");        /* right stick X */
-    Cvar_Set("j_forward_axis", "1");      /* left stick Y */
-    Cvar_Set("j_side_axis",  "0");        /* left stick X */
-    Cvar_Set("j_pitch",  "0.011");        /* half of default, like Xbox 360 */
-    Cvar_Set("j_yaw",   "-0.011");        /* negative = non-inverted */
+    Cvar_Set("j_pitch_axis", "3");
+    Cvar_Set("j_yaw_axis",   "4");
+    Cvar_Set("j_forward_axis", "1");
+    Cvar_Set("j_side_axis",  "0");
+    Cvar_Set("j_pitch",  "0.011");
+    Cvar_Set("j_yaw",   "-0.011");
     Cvar_Set("j_forward", "-0.25");
     Cvar_Set("j_side",    "0.25");
 
     ps3_log("IN_Init: default DS3 binds set");
 }
 
-void IN_Frame(void)
-{
-    /* Polling is done in PS3_Input_Frame */
-}
+void IN_Frame(void) {}
 
 void IN_Shutdown(void)
 {

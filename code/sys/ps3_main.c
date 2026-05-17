@@ -28,10 +28,8 @@
 #include "renderercommon/tr_public.h"
 extern refexport_t *GetRefAPI(int apiVersion, refimport_t *rimp);
 
-/* Priority 1001 (default), stack 1 MB */
 SYS_PROCESS_PARAM(1001, 0x100000);
 
-/* XMB system callback */
 static volatile int ps3_running = 1;
 
 static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
@@ -56,28 +54,56 @@ static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
     }
 }
 
-/* Debug logging */
-static const char *ps3_log_path = "/dev_hdd0/game/IOQ3PS300/USRDIR/log.txt";
+/* All three variants share /dev_hdd0/data/ioq3 with per-mod subdirs. */
+#if defined(STANDALONEOA)
+#  define PS3_GAMEDIR       "baseoa"
+#  define PS3_LOG_SUFFIX    "log_oa.txt"
+#  define PS3_TITLE         "openarena-PS3"
+#elif defined(STANDALONETA)
+#  define PS3_GAMEDIR       "missionpack"
+#  define PS3_LOG_SUFFIX    "log_ta.txt"
+#  define PS3_TITLE         "teamarena-PS3"
+#else
+#  define PS3_GAMEDIR       "baseq3"
+#  define PS3_LOG_SUFFIX    "log.txt"
+#  define PS3_TITLE         "ioquake3-PS3"
+#endif
+
+/* ps3_log() must stay defined in release too -- other TUs link it via extern. */
+#ifdef PS3_DEBUG
+static const char *ps3_log_path = "/dev_hdd0/data/ioq3/" PS3_LOG_SUFFIX;
+#endif
 
 void ps3_log(const char *msg)
 {
+#ifdef PS3_DEBUG
     FILE *f = fopen(ps3_log_path, "a");
     if (f) { fprintf(f, "%s\n", msg); fclose(f); }
+#else
+    (void)msg;
+#endif
 }
 
+#ifdef PS3_DEBUG
 #define PS3LOG(fmt, ...) do { \
     char _lb[256]; \
     snprintf(_lb, sizeof(_lb), fmt, ##__VA_ARGS__); \
     ps3_log(_lb); \
 } while (0)
+#else
+#define PS3LOG(fmt, ...) ((void)0)
+#endif
 
-/* Filesystem setup -- tries HDD first, then USB */
-static const char *ps3_base_path  = "/dev_hdd0/game/IOQ3PS300/USRDIR";
+/* Try HDD, fall back to USB. Each variant probes its own pak0.pk3. */
+static const char *ps3_base_path  = "/dev_hdd0/data/ioq3";
 static const char *ps3_usb_path   = "/dev_usb000/quake3";
 
 static qboolean PS3_SetupFilesystem(void)
 {
-    FILE *f = fopen("/dev_hdd0/game/IOQ3PS300/USRDIR/baseq3/pak0.pk3", "rb");
+    const char *probe_hdd = "/dev_hdd0/data/ioq3/" PS3_GAMEDIR "/pak0.pk3";
+    const char *probe_usb = "/dev_usb000/quake3/"  PS3_GAMEDIR "/pak0.pk3";
+
+    FILE *f = fopen(probe_hdd, "rb");
     if (f) {
         fclose(f);
         chdir(ps3_base_path);
@@ -85,8 +111,7 @@ static qboolean PS3_SetupFilesystem(void)
         return qtrue;
     }
 
-    /* Fall back to USB */
-    f = fopen("/dev_usb000/quake3/baseq3/pak0.pk3", "rb");
+    f = fopen(probe_usb, "rb");
     if (f) {
         fclose(f);
         chdir(ps3_usb_path);
@@ -95,27 +120,27 @@ static qboolean PS3_SetupFilesystem(void)
         return qtrue;
     }
 
-    printf("FATAL: pak0.pk3 not found on HDD or USB\n");
-    PS3LOG("FATAL: pak0.pk3 not found");
+    printf("FATAL: " PS3_GAMEDIR "/pak0.pk3 not found on HDD or USB\n");
+    PS3LOG("FATAL: " PS3_GAMEDIR "/pak0.pk3 not found");
     return qfalse;
 }
 
-/* Main */
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
     sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, ps3_sysutil_callback, NULL);
 
-    printf("ioquake3-PS3 starting...\n");
+    printf(PS3_TITLE " starting...\n");
 
+#ifdef PS3_DEBUG
     { FILE *f = fopen(ps3_log_path, "w"); if (f) fclose(f); }
     PS3LOG("main() reached");
+#endif
 
     if (!PS3_SetupFilesystem()) {
         printf("FATAL: could not find game data. Halting.\n");
         PS3LOG("FATAL: filesystem setup failed");
-        /* Spin so user can read the message */
         while (ps3_running) {
             sysUtilCheckCallback();
         }
@@ -125,36 +150,42 @@ int main(int argc, char *argv[])
 
     PS3_Input_Init();
     printf("[ps3] Input OK\n");
-    PS3LOG("Input init done");
-
     PS3_OSK_Init();
-    PS3LOG("OSK init done");
-
-    /* netInitialize() is called later by NET_Init */
-    PS3LOG("Network deferred to NET_Init");
-
     PS3_Snd_Init();
     printf("[ps3] Audio OK\n");
-    PS3LOG("Audio init done");
 
-    /* RSX must be up before Com_Init -- CL_Init triggers BeginFrame immediately */
+    /* RSX must be up before Com_Init -- CL_Init issues BeginFrame immediately. */
     PS3_RSX_Init();
     printf("[ps3] RSX init done\n");
-    PS3LOG("RSX init done");
 
-    /* BSS corruption diagnosis */
-    {
-        extern void *ps3gl_ptr;  /* actually ps3gl_state_t* but avoid header dep */
-        extern gcmContextData *ps3gl_get_ctx(void);
-        PS3LOG("MEMMAP: ps3gl_ptr=%p &ps3gl_ptr=%p get_ctx=%p",
-               ps3gl_ptr, &ps3gl_ptr, (void*)ps3gl_get_ctx());
-    }
-
-    /* Pre-init renderer so Com_Printf -> SCR_UpdateScreen doesn't crash */
+    /* Pre-init renderer so Com_Printf -> SCR_UpdateScreen is safe. */
     extern refexport_t re;
     refexport_t *ref = GetRefAPI(REF_API_VERSION, NULL);
     if (ref) re = *ref;
-    PS3LOG("GetRefAPI done");
+
+    /* Upstream sys_main.c's main() is replaced, so do this ourselves. */
+    extern void Sys_PlatformInit(void);
+    Sys_PlatformInit();
+
+    /* Cmdline values beat Cvar_Get defaults; Cvar_Set from Sys_Init is
+     * overwritten by config load. Strip quotes/ctrl so we don't break parsing. */
+    extern char *Sys_GetCurrentUser(void);
+    static char ps3_nick[64];
+    {
+        const char *src = Sys_GetCurrentUser();
+        size_t o = 0;
+        if (src) {
+            for (size_t i = 0; src[i] && o < sizeof(ps3_nick) - 1; i++) {
+                unsigned char c = (unsigned char)src[i];
+                if (c == '"' || c == '\\' || c == ';' || c < 0x20) continue;
+                ps3_nick[o++] = (char)c;
+            }
+        }
+        ps3_nick[o] = '\0';
+        if (ps3_nick[0] == '\0')
+            snprintf(ps3_nick, sizeof(ps3_nick), "%s", "player");
+        PS3LOG("[user] cmdline nick='%s'", ps3_nick);
+    }
 
     static char cmdline[2048];
     snprintf(cmdline, sizeof(cmdline),
@@ -162,15 +193,14 @@ int main(int argc, char *argv[])
         "+set fs_homepath %s "
         "+set fs_steampath \"\" "
         "+set fs_gogpath \"\" "
-        "+set fs_game baseq3 "
-        "+set com_hunkMegs 80 "
+        "+set fs_game " PS3_GAMEDIR " "
+        "+set name \"%s\" "
+        "+set com_hunkMegs 96 "
         "+set com_zoneMegs 24 "
-        /* display */
         "+set r_mode -1 "
         "+set r_customwidth 1280 "
         "+set r_customheight 720 "
         "+set r_picmip 1 "
-        /* rendering quality */
         "+set r_dynamic 1 "
         "+set r_flares 0 "
         "+set r_fastsky 0 "
@@ -179,29 +209,30 @@ int main(int argc, char *argv[])
         "+set r_simpleMipMaps 1 "
         "+set r_drawSun 0 "
         "+set r_primitives 2 "
-        /* 0 = no software limiter; vsync paces at 60 Hz */
-        "+set com_maxfps 0 "
+        "+set com_maxfps 0 "          /* vsync paces at 60 Hz */
         "+set pmove_fixed 1 "
-        /* audio */
         "+set s_khz 48 "
         "+set com_soundMegs 8 "
-        /* server / misc */
         "+set sv_pure 0 "
+        "+set g_doWarmup 0 "          /* Q3 warmup loops on PS3 due to slow cgame load */
         "+set sv_maxclients 8 "
         "+set in_joystick 1 "
         "+set in_joystickUseAnalog 1 "
         "+set j_pitch_axis 3 "
         "+set j_yaw_axis 4 "
-        "+set com_standalone 0 "
         "+set net_enabled 1 "
         "+set net_port 27960 "
         "+set fraglimit 0 "
         "+set timelimit 0 "
+#ifdef PS3_DEBUG
         "+set com_logfile 2",
-        ps3_base_path, ps3_base_path
+#else
+        "+set com_logfile 0",
+#endif
+        ps3_base_path, ps3_base_path, ps3_nick
     );
 
-    /* Create qkey file if missing */
+    /* Hashed by CL_UpdateGUID into cl_guid; OA QVM rejects empty guid. */
     {
         char qkeypath[256];
         snprintf(qkeypath, sizeof(qkeypath), "%s/qkey", ps3_base_path);
@@ -220,40 +251,19 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* BSS corruption check */
-    {
-        extern void *ps3gl_ptr;
-        PS3LOG("pre-ComInit: ps3gl_ptr=%p", ps3gl_ptr);
-    }
-
-    PS3LOG("Calling Com_Init");
     printf("[ps3] Calling Com_Init...\n");
     Com_Init(cmdline);
     printf("[ps3] Com_Init done\n");
-    PS3LOG("Com_Init done");
 
-    /* PSL1GHT net module must be loaded before ioq3's NET_Init */
+    /* PSL1GHT net module must load before ioq3's NET_Init. */
     {
-        s32 mod_ret = sysModuleLoad(SYSMODULE_NET);
-        PS3LOG("sysModuleLoad(NET) returned %d", (int)mod_ret);
-        int net_ret = PS3_Net_Init();
-        PS3LOG("PS3_Net_Init returned %d", net_ret);
-        if (net_ret < 0) {
-            PS3LOG("WARNING: PS3 network init failed, networking disabled");
-        }
-    }
-
-    /* BSS corruption check: RSX context should survive Com_Init */
-    {
-        extern gcmContextData *ps3gl_get_ctx(void);
-        PS3LOG("post-ComInit ctx check: ps3gl_get_ctx=%p", (void*)ps3gl_get_ctx());
+        sysModuleLoad(SYSMODULE_NET);
+        PS3_Net_Init();
     }
 
     NET_Init();
     printf("[ps3] NET_Init done\n");
-    PS3LOG("NET_Init done");
 
-    PS3LOG("Entering main loop");
     while (ps3_running) {
         sysUtilCheckCallback();
         PS3_Input_Frame();
