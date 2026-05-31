@@ -24,6 +24,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 backEndData_t	*backEndData;
 backEndState_t	backEnd;
 
+#ifdef __PS3__
+/* Forward declaration: set world-space clip plane directly in the ps3gl layer */
+extern void ps3gl_SetWorldClipPlane(float nx, float ny, float nz, float dist);
+#endif
+
 
 static float	s_flipMatrix[16] = {
 	// convert from our coordinate system (looking down X)
@@ -489,6 +494,11 @@ void RB_BeginDrawingView (void) {
 		qglLoadMatrixf( s_flipMatrix );
 		qglClipPlane (GL_CLIP_PLANE0, plane2);
 		qglEnable (GL_CLIP_PLANE0);
+#ifdef __PS3__
+		/* Supply the world-space plane directly so ps3gl can evaluate it
+		 * without the eye-space transform confusion from plane2/s_flipMatrix. */
+		ps3gl_SetWorldClipPlane(plane[0], plane[1], plane[2], plane[3]);
+#endif
 	} else {
 		qglDisable (GL_CLIP_PLANE0);
 	}

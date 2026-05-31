@@ -54,8 +54,7 @@ void ps3gl_shaders_init(void)
     for (int i = 0; i < PS3GL_TENV_COUNT; i++) {
         memset(&ps3gl.shaders[i], 0, sizeof(ps3gl_shader_t));
         load_vp(&ps3gl.shaders[i], shader_vp_data, shader_vp_data_size);
-        ps3gl.shaders[i].mvp_const = rsxVertexProgramGetConst(
-            ps3gl.shaders[i].vp, "mvp");
+        ps3gl.shaders[i].mvp_const = rsxVertexProgramGetConst(ps3gl.shaders[i].vp, "mvp");
     }
 
     /* Load per-mode fragment programs */
@@ -65,6 +64,7 @@ void ps3gl_shaders_init(void)
     load_fp(&ps3gl.shaders[PS3GL_TENV_DECAL],    shader_fp_decal_data,    shader_fp_decal_data_size);
     load_fp(&ps3gl.shaders[PS3GL_TENV_ADD],       shader_fp_add_data,      shader_fp_add_data_size);
     load_fp(&ps3gl.shaders[PS3GL_TENV_BLEND],     shader_fp_blend_data,    shader_fp_blend_data_size);
+    load_fp(&ps3gl.shaders[PS3GL_TENV_MODULATE2], shader_fp_modulate2_data, shader_fp_modulate2_data_size);
 
     ps3gl.active_shader = -1;
     printf("[ps3gl] Shaders loaded: %d modes\n", PS3GL_TENV_COUNT);
@@ -82,11 +82,16 @@ void ps3gl_shaders_shutdown(void)
 
 int ps3gl_shader_key(void)
 {
-    /* If TMU 0 has a texture bound and enabled, use its texenv mode.
-     * Otherwise, use the color-only shader. */
-    if (ps3gl.tmu[0].enabled && ps3gl.tmu[0].bound && ps3gl.tmu[0].bound->data) {
+    int tmu0 = ps3gl.tmu[0].enabled && ps3gl.tmu[0].bound && ps3gl.tmu[0].bound->data;
+    int tmu1 = ps3gl.tmu[1].enabled && ps3gl.tmu[1].bound && ps3gl.tmu[1].bound->data;
+
+    /* Both TMUs active: use dual-texture modulate (diffuse * lightmap). */
+    if (tmu0 && tmu1)
+        return PS3GL_TENV_MODULATE2;
+
+    if (tmu0)
         return ps3gl.tmu[0].texenv;
-    }
+
     return PS3GL_TENV_DISABLED;
 }
 
@@ -115,6 +120,14 @@ void ps3gl_apply_shader(void)
     const float *mvp = ps3gl_get_mvp();
     if (s->mvp_const) {
         rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const, mvp);
+    }
+
+    /* Upload world-space clip plane when the recompiled shader supports it.
+     * NULL when the old pre-clip-plane shader binary is in use;
+     * the software clip path in ps3gl_draw.c handles that case instead. */
+    if (s->clip_plane_const) {
+        rsxSetVertexProgramParameter(ctx, s->vp, s->clip_plane_const,
+                                     ps3gl.clip_plane);
     }
 }
 

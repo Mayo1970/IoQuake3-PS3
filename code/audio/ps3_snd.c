@@ -1,8 +1,10 @@
 /* ps3_snd.c -- PSL1GHT libaudio backend for ioQ3's software mixer. */
+/* Compiled with -maltivec (per-file Makefile rule) for VMX audio conversion. */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <altivec.h>
 
 #include <ppu-types.h>
 #include <audio/audio.h>
@@ -34,10 +36,9 @@ static sys_event_queue_t ps3_audio_eventQ;
 static sys_ipc_key_t     ps3_audio_queueKey;
 static sys_ppu_thread_t  ps3_audio_thread;
 static volatile int      ps3_audio_quit = 0;
-static byte ps3_audio_buffer[PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS * (PS3_AUDIO_BITS / 8)];
+static byte ps3_audio_buffer[PS3_AUDIO_SAMPLES * PS3_AUDIO_CHANNELS * (PS3_AUDIO_BITS / 8)] __attribute__((aligned(16)));
 static volatile u32 ps3_audio_blocks_written = 0;
 
-/* Converts s16 PCM blocks to f32 for the hardware port. */
 static void ps3_audio_thread_func(void *arg)
 {
     (void)arg;
@@ -89,9 +90,37 @@ static void ps3_audio_thread_func(void *arg)
 
         u32 ring_pos = (ps3_audio_blocks_written * (u32)block_samples) % (u32)total_interleaved;
 
-        for (int i = 0; i < block_samples; i++) {
-            int idx = (ring_pos + i) % total_interleaved;
-            dst[i] = (f32)src[idx] / 32768.0f;
+        /*
+         * VMX int16→float32 conversion: 8 samples per iteration.
+         *
+         * ring_pos advances by block_samples (512) each call and wraps at
+         * total_interleaved (also a multiple of 512), so the source slice is
+         * always contiguous — no mid-block wrap needed.
+         *
+         * We convert into a local aligned staging buffer first, then memcpy
+         * to dst. Direct vec_st into the libaudio DMA buffer (audioDataStart)
+         * can stall the PPE on Cell because that memory is not in the PPE's
+         * cache-coherent domain in the same way as regular XDR RAM.
+         */
+        {
+            static f32 staging[PS3_AUDIO_BLOCK_SIZE * PS3_AUDIO_CHANNELS] __attribute__((aligned(16)));
+            const s16 * __restrict__ vsrc = src + ring_pos;
+
+            const vector float vscale = vec_splats(1.0f / 32768.0f);
+            const vector float vzero  = vec_splats(0.0f);
+
+            int vmx_iters = block_samples / 8;
+            for (int i = 0; i < vmx_iters; i++) {
+                vector signed short vs16 = vec_ld(0, (const vector signed short *)(vsrc + i * 8));
+                vector signed int vi32_hi = vec_unpackh(vs16);
+                vector signed int vi32_lo = vec_unpackl(vs16);
+                vector float vf_hi = vec_madd(vec_ctf(vi32_hi, 0), vscale, vzero);
+                vector float vf_lo = vec_madd(vec_ctf(vi32_lo, 0), vscale, vzero);
+                vec_st(vf_hi, 0,  staging + i * 8);
+                vec_st(vf_lo, 16, staging + i * 8);
+            }
+
+            memcpy(dst, staging, (size_t)block_samples * sizeof(f32));
         }
 
         ps3_audio_blocks_written++;
@@ -301,6 +330,24 @@ cvar_t *s_doppler;
 
 static soundInterface_t s_snd_if;
 
+/* snd_main.c is not compiled on PS3, so register 'play' here to prevent it
+ * from being forwarded to the server as an unknown client command. */
+static void S_Play_f(void)
+{
+    int i, c;
+    sfxHandle_t h;
+
+    c = Cmd_Argc();
+    if (c < 2)
+        return;
+
+    for (i = 1; i < c; i++) {
+        h = S_Base_RegisterSound(Cmd_Argv(i), qfalse);
+        if (h)
+            S_Base_StartLocalSound(h, CHAN_LOCAL_SOUND);
+    }
+}
+
 void S_Init(void)
 {
     s_volume      = Cvar_Get("s_volume",      "0.8",  CVAR_ARCHIVE);
@@ -312,10 +359,13 @@ void S_Init(void)
 
     Com_Memset(&s_snd_if, 0, sizeof(s_snd_if));
     S_Base_Init(&s_snd_if);
+
+    Cmd_AddCommand("play", S_Play_f);
 }
 
 void S_Shutdown(void)
 {
+    Cmd_RemoveCommand("play");
     if (s_snd_if.Shutdown)
         s_snd_if.Shutdown();
     SNDDMA_Shutdown();
@@ -341,7 +391,6 @@ void        S_StopBackgroundTrack(void)                                { S_Base_
 void        S_RawSamples(int stream,int samples,int rate,int width,int channels,const byte *d,float v,int e)
                                                                        { S_Base_RawSamples(stream,samples,rate,width,channels,d,v,e); }
 
-/* Audio is brought up lazily by SNDDMA_Init via S_Init. */
 void PS3_Snd_Init(void) {}
 
 void PS3_Snd_Shutdown(void)

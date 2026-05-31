@@ -11,9 +11,10 @@ void     PS3_OSK_Shutdown(void);
 
 /* Open the on-screen keyboard. No-op if already open.
  * maxlen: maximum characters the user can type (clamped to 256).
- * autoSubmit: if qtrue, send Enter after injecting the result text
- *             (used for chat so the message is sent immediately). */
-void     PS3_OSK_Open(int maxlen, qboolean autoSubmit);
+ * autoSubmit: if qtrue, send Enter after injecting the result text.
+ * prependSlash: if qtrue, inject a leading '/' before the result text
+ *               so Console_Key treats it as a command, not chat. */
+void     PS3_OSK_Open(int maxlen, qboolean autoSubmit, qboolean prependSlash);
 
 /* Called from the sysutil callback to deliver OSK events. */
 void     PS3_OSK_SysutilCallback(u64 status, u64 param);

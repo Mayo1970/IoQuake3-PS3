@@ -1,16 +1,24 @@
 #---------------------------------------------------------------------------------
-# ioquake3-PS3 Makefile
+# ioquake3-PS3 Unified Makefile
 # Requires ps3toolchain (ps3dev/PSL1GHT) to be built and installed.
 #
 # Environment variables required:
 #   PS3DEV  = /usr/local/ps3dev   (or wherever ps3toolchain installed)
-#   PSL1GHT = $PS3DEV             (PSL1GHT SDK root)
+#   PSL1GHT = $PS3DEV             (PSL1GHT SDK root; defaults to PS3DEV)
 #
 # Usage:
-#   make              - Build ELF
-#   make pkg          - Build PKG for installation
-#   make clean        - Remove build artifacts
-#   make DEBUG=1      - Enable debug logging
+#   make              - Build Q3A ELF
+#   make pkg          - Build Q3A PKG
+#   make ta           - Build Team Arena ELF
+#   make TA=1 pkg     - Build Team Arena PKG
+#   make oa           - Build Open Arena ELF
+#   make OA=1 pkg     - Build Open Arena PKG
+#   make all-flavors  - Build all three PKGs in sequence
+#   make clean        - Remove build artifacts for all three flavors
+#   make DEBUG=1      - Enable debug logging (any flavor)
+#
+# The three flavors use separate build directories so they never stomp each other:
+#   Q3A -> build/    OA -> build_oa/    TA -> build_ta/
 #---------------------------------------------------------------------------------
 
 ifeq ($(strip $(PS3DEV)),)
@@ -18,6 +26,54 @@ ifeq ($(strip $(PS3DEV)),)
 endif
 ifeq ($(strip $(PSL1GHT)),)
   PSL1GHT := $(PS3DEV)
+endif
+
+#---------------------------------------------------------------------------------
+# Flavor selection (q3 is default; `make ta` / `make oa` set TA/OA=1)
+#---------------------------------------------------------------------------------
+
+ifeq ($(MAKECMDGOALS),ta)
+  TA := 1
+endif
+ifeq ($(MAKECMDGOALS),oa)
+  OA := 1
+endif
+
+ifeq ($(TA),1)
+  FLAVOR        := ta
+  TITLE         := Team Arena
+  TITLE_ID      := IOQ3TA00
+  TARGET        := ioquake3_ta_ps3
+  BUILD         := build_ta
+  DEFINES_EXTRA := -DSTANDALONETA
+  ICON0_SUBDIR  := ta
+else ifeq ($(OA),1)
+  FLAVOR        := oa
+  TITLE         := Open Arena
+  TITLE_ID      := IOQ3OA00
+  TARGET        := ioquake3_oa_ps3
+  BUILD         := build_oa
+  DEFINES_EXTRA := -DSTANDALONEOA
+  ICON0_SUBDIR  := oa
+else
+  FLAVOR        := q3
+  TITLE         := ioQuake3
+  TITLE_ID      := IOQ3PS300
+  TARGET        := ioquake3_ps3
+  BUILD         := build
+  DEFINES_EXTRA :=
+  ICON0_SUBDIR  := q3
+endif
+
+CONTENT_ID := UP0001-$(TITLE_ID)_00-0000000000000000
+PORTDIR    := $(CURDIR)
+
+ifneq ($(wildcard $(PORTDIR)/icons/$(ICON0_SUBDIR)/ICON0.PNG),)
+  ICON0 ?= $(PORTDIR)/icons/$(ICON0_SUBDIR)/ICON0.PNG
+else ifneq ($(wildcard $(PORTDIR)/ICON0.PNG),)
+  ICON0 ?= $(PORTDIR)/ICON0.PNG
+else
+  ICON0 ?= $(PS3DEV)/bin/ICON0.PNG
 endif
 
 #---------------------------------------------------------------------------------
@@ -34,26 +90,6 @@ SPRXLINK := $(PS3DEV)/bin/sprxlinker
 FSELF    := $(PS3DEV)/bin/fself
 MAKE_SELF_NPDRM := $(PS3DEV)/bin/make_self_npdrm
 
-#---------------------------------------------------------------------------------
-# Project identity
-#---------------------------------------------------------------------------------
-TARGET    := ioquake3_ps3
-TITLE_ID  := IOQ3PS300
-CONTENT_ID := UP0001-$(TITLE_ID)_00-0000000000000000
-BUILD     := build
-PORTDIR   := $(CURDIR)
-ifneq ($(wildcard $(PORTDIR)/icons/q3/ICON0.PNG),)
-ICON0     ?= $(PORTDIR)/icons/q3/ICON0.PNG
-else ifneq ($(wildcard $(PORTDIR)/ICON0.PNG),)
-ICON0     ?= $(PORTDIR)/ICON0.PNG
-else
-ICON0     ?= $(PS3DEV)/bin/ICON0.PNG
-endif
-
-#---------------------------------------------------------------------------------
-# ioQuake3 sources are vendored under code/ in this repo (patched for PS3).
-# No external IOQ3_DIR / ../ioq3 checkout is required.
-#---------------------------------------------------------------------------------
 
 #---------------------------------------------------------------------------------
 # PSL1GHT SDK paths
@@ -64,7 +100,7 @@ PORTLIBS_INC  := $(PS3DEV)/portlibs/ppu/include
 PORTLIBS_LIB  := $(PS3DEV)/portlibs/ppu/lib
 
 #---------------------------------------------------------------------------------
-# Source files from ioQ3
+# ioq3 sources (same for all three flavors)
 #---------------------------------------------------------------------------------
 IOQ3_SRCS := \
   code/qcommon/cmd.c \
@@ -198,13 +234,13 @@ PS3_SRCS := \
   code/gl/ps3gl_shaders.c
 
 #---------------------------------------------------------------------------------
-# PPC64-correct setjmp/longjmp replacement (overrides broken newlib version)
+# PPC64-correct setjmp/longjmp replacement
 # Must be linked before libc.a for symbol override to work.
 #---------------------------------------------------------------------------------
 PS3_ASM_SRCS := code/sys/ps3_setjmp.S
 
 #---------------------------------------------------------------------------------
-# zlib detection (same logic as Wii port)
+# zlib detection
 #---------------------------------------------------------------------------------
 IOQ3_ZLIB_A := code/libs/zlib/zlib.h
 IOQ3_ZLIB_B := code/zlib/zlib.h
@@ -238,22 +274,18 @@ else
   $(error "zlib.h not found. Build ps3libraries or provide zlib.")
 endif
 
-# Copy zlib.h next to unzip.h for quoted includes
 ZLIB_H_COPY  := code/qcommon/zlib.h
 ZCONF_H_COPY := code/qcommon/zconf.h
 
 #---------------------------------------------------------------------------------
-# Internal libjpeg (bundled jpeg-9f -- avoids PSL1GHT portlibs libjpeg 8.0 bugs)
-# On PPC64 (LP64 ABI), libjpeg's "typedef long INT32" gives 64-bit INT32 which
-# corrupts JPEG decoding. We define XMD_H to suppress jmorecfg.h's INT32/INT16
-# typedefs and provide correct ones via ps3_platform.h.
+# Internal libjpeg (jpeg-9f)
 #---------------------------------------------------------------------------------
 JPEG_DIR      := code/thirdparty/jpeg-9f
 JPEG_CFLAGS   := -DUSE_INTERNAL_JPEG -DXMD_H -I$(JPEG_DIR)
 IOQ3_JPEG_SRCS := $(wildcard $(JPEG_DIR)/j*.c)
 
 #---------------------------------------------------------------------------------
-# Vendored OGG + Vorbis (decoder-only, no encoder files)
+# Vendored OGG + Vorbis
 #---------------------------------------------------------------------------------
 OGG_DIR    := code/thirdparty/libogg-1.3.6
 VORBIS_DIR := code/thirdparty/libvorbis-1.3.7
@@ -296,6 +328,7 @@ CFLAGS := \
   -mno-altivec \
   $(DEBUG_FLAG) \
   -D__PS3__ -D__lv2ppu__ \
+  $(DEFINES_EXTRA) \
   -DMAX_CLIENTS=8 \
   -DMAX_RAW_SAMPLES=8192 \
   -DBOTLIB -DUSE_CODEC_VORBIS=1 -DUSE_CODEC_OPUS=0 -DUSE_OPENAL=0 \
@@ -318,6 +351,10 @@ CFLAGS := \
   -I$(PSL1GHT_INC) \
   -I$(PORTLIBS_INC)
 
+# VMX/AltiVec variant: same flags but -mno-altivec replaced by -maltivec.
+# Used only for files that contain explicit VMX intrinsics.
+CFLAGS_VMX := $(filter-out -mno-altivec,$(CFLAGS)) -maltivec
+
 CXXFLAGS := $(CFLAGS)
 
 LDFLAGS := \
@@ -336,29 +373,50 @@ LIBS := \
 #---------------------------------------------------------------------------------
 ALL_SRCS := $(PS3_SRCS) $(IOQ3_SRCS) $(IOQ3_ZLIB_SRCS) $(IOQ3_JPEG_SRCS) $(IOQ3_OGG_SRCS)
 
-OBJS := $(patsubst %.c,$(BUILD)/%.o,$(ALL_SRCS))
+OBJS     := $(patsubst %.c,$(BUILD)/%.o,$(ALL_SRCS))
 ASM_OBJS := $(patsubst %.S,$(BUILD)/%.o,$(PS3_ASM_SRCS))
 
 #---------------------------------------------------------------------------------
-# Build rules
+# Phony targets
 #---------------------------------------------------------------------------------
-.PHONY: all clean pkg self install prebuild
+.PHONY: all ta oa all-flavors clean pkg self install prebuild
 
 all: $(BUILD)/$(TARGET).elf
 
-# Copy zlib headers next to unzip.h
+ta: $(BUILD)/$(TARGET).elf
+
+oa: $(BUILD)/$(TARGET).elf
+
+#---------------------------------------------------------------------------------
+# Multi-flavor build
+#---------------------------------------------------------------------------------
+all-flavors:
+	@echo "=== Building ioQuake3 ==="
+	$(MAKE) pkg
+	@echo "=== Building Team Arena ==="
+	$(MAKE) TA=1 pkg
+	@echo "=== Building Open Arena ==="
+	$(MAKE) OA=1 pkg
+	@echo "=== All builds complete ==="
+	@ls -1 build/ioquake3_ps3.pkg build_ta/ioquake3_ta_ps3.pkg build_oa/ioquake3_oa_ps3.pkg 2>/dev/null || true
+
+#---------------------------------------------------------------------------------
+# Prebuild: copy zlib headers next to unzip.h
+#---------------------------------------------------------------------------------
 prebuild:
 	@cp $(ZLIB_DIR)/zlib.h $(ZLIB_H_COPY) 2>/dev/null || true
 	@test -f $(ZLIB_DIR)/zconf.h && cp $(ZLIB_DIR)/zconf.h $(ZCONF_H_COPY) || true
 
+#---------------------------------------------------------------------------------
+# Link
+#---------------------------------------------------------------------------------
 $(BUILD)/$(TARGET).elf: prebuild $(ASM_OBJS) $(OBJS)
 	@echo "Linking $@"
 	$(LD) $(CFLAGS) $(LDFLAGS) $(filter %.o,$^) $(LIBS) -o $@
 
-# Rule for assembly files (.S)
-# NOTE: Must NOT use $(CFLAGS) here -- it contains -include ps3_platform.h
-# which pulls C code (typedefs, inline functions) into the assembler.
-# Only pass flags the assembler actually needs.
+#---------------------------------------------------------------------------------
+# Assembly files: must NOT use $(CFLAGS)
+#---------------------------------------------------------------------------------
 ASFLAGS := -mno-altivec
 
 $(BUILD)/%.o: %.S
@@ -366,7 +424,7 @@ $(BUILD)/%.o: %.S
 	@echo "AS $<"
 	@$(CC) $(ASFLAGS) -c $< -o $@
 
-# Default rule for C files
+# Default C rule
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "CC $<"
@@ -378,11 +436,17 @@ $(BUILD)/code/sys/ps3_main.o: code/sys/ps3_main.c
 	@echo "CC $<"
 	@$(CC) $(CFLAGS) -DPS3_INCLUDE_NET -c $< -o $@
 
-# net_ip.c needs network shim
 $(BUILD)/code/qcommon/net_ip.o: code/qcommon/net_ip.c
 	@mkdir -p $(dir $@)
 	@echo "CC $<"
 	@$(CC) $(CFLAGS) -DPS3_INCLUDE_NET -c $< -o $@
+
+# VMX-enabled files: compiled with -maltivec instead of -mno-altivec
+$(BUILD)/code/audio/ps3_snd.o: code/audio/ps3_snd.c
+	@mkdir -p $(dir $@)
+	@echo "CC $< [vmx]"
+	@$(CC) $(CFLAGS_VMX) -c $< -o $@
+
 
 # common.c with overridden memory constants
 $(BUILD)/code/qcommon/common.o: code/qcommon/common.c
@@ -393,7 +457,9 @@ $(BUILD)/code/qcommon/common.o: code/qcommon/common.c
 	       -UMIN_DEDICATED_COMHUNKMEGS -DMIN_DEDICATED_COMHUNKMEGS=16 \
 	       -c $< -o $@
 
-# Run sprxlinker to patch import stubs, then create fake SELF
+#---------------------------------------------------------------------------------
+# self / install / pkg
+#---------------------------------------------------------------------------------
 self: $(BUILD)/$(TARGET).elf
 	@echo "Running sprxlinker..."
 	$(SPRXLINK) $(BUILD)/$(TARGET).elf
@@ -401,25 +467,16 @@ self: $(BUILD)/$(TARGET).elf
 	$(FSELF) $(BUILD)/$(TARGET).elf $(BUILD)/EBOOT.BIN
 	@echo "Done: $(BUILD)/EBOOT.BIN"
 
-# Create installable directory for FTP transfer to PS3 (CFW)
-# Copy build/install/ to /dev_hdd0/game/IOQ3PS300/ via FTP
 install: self
 	@echo "Creating install directory..."
 	@mkdir -p $(BUILD)/install/USRDIR
 	@cp $(BUILD)/EBOOT.BIN $(BUILD)/install/USRDIR/EBOOT.BIN
 	@cp $(ICON0) $(BUILD)/install/ICON0.PNG
-	python3 $(PORTDIR)/make_sfo.py $(BUILD)/install/PARAM.SFO --title "ioQuake3" --appid "$(TITLE_ID)"
+	python3 $(PORTDIR)/make_sfo.py $(BUILD)/install/PARAM.SFO --title "$(TITLE)" --appid "$(TITLE_ID)"
 	@echo ""
-	@echo "Done. FTP the contents of build/install/ to:"
+	@echo "Done. FTP the contents of $(BUILD)/install/ to:"
 	@echo "  /dev_hdd0/game/$(TITLE_ID)/"
-	@echo ""
-	@echo "Directory structure on PS3:"
-	@echo "  /dev_hdd0/game/$(TITLE_ID)/PARAM.SFO"
-	@echo "  /dev_hdd0/game/$(TITLE_ID)/ICON0.PNG"
-	@echo "  /dev_hdd0/game/$(TITLE_ID)/USRDIR/EBOOT.BIN"
-	@echo "  /dev_hdd0/data/ioq3/baseq3/pak0.pk3  (add game data — create dir via FTP)"
 
-# Create PKG for PS3 installation (NPDRM SELF)
 pkg: $(BUILD)/$(TARGET).elf
 	@echo "Running sprxlinker..."
 	$(SPRXLINK) $(BUILD)/$(TARGET).elf
@@ -427,16 +484,17 @@ pkg: $(BUILD)/$(TARGET).elf
 	@mkdir -p $(BUILD)/pkg/USRDIR
 	$(MAKE_SELF_NPDRM) $(BUILD)/$(TARGET).elf $(BUILD)/pkg/USRDIR/EBOOT.BIN $(CONTENT_ID)
 	@echo "Creating SFO..."
-	python3 $(PORTDIR)/make_sfo.py $(BUILD)/pkg/PARAM.SFO --title "ioQuake3" --appid "$(TITLE_ID)"
+	python3 $(PORTDIR)/make_sfo.py $(BUILD)/pkg/PARAM.SFO --title "$(TITLE)" --appid "$(TITLE_ID)"
 	@echo "Copying ICON0.PNG..."
 	@cp $(ICON0) $(BUILD)/pkg/ICON0.PNG
 	@echo "Creating PKG..."
 	python3 $(PS3DEV)/bin/pkg.py --contentid $(CONTENT_ID) $(BUILD)/pkg/ $(BUILD)/$(TARGET).pkg
 	@echo "Done: $(BUILD)/$(TARGET).pkg"
 
+#---------------------------------------------------------------------------------
+# Clean -- wipes all three flavor build dirs
+#---------------------------------------------------------------------------------
 clean:
-	@rm -rf $(BUILD)
+	@rm -rf build/ build_oa/ build_ta/
 	@rm -f $(ZLIB_H_COPY) $(ZCONF_H_COPY)
-	@# Also remove upstream .o files (OBJS resolves build/../ioq3/ to ./ioq3/)
-	@rm -rf ioq3/
 	@echo "Cleaned."

@@ -54,7 +54,6 @@ static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
     }
 }
 
-/* All three variants share /dev_hdd0/data/ioq3 with per-mod subdirs. */
 #if defined(STANDALONEOA)
 #  define PS3_GAMEDIR       "baseoa"
 #  define PS3_LOG_SUFFIX    "log_oa.txt"
@@ -197,23 +196,25 @@ int main(int argc, char *argv[])
         "+set name \"%s\" "
         "+set com_hunkMegs 96 "
         "+set com_zoneMegs 24 "
+        "+set max_routingcache 6144 "
         "+set r_mode -1 "
-        "+set r_customwidth 1280 "
-        "+set r_customheight 720 "
+        "+set r_customwidth 640 "
+        "+set r_customheight 480 "
         "+set r_picmip 1 "
         "+set r_dynamic 1 "
         "+set r_flares 0 "
         "+set r_fastsky 0 "
-        "+set r_lodbias 1 "
+        "+set r_lodbias 2 "
         "+set r_subdivisions 12 "
         "+set r_simpleMipMaps 1 "
         "+set r_drawSun 0 "
         "+set r_primitives 2 "
-        "+set com_maxfps 0 "          /* vsync paces at 60 Hz */
+        "+set com_maxfps 60 "         /* cap at 60; 0 can overfill GCM buffer and stall */
         "+set pmove_fixed 1 "
         "+set s_khz 48 "
         "+set com_soundMegs 8 "
         "+set sv_pure 0 "
+        "+set cl_allowDownload 1 "
         "+set g_doWarmup 0 "          /* Q3 warmup loops on PS3 due to slow cgame load */
         "+set sv_maxclients 8 "
         "+set in_joystick 1 "

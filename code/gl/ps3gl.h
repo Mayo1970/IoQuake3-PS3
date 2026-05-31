@@ -44,7 +44,8 @@
 #define PS3GL_TENV_DECAL        3
 #define PS3GL_TENV_ADD          4
 #define PS3GL_TENV_BLEND        5
-#define PS3GL_TENV_COUNT        6
+#define PS3GL_TENV_MODULATE2    6   /* tex0 * tex1: dual-texture lightmap pass */
+#define PS3GL_TENV_COUNT        7
 
 /* 36-byte interleaved vertex: pos(16) + tc0(8) + tc1(8) + color(4) */
 #pragma pack(push, 1)
@@ -115,6 +116,7 @@ typedef struct {
     void               *vp_ucode;
     uint32_t            vp_ucode_size;
     rsxProgramConst    *mvp_const;
+    rsxProgramConst    *clip_plane_const; /* world-space clip plane uniform; NULL if not in binary */
 
     rsxFragmentProgram *fp;
     void               *fp_ucode;
@@ -159,6 +161,12 @@ typedef struct {
         float    clear_depth;
         uint32_t clear_stencil;
     } rs;
+
+    /* GL_CLIP_PLANE0: clip plane for portal/mirror rendering.
+     * clip_plane[] stores the world-space plane (normal.xyz, dist).
+     * Evaluated in software in DrawElements against world-space vertex positions. */
+    int                 clip_plane_enabled;
+    float               clip_plane[4];     /* (nx,ny,nz,dist): dot(n,v)>=dist keeps */
 
     int                 active_tmu;
     ps3gl_tmu_t         tmu[PS3GL_MAX_TMUS];
@@ -261,6 +269,11 @@ void ps3gl_ClearDepth(GLclampd depth);
 void ps3gl_ClearStencil(GLint s);
 void ps3gl_LineWidth(GLfloat width);
 void ps3gl_ClipPlane(GLenum plane, const GLdouble *equation);
+
+/* PS3-specific: set clip plane directly in world space (normal.xyz, dist).
+ * Avoids the eye-space transform complexity of glClipPlane.
+ * Called from tr_backend.c before the portal/mirror render pass. */
+void ps3gl_SetWorldClipPlane(float nx, float ny, float nz, float dist);
 void ps3gl_GetIntegerv(GLenum pname, GLint *params);
 void ps3gl_GetBooleanv(GLenum pname, GLboolean *params);
 const GLubyte *ps3gl_GetString(GLenum name);

@@ -1,5 +1,3 @@
-/* ps3_platform.h -- force-included via -include. Platform constants and shims. */
-
 #ifndef PS3_PLATFORM_H
 #define PS3_PLATFORM_H
 

@@ -106,62 +106,58 @@ compile_vp q3_vp.vcg q3_vp.vpo
 
 echo ""
 echo "Compiling fragment programs..."
-for fp in q3_fp_coloronly q3_fp_modulate q3_fp_replace q3_fp_decal q3_fp_add q3_fp_blend; do
+for fp in q3_fp_coloronly q3_fp_modulate q3_fp_replace q3_fp_decal q3_fp_add q3_fp_blend q3_fp_modulate2; do
     compile_fp ${fp}.fcg ${fp}.fpo
 done
 
 # ---------- Generate C header with embedded binary data ----------
-HEADER="../ps3gl_shader_data.h"
 echo ""
-echo "Generating $HEADER..."
+echo "Generating ../ps3gl_shader_data.h..."
 
-cat > "$HEADER" <<'EOF'
-/*
- * ps3gl_shader_data.h -- Auto-generated embedded shader binaries.
- * Do not edit manually. Regenerate with: cd shaders && ./compile_shaders.sh
- */
-#ifndef PS3GL_SHADER_DATA_H
-#define PS3GL_SHADER_DATA_H
-
-#define PS3GL_SHADERS_AVAILABLE 1
-
-EOF
-
-bin_to_c_array() {
-    local file="$1"
-    local name="$2"
-    local size=$(wc -c < "$file")
-
-    echo "static const unsigned char ${name}[] __attribute__((aligned(16))) = {" >> "$HEADER"
-    python3 -c "
-import sys
-data = open(sys.argv[1], 'rb').read()
-for i, b in enumerate(data):
-    if i > 0:
-        sys.stdout.write(',')
-    if i % 12 == 0:
-        sys.stdout.write('\n  ')
-    else:
-        sys.stdout.write(' ')
-    sys.stdout.write('0x%02x' % b)
-sys.stdout.write('\n')
-" "$file" >> "$HEADER"
-    echo "};" >> "$HEADER"
-    echo "static const unsigned int ${name}_size = ${size};" >> "$HEADER"
-    echo "" >> "$HEADER"
-}
-
-bin_to_c_array q3_vp.vpo            shader_vp_data
-bin_to_c_array q3_fp_coloronly.fpo   shader_fp_coloronly_data
-bin_to_c_array q3_fp_modulate.fpo    shader_fp_modulate_data
-bin_to_c_array q3_fp_replace.fpo     shader_fp_replace_data
-bin_to_c_array q3_fp_decal.fpo       shader_fp_decal_data
-bin_to_c_array q3_fp_add.fpo         shader_fp_add_data
-bin_to_c_array q3_fp_blend.fpo       shader_fp_blend_data
-
-echo "#endif /* PS3GL_SHADER_DATA_H */" >> "$HEADER"
+python3 - <<'PYEOF'
+import os, sys
+header_path = "../ps3gl_shader_data.h"
+files = [
+    ("q3_vp.vpo",           "shader_vp_data"),
+    ("q3_fp_coloronly.fpo",  "shader_fp_coloronly_data"),
+    ("q3_fp_modulate.fpo",   "shader_fp_modulate_data"),
+    ("q3_fp_replace.fpo",    "shader_fp_replace_data"),
+    ("q3_fp_decal.fpo",      "shader_fp_decal_data"),
+    ("q3_fp_add.fpo",        "shader_fp_add_data"),
+    ("q3_fp_blend.fpo",      "shader_fp_blend_data"),
+    ("q3_fp_modulate2.fpo",  "shader_fp_modulate2_data"),
+]
+lines = [
+    "/*",
+    " * ps3gl_shader_data.h -- Auto-generated embedded shader binaries.",
+    " * Do not edit manually. Regenerate with: cd shaders && ./compile_shaders.sh",
+    " */",
+    "#ifndef PS3GL_SHADER_DATA_H",
+    "#define PS3GL_SHADER_DATA_H",
+    "",
+    "#define PS3GL_SHADERS_AVAILABLE 1",
+    "",
+]
+for fname, varname in files:
+    data = open(fname, "rb").read()
+    lines.append(f"static const unsigned char {varname}[] __attribute__((aligned(16))) = {{")
+    row = []
+    for b in data:
+        row.append(f"0x{b:02x}")
+        if len(row) == 12:
+            lines.append("  " + ", ".join(row) + ",")
+            row = []
+    if row:
+        lines.append("  " + ", ".join(row))
+    lines.append("};")
+    lines.append(f"static const unsigned int {varname}_size = {len(data)};")
+    lines.append("")
+lines.append("#endif /* PS3GL_SHADER_DATA_H */")
+with open(header_path, "w") as f:
+    f.write("\n".join(lines) + "\n")
+print(f"Done. {len(lines)} lines written to {header_path}")
+PYEOF
 
 echo ""
-echo "Done. Generated $HEADER"
 echo "Shader binaries:"
 ls -la *.vpo *.fpo 2>/dev/null

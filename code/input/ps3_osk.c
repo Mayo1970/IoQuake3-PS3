@@ -20,13 +20,12 @@ extern void ps3_log(const char *msg);
 
 #define OSK_MAX_TEXT  256
 
-/* State machine */
 typedef enum {
     OSK_STATE_IDLE,
-    OSK_STATE_OPEN,        /* oskLoadAsync called, waiting for LOADED */
-    OSK_STATE_RUNNING,     /* overlay visible, user is typing */
-    OSK_STATE_DONE,        /* user finished, need to call oskUnloadAsync */
-    OSK_STATE_CLOSING      /* oskUnloadAsync called, waiting for UNLOADED */
+    OSK_STATE_OPEN,
+    OSK_STATE_RUNNING,
+    OSK_STATE_DONE,
+    OSK_STATE_CLOSING
 } oskState_t;
 
 static oskState_t          osk_state = OSK_STATE_IDLE;
@@ -36,9 +35,9 @@ static qboolean            osk_container_valid = qfalse;
 static u16 osk_message[OSK_MAX_TEXT];  /* UCS-2 prompt */
 static u16 osk_result[OSK_MAX_TEXT];   /* UCS-2 result */
 static oskCallbackReturnParam osk_return;
-static qboolean osk_auto_submit = qfalse;  /* send Enter after result (chat) */
+static qboolean osk_auto_submit   = qfalse;  /* send Enter after result */
+static qboolean osk_prepend_slash = qfalse;  /* prepend '/' so console treats it as command */
 
-/* UCS-2 helpers */
 static void ascii_to_ucs2(const char *src, u16 *dst, int maxlen)
 {
     int i;
@@ -51,6 +50,8 @@ static void ascii_to_ucs2(const char *src, u16 *dst, int maxlen)
 static void osk_inject_result(const u16 *str, int len)
 {
     int i;
+    if (osk_prepend_slash)
+        Com_QueueEvent(0, SE_CHAR, '/', 0, 0, NULL);
     for (i = 0; i < len; i++) {
         int ch = (int)str[i];
         if (ch >= 32 && ch <= 126)
@@ -61,8 +62,6 @@ static void osk_inject_result(const u16 *str, int len)
         Com_QueueEvent(0, SE_KEY, K_ENTER, qfalse, 0, NULL);
     }
 }
-
-/* Init / Shutdown */
 
 void PS3_OSK_Init(void)
 {
@@ -96,9 +95,7 @@ void PS3_OSK_Shutdown(void)
     ps3_log("[osk] shutdown");
 }
 
-/* Open the keyboard */
-
-void PS3_OSK_Open(int maxlen, qboolean autoSubmit)
+void PS3_OSK_Open(int maxlen, qboolean autoSubmit, qboolean prependSlash)
 {
     oskParam param;
     oskInputFieldInfo input;
@@ -109,7 +106,8 @@ void PS3_OSK_Open(int maxlen, qboolean autoSubmit)
     if (!osk_container_valid)
         return;
 
-    osk_auto_submit = autoSubmit;
+    osk_auto_submit   = autoSubmit;
+    osk_prepend_slash = prependSlash;
 
     if (maxlen < 1)
         maxlen = 1;
@@ -150,8 +148,6 @@ void PS3_OSK_Open(int maxlen, qboolean autoSubmit)
     osk_state = OSK_STATE_OPEN;
     ps3_log("[osk] opening keyboard");
 }
-
-/* Sysutil callback handler */
 
 void PS3_OSK_SysutilCallback(u64 status, u64 param)
 {
@@ -197,8 +193,6 @@ void PS3_OSK_SysutilCallback(u64 status, u64 param)
         osk_state = OSK_STATE_CLOSING;
     }
 }
-
-/* Status query */
 
 qboolean PS3_OSK_IsActive(void)
 {

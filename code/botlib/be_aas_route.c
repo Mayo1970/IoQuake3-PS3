@@ -738,13 +738,19 @@ aas_routingcache_t *AAS_AllocRoutingCache(int numtraveltimes)
 	aas_routingcache_t *cache;
 	int size;
 
-	//
 	size = sizeof(aas_routingcache_t)
 						+ numtraveltimes * sizeof(unsigned short int)
 						+ numtraveltimes * sizeof(unsigned char);
-	//
+
+	/* Evict LRU entries before allocating to keep cache within the explicit
+	 * size cap. This prevents the AvailableMemory() guard in
+	 * AAS_AreaTravelTimeToGoalArea from firing on every query when the zone
+	 * is under pressure -- which causes a full LRU-list walk per bot per frame. */
+	while (routingcachesize + size > max_routingcachesize) {
+		if (!AAS_FreeOldestCache()) break;
+	}
+
 	routingcachesize += size;
-	//
 	cache = (aas_routingcache_t *) GetClearedMemory(size);
 	cache->reachabilities = (unsigned char *) cache + sizeof(aas_routingcache_t)
 								+ numtraveltimes * sizeof(unsigned short int);

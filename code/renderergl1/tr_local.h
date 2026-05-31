@@ -40,8 +40,10 @@ QGL_DESKTOP_1_1_FIXED_FUNCTION_PROCS;
 QGL_3_0_PROCS;
 #undef GLE
 
-#define GL_INDEX_TYPE		GL_UNSIGNED_INT
-typedef unsigned int glIndex_t;
+/* PS3: index values are bounded by SHADER_MAX_VERTEXES (1000), so uint16
+ * is sufficient. This eliminates the uint32→uint16 copy in ps3gl_DrawElements. */
+#define GL_INDEX_TYPE		GL_UNSIGNED_SHORT
+typedef unsigned short glIndex_t;
 
 // 14 bits
 // can't be increased without changing bit packing for drawsurfs

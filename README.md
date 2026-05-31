@@ -211,7 +211,9 @@ then `\vid_restart`).
 ## Controls (DualShock 3)
 
 Dual-stick FPS layout, analog movement + look, rumble on hits / own pain /
-own weapon fire. Buttons are rebindable from the in-game menu.
+own weapon fire. Buttons are rebindable from the in-game menu. Button names
+(CROSS, CIRCLE, SQUARE, TRIANGLE, L1–R2, L3, R3, SELECT) are displayed in 
+menus and key-binding screens.
 
 ### In-game
 
@@ -255,11 +257,15 @@ Cvars (both `CVAR_ARCHIVE`):
 
 | Input | Action |
 |---|---|
-| **Triangle** | Open PS3 on-screen keyboard |
-| **Cross** | Submit / confirm typed text |
+| **Triangle** (console open) | Open on-screen keyboard; auto-submits as command |
+| **Cross** (console open) | Confirm typed text and execute |
+| **Select + Cross** | Open chat message editor |
+| **Triangle** (chat open) | Open on-screen keyboard; auto-submits as message |
+| **Cross** (chat open) | Confirm typed message and send |
 
-When the console or chat is open, Triangle opens the system OSK. Type,
-press Enter on the OSK, then Cross to submit.
+The OSK is the PS3 system on-screen keyboard. When opened from the console
+context, typed text is auto-submitted as a command (prepended with `/` to
+prevent accidental chat broadcast). From chat context, text is the message body.
 
 ### Menus
 
@@ -270,6 +276,31 @@ press Enter on the OSK, then Cross to submit.
 | **Cross / Triangle / Square** | Confirm (Enter) |
 | **Circle** | Back (Escape) |
 | **Start** | Escape |
+
+---
+
+## Custom music
+
+OGG Vorbis background music playback is fully supported. Custom music tracks
+can be loaded per-map via playlist configs:
+
+**Search order:**
+
+1. `playlist_<mapname>.cfg` — map-specific playlist
+2. `autoexec_<mapname>.cfg` — map-specific autoexec
+3. `playlist.cfg` — fallback generic playlist
+
+**Format** (one path per line; `#` and `//` are comment lines):
+
+```
+random                 # optional: pick one song at random
+music/track1.ogg       # bare path
+music track2.ogg       # or "music <path>" syntax
+```
+
+Place the config in a pk3 under `baseq3/` (or `baseoa/`/`missionpack/`).
+If no playlist config is found for the current map, the engine falls back
+to the map's `CS_MUSIC` config string server-side (no regression).
 
 ---
 

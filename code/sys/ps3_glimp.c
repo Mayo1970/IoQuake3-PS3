@@ -46,8 +46,8 @@ static u32 *ps3_color_buffer[RSX_FB_COUNT];
 static u32 ps3_depth_offset;
 static u32 *ps3_depth_buffer = NULL;
 static int ps3_current_fb = 0;
+static int ps3_current_rt = -1;   /* last render target set on RSX; -1 = none */
 
-/* RSX memory for framebuffers */
 #define RSX_FB_ALIGN    64
 #define RSX_DEPTH_ALIGN 64
 
@@ -78,6 +78,9 @@ static void PS3_RSX_AllocFramebuffers(void)
 
 static void PS3_RSX_SetRenderTarget(int index)
 {
+    if (index == ps3_current_rt) return;
+    ps3_current_rt = index;
+
     gcmSurface sf;
     memset(&sf, 0, sizeof(sf));
 
@@ -179,14 +182,12 @@ void PS3_RSX_Init(void)
         }
     }
 
-    /* Force 720p for performance -- RSX fill rate is the bottleneck at 1080p.
-     * The PS3 hardware scaler will upscale to the TV's native resolution. */
+    /* Render at 720p. Fall back to TV default if unavailable. */
     s32 vid_res = VIDEO_RESOLUTION_720;
     u8  vid_aspect = VIDEO_ASPECT_16_9;
 
     if (!videoGetResolutionAvailability(VIDEO_PRIMARY, VIDEO_RESOLUTION_720,
                                         VIDEO_ASPECT_16_9, 0)) {
-        /* 720p not available -- fall back to whatever the TV reports */
         videoState state;
         videoGetState(0, 0, &state);
         vid_res = state.displayMode.resolution;
@@ -201,7 +202,6 @@ void PS3_RSX_Init(void)
     ps3_display_height = res.height;
     printf("[ps3] Display: %ux%u\n", ps3_display_width, ps3_display_height);
 
-    /* Configure video output */
     videoConfiguration vconfig;
     memset(&vconfig, 0, sizeof(vconfig));
     vconfig.resolution  = vid_res;
@@ -210,10 +210,8 @@ void PS3_RSX_Init(void)
     vconfig.aspect      = vid_aspect;
     videoConfigure(0, &vconfig, NULL, 0);
 
-    /* Allocate and register framebuffers */
     PS3_RSX_AllocFramebuffers();
 
-    /* Set initial render target */
     ps3_current_fb = 0;
     PS3_RSX_SetRenderTarget(ps3_current_fb);
 
@@ -248,6 +246,7 @@ void PS3_RSX_Init(void)
 
 void PS3_RSX_Shutdown(void)
 {
+    ps3_current_rt = -1;
     ps3gl_shutdown();
 
     rsxFinish(ps3_gcm_context, 1);
@@ -272,7 +271,7 @@ static void PS3_RSX_WaitFlip(void)
     if (!ps3_flip_pending) return;
 
     while (gcmGetFlipStatus() != 0) {
-        usleep(50);
+        usleep(500);
     }
     gcmResetFlipStatus();
     ps3_flip_pending = 0;

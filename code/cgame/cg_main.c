@@ -1167,6 +1167,136 @@ const char *CG_ConfigString( int index ) {
 
 /*
 ======================
+CG_LoadCustomMusic
+
+Tries playlist_<mapname>.cfg, then autoexec_<mapname>.cfg, then playlist.cfg.
+Returns qtrue if custom music was started (caller skips default map track).
+======================
+*/
+static qboolean CG_LoadCustomMusic( void ) {
+	char        autoexecPath[MAX_QPATH];
+	char        playlistPath[MAX_QPATH];
+	char        playlistPath2[MAX_QPATH];
+	char        mapnameBase[MAX_QPATH];
+	char        line[MAX_QPATH];
+	char        songs[64][MAX_QPATH];
+	char        musicCmd[MAX_QPATH + 16];
+	char        *p;
+	char        *lineStart;
+	char        *dot;
+	int         fileSize;
+	int         songCount;
+	int         selectedSong;
+	int         len;
+	int         f;
+	int         i;
+	qboolean    randomPlay;
+
+	songCount    = 0;
+	selectedSong = 0;
+	randomPlay   = qfalse;
+
+	// Strip "maps/" prefix and ".bsp" suffix from cgs.mapname
+	Q_strncpyz(mapnameBase, cgs.mapname, sizeof(mapnameBase));
+	if (!Q_stricmpn(mapnameBase, "maps/", 5)) {
+		for (i = 0; mapnameBase[i + 5]; i++) {
+			mapnameBase[i] = mapnameBase[i + 5];
+		}
+		mapnameBase[i] = '\0';
+	}
+	dot = strstr(mapnameBase, ".bsp");
+	if (dot) {
+		*dot = '\0';
+	}
+
+	Com_sprintf(autoexecPath,  sizeof(autoexecPath),  "autoexec_%s.cfg", mapnameBase);
+	Com_sprintf(playlistPath,  sizeof(playlistPath),   "playlist_%s.cfg", mapnameBase);
+	Com_sprintf(playlistPath2, sizeof(playlistPath2),  "playlist.cfg");
+
+	// Step 1: map-specific playlist
+	f = 0;
+	fileSize = trap_FS_FOpenFile(playlistPath, &f, FS_READ);
+	if (fileSize > 0) {
+		goto parse_playlist;
+	}
+	if (f) { trap_FS_FCloseFile(f); f = 0; }
+
+	// Step 2: map-specific autoexec
+	fileSize = trap_FS_FOpenFile(autoexecPath, &f, FS_READ);
+	if (fileSize > 0) {
+		trap_FS_FCloseFile(f);
+		trap_SendConsoleCommand(va("exec %s\n", autoexecPath));
+		return qtrue;
+	}
+	if (f) { trap_FS_FCloseFile(f); f = 0; }
+
+	// Step 3: generic playlist
+	fileSize = trap_FS_FOpenFile(playlistPath2, &f, FS_READ);
+	if (fileSize <= 0) {
+		if (f) { trap_FS_FCloseFile(f); }
+		return qfalse;
+	}
+
+parse_playlist:
+	{
+		static char playlistBuffer[8192];
+
+		if (fileSize >= (int)sizeof(playlistBuffer)) {
+			trap_FS_FCloseFile(f);
+			return qfalse;
+		}
+
+		trap_FS_Read(playlistBuffer, fileSize, f);
+		trap_FS_FCloseFile(f);
+		playlistBuffer[fileSize] = '\0';
+
+		p = playlistBuffer;
+		while (*p && songCount < 64) {
+			while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') { p++; }
+			if (*p == '\0') { break; }
+
+			// skip comment lines
+			if (*p == '#' || (*p == '/' && *(p+1) == '/')) {
+				while (*p && *p != '\n' && *p != '\r') { p++; }
+				continue;
+			}
+
+			lineStart = p;
+			len = 0;
+			while (*p && *p != '\n' && *p != '\r' && len < MAX_QPATH - 1) { p++; len++; }
+
+			if (len > 0) {
+				Com_Memcpy(line, lineStart, len);
+				line[len] = '\0';
+				while (len > 0 && (line[len-1] == ' ' || line[len-1] == '\t')) {
+					line[--len] = '\0';
+				}
+
+				if (!Q_stricmpn(line, "random", 6)) {
+					randomPlay = qtrue;
+				} else if (!Q_stricmpn(line, "music ", 6)) {
+					Q_strncpyz(songs[songCount++], line + 6, MAX_QPATH);
+				} else if (line[0] != '\0') {
+					Q_strncpyz(songs[songCount++], line, MAX_QPATH);
+				}
+			}
+		}
+
+		if (songCount > 0) {
+			if (randomPlay && songCount > 1) {
+				selectedSong = rand() % songCount;
+			}
+			Com_sprintf(musicCmd, sizeof(musicCmd), "music %s\n", songs[selectedSong]);
+			trap_SendConsoleCommand(musicCmd);
+			return qtrue;
+		}
+	}
+
+	return qfalse;
+}
+
+/*
+======================
 CG_StartMusic
 
 ======================
@@ -1174,6 +1304,10 @@ CG_StartMusic
 void CG_StartMusic( void ) {
 	char	*s;
 	char	parm1[MAX_QPATH], parm2[MAX_QPATH];
+
+	if (CG_LoadCustomMusic()) {
+		return;
+	}
 
 	// start the background music
 	s = (char *)CG_ConfigString( CS_MUSIC );

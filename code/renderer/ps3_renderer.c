@@ -117,13 +117,11 @@ static void PS3_RE_BeginFrame(stereoFrame_t stereoFrame)
 
 refexport_t *GetRefAPI(int apiVersion, refimport_t *rimp)
 {
-    /* Pre-boot: return stubs */
     if (!rimp) {
         ps3_log("GetRefAPI: pre-boot stub");
         return PS3_StubRefExport();
     }
 
-    /* Real init */
     ri = *rimp;
     ps3_log("GetRefAPI: real init");
 

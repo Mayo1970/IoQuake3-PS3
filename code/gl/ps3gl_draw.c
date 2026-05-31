@@ -1,19 +1,9 @@
-/*
- * ps3gl_draw.c -- GL-to-RSX layer: vertex array / glDrawElements path.
- *
- * Handles the batch rendering path used by Q3's main renderer:
- * glVertexPointer + glTexCoordPointer + glColorPointer + glDrawElements.
- *
- * Converts vertex arrays to the interleaved ps3gl_vertex_t format,
- * copies into the RSX vertex ring buffer, and issues indexed draws.
- */
+/* GL-to-RSX layer: vertex array / glDrawElements path */
 
 #include "ps3gl.h"
 #include <stdio.h>
 
 extern void ps3gl_inc_draw_count(void);
-
-/* Forward declaration from ps3gl_matrices.c */
 extern const float *ps3gl_get_mvp(void);
 
 /* ----------------------------------------------------------------
@@ -81,15 +71,6 @@ void ps3gl_DrawArrays(GLenum mode, GLint first, GLsizei count)
     (void)mode; (void)first; (void)count;
 }
 
-/* ----------------------------------------------------------------
- * glDrawElements -- main batch draw path
- *
- * Q3 calls this with:
- *   mode = GL_TRIANGLES
- *   type = GL_UNSIGNED_INT
- *   indices = pointer to index array
- * ---------------------------------------------------------------- */
-
 void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
                         const void *indices)
 {
@@ -117,26 +98,13 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
     } else {
         /* Fallback: scan indices for max (shouldn't happen in practice) */
         int max_idx = 0;
-        if (type == GL_UNSIGNED_INT) {
-            const uint32_t *idx = (const uint32_t *)indices;
-            for (int i = 0; i < count; i++) {
-                if ((int)idx[i] > max_idx) max_idx = (int)idx[i];
-            }
-        } else {
-            const uint16_t *idx = (const uint16_t *)indices;
-            for (int i = 0; i < count; i++) {
-                if ((int)idx[i] > max_idx) max_idx = (int)idx[i];
-            }
+        const uint16_t *idx = (const uint16_t *)indices;
+        for (int i = 0; i < count; i++) {
+            if ((int)idx[i] > max_idx) max_idx = (int)idx[i];
         }
         num_verts = max_idx + 1;
     }
 
-    /* Allocate interleaved vertices in ring buffer */
-    uint32_t vb_offset;
-    ps3gl_vertex_t *verts = ps3gl_vring_alloc(num_verts, &vb_offset);
-    if (!verts) return;
-
-    /* Source pointers and strides */
     const uint8_t *vp  = (const uint8_t *)ps3gl.va_vertex.ptr;
     int vs = ps3gl.va_vertex.stride;
     if (vs == 0) vs = ps3gl.va_vertex.size * sizeof(float);
@@ -151,69 +119,128 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
 
     const uint8_t *cp  = (const uint8_t *)ps3gl.va_color.ptr;
     int cs = ps3gl.va_color.stride;
-    if (cs == 0) cs = 4; /* 4 bytes RGBA */
+    if (cs == 0) cs = 4;
 
-    /* Convert vertex arrays to interleaved format */
-    for (int i = 0; i < num_verts; i++) {
-        ps3gl_vertex_t *v = &verts[i];
+    const int has_z = (ps3gl.va_vertex.size >= 3);
 
-        /* Position */
-        const float *pos = (const float *)(vp + i * vs);
-        v->x = pos[0];
-        v->y = pos[1];
-        v->z = (ps3gl.va_vertex.size >= 3) ? pos[2] : 0.0f;
-        v->w = 1.0f;
+    /*
+     * Direct-bind path: if all four arrays live in main XDR memory that the
+     * RSX DMA engine can reach, convert their host pointers to RSX offsets and
+     * bind them directly — no copy into the ring buffer needed.
+     *
+     * rsxAddressToOffset returns 0 on success. It works for any memory
+     * allocated through the PS3 system allocator (hunk, zone, stack) because
+     * PSL1GHT maps all XDR RAM into the RSX IO address space at init time.
+     *
+     * Q3's tr_shade.c passes:
+     *   position : stride 16, float4 (w is padding) — binds as 4×F32
+     *   texcoord : stride 8 or 16, float2            — binds as 2×F32
+     *   color    : stride 4, GL_UNSIGNED_BYTE×4      — binds as 4×U8
+     *
+     * Fall back to the interleave-copy path if any offset conversion fails
+     * (e.g. RSX-local allocation, NULL pointer, or misaligned address).
+     */
+    {
+        uint32_t off_pos  = 0;
+        uint32_t off_tc0  = 0;
+        uint32_t off_tc1  = 0;
+        uint32_t off_col  = 0;
 
-        /* Texcoord 0 */
-        if (tp0) {
-            const float *tc = (const float *)(tp0 + i * ts0);
-            v->u0 = tc[0];
-            v->v0 = tc[1];
+        int direct =
+            (rsxAddressToOffset((void *)vp,  &off_pos) == 0) &&
+            (!tp0 || rsxAddressToOffset((void *)tp0, &off_tc0) == 0) &&
+            (!tp1 || rsxAddressToOffset((void *)tp1, &off_tc1) == 0) &&
+            (!cp  || rsxAddressToOffset((void *)cp,  &off_col) == 0);
+
+        if (direct) {
+            /* Bind Q3's arrays straight from main memory — zero PPE copy. */
+            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0,
+                                     off_pos, vs,
+                                     ps3gl.va_vertex.size >= 4 ? 4 : 4,
+                                     GCM_VERTEX_DATA_TYPE_F32,
+                                     GCM_LOCATION_CELL);
+            if (tp0)
+                rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0,
+                                         off_tc0, ts0, 2,
+                                         GCM_VERTEX_DATA_TYPE_F32,
+                                         GCM_LOCATION_CELL);
+            if (tp1)
+                rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1, 0,
+                                         off_tc1, ts1, 2,
+                                         GCM_VERTEX_DATA_TYPE_F32,
+                                         GCM_LOCATION_CELL);
+            if (cp)
+                rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0,
+                                         off_col, cs, 4,
+                                         GCM_VERTEX_DATA_TYPE_U8,
+                                         GCM_LOCATION_CELL);
         } else {
-            v->u0 = 0.0f;
-            v->v0 = 0.0f;
-        }
+            /* Fallback: interleave-copy into RSX ring buffer. */
+            uint32_t vb_offset;
+            ps3gl_vertex_t *verts = ps3gl_vring_alloc(num_verts, &vb_offset);
+            if (!verts) return;
 
-        /* Texcoord 1 */
-        if (tp1) {
-            const float *tc = (const float *)(tp1 + i * ts1);
-            v->u1 = tc[0];
-            v->v1 = tc[1];
-        } else {
-            v->u1 = 0.0f;
-            v->v1 = 0.0f;
-        }
+            const uint32_t imm_c = ps3gl.imm.color;
 
-        /* Color */
-        if (cp) {
-            const uint8_t *c = cp + i * cs;
-            v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
-        } else {
-            v->color = ps3gl.imm.color;
+            if (tp0 && tp1 && cp) {
+                for (int i = 0; i < num_verts; i++) {
+                    const float   *pos = (const float *)(vp  + i * vs);
+                    const float   *tc0 = (const float *)(tp0 + i * ts0);
+                    const float   *tc1 = (const float *)(tp1 + i * ts1);
+                    const uint8_t *c   = cp + i * cs;
+                    ps3gl_vertex_t *v  = &verts[i];
+                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+                    v->u0 = tc0[0]; v->v0 = tc0[1];
+                    v->u1 = tc1[0]; v->v1 = tc1[1];
+                    v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
+                }
+            } else if (tp0 && cp) {
+                for (int i = 0; i < num_verts; i++) {
+                    const float   *pos = (const float *)(vp  + i * vs);
+                    const float   *tc0 = (const float *)(tp0 + i * ts0);
+                    const uint8_t *c   = cp + i * cs;
+                    ps3gl_vertex_t *v  = &verts[i];
+                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+                    v->u0 = tc0[0]; v->v0 = tc0[1];
+                    v->u1 = 0.0f;  v->v1 = 0.0f;
+                    v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
+                }
+            } else {
+                for (int i = 0; i < num_verts; i++) {
+                    const float   *pos = (const float *)(vp + i * vs);
+                    ps3gl_vertex_t *v  = &verts[i];
+                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+                    if (tp0) { const float *tc = (const float *)(tp0 + i * ts0); v->u0 = tc[0]; v->v0 = tc[1]; }
+                    else     { v->u0 = 0.0f; v->v0 = 0.0f; }
+                    if (tp1) { const float *tc = (const float *)(tp1 + i * ts1); v->u1 = tc[0]; v->v1 = tc[1]; }
+                    else     { v->u1 = 0.0f; v->v1 = 0.0f; }
+                    if (cp)  { const uint8_t *c = cp + i * cs; v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]); }
+                    else     { v->color = imm_c; }
+                }
+            }
+
+            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0,
+                                     vb_offset + PS3GL_VATTR_POS_OFF,
+                                     PS3GL_VERTEX_SIZE, 4,
+                                     GCM_VERTEX_DATA_TYPE_F32,
+                                     GCM_LOCATION_RSX);
+            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0,
+                                     vb_offset + PS3GL_VATTR_TC0_OFF,
+                                     PS3GL_VERTEX_SIZE, 2,
+                                     GCM_VERTEX_DATA_TYPE_F32,
+                                     GCM_LOCATION_RSX);
+            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1, 0,
+                                     vb_offset + PS3GL_VATTR_TC1_OFF,
+                                     PS3GL_VERTEX_SIZE, 2,
+                                     GCM_VERTEX_DATA_TYPE_F32,
+                                     GCM_LOCATION_RSX);
+            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0,
+                                     vb_offset + PS3GL_VATTR_COLOR_OFF,
+                                     PS3GL_VERTEX_SIZE, 4,
+                                     GCM_VERTEX_DATA_TYPE_U8,
+                                     GCM_LOCATION_RSX);
         }
     }
-
-    /* Bind vertex attributes */
-    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0,
-                             vb_offset + PS3GL_VATTR_POS_OFF,
-                             PS3GL_VERTEX_SIZE, 4,
-                             GCM_VERTEX_DATA_TYPE_F32,
-                             GCM_LOCATION_RSX);
-    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0,
-                             vb_offset + PS3GL_VATTR_TC0_OFF,
-                             PS3GL_VERTEX_SIZE, 2,
-                             GCM_VERTEX_DATA_TYPE_F32,
-                             GCM_LOCATION_RSX);
-    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1, 0,
-                             vb_offset + PS3GL_VATTR_TC1_OFF,
-                             PS3GL_VERTEX_SIZE, 2,
-                             GCM_VERTEX_DATA_TYPE_F32,
-                             GCM_LOCATION_RSX);
-    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0,
-                             vb_offset + PS3GL_VATTR_COLOR_OFF,
-                             PS3GL_VERTEX_SIZE, 4,
-                             GCM_VERTEX_DATA_TYPE_U8,
-                             GCM_LOCATION_RSX);
 
     /*
      * Issue indexed draw.
@@ -223,24 +250,61 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
     uint32_t gcm_prim = GCM_TYPE_TRIANGLES; /* Q3 always uses GL_TRIANGLES here */
     (void)mode; /* mode is always GL_TRIANGLES in practice */
 
-    /*
-     * RSX inline index draw expects 16-bit indices.
-     * Q3's indices fit in 16 bits (max ~SHADER_MAX_VERTEXES = 4096).
-     * Static buffer avoids 128KB stack allocation per draw call.
-     */
+    /* RSX inline index draw expects 16-bit indices.
+     * SHADER_MAX_INDEXES = 6000, SHADER_MAX_VERTEXES = 1000, so 65536 is
+     * more than enough. Static buffer avoids a large stack allocation. */
     static uint16_t idx16[65536];
     int n = (count > 65536) ? 65536 : count;
 
-    /* Issue indexed draw */
+    /*
+     * Software GL_CLIP_PLANE0 culling.
+     *
+     * RSX has no fixed-function user clip plane support accessible without
+     * custom vertex program outputs. When the portal/mirror renderer enables
+     * CLIP_PLANE0, we cull triangles where ALL three vertices are behind the
+     * plane (dot < 0). Straddling triangles are kept — they produce a thin
+     * sliver of over-draw at worst, which is visually acceptable. Full
+     * Sutherland-Hodgman clipping would generate new vertices and is not
+     * needed here.
+     *
+     * The clip plane is stored in eye space (as set by glClipPlane). Vertices
+     * in the ring buffer are in object space, so we transform each position by
+     * the current modelview before testing.
+     */
+    if (ps3gl.clip_plane_enabled && n >= 3) {
+        float nx   = ps3gl.clip_plane[0];
+        float ny   = ps3gl.clip_plane[1];
+        float nz   = ps3gl.clip_plane[2];
+        float dist = ps3gl.clip_plane[3];
 
-    if (type == GL_UNSIGNED_INT) {
-        const uint32_t *idx32 = (const uint32_t *)indices;
-        for (int i = 0; i < n; i++)
-            idx16[i] = (uint16_t)idx32[i];
-        rsxDrawInlineIndexArray16(ctx, gcm_prim, 0, n, idx16);
-    } else {
+        /* World-space clip test: dot(normal, world_pos) >= dist keeps the vertex.
+         * For BSP world surfaces, object space == world space, so no MV needed.
+         * Entities with non-identity transforms won't be affected (the clip plane
+         * only matters for the world geometry in the mirror render pass). */
+        static float clip_dist[PS3GL_MAX_VERTS];
+        for (int i = 0; i < num_verts; i++) {
+            const float *pos = (const float *)(vp + i * vs);
+            float wx = pos[0], wy = pos[1], wz = has_z ? pos[2] : 0.0f;
+            clip_dist[i] = nx*wx + ny*wy + nz*wz - dist;
+        }
+
+        int out = 0;
         const uint16_t *src16 = (const uint16_t *)indices;
-        memcpy(idx16, src16, n * sizeof(uint16_t));
-        rsxDrawInlineIndexArray16(ctx, gcm_prim, 0, n, idx16);
+        for (int i = 0; i + 2 < n; i += 3) {
+            uint16_t i0 = src16[i], i1 = src16[i+1], i2 = src16[i+2];
+            if (clip_dist[i0] < 0.0f && clip_dist[i1] < 0.0f && clip_dist[i2] < 0.0f)
+                continue;
+            idx16[out++] = i0;
+            idx16[out++] = i1;
+            idx16[out++] = i2;
+        }
+        if (out > 0)
+            rsxDrawInlineIndexArray16(ctx, gcm_prim, 0, out, idx16);
+        return;
     }
+
+    /* Q3 always passes GL_UNSIGNED_SHORT indices (glIndex_t = uint16_t in tr_local.h).
+     * Direct memcpy into idx16 — no conversion needed. */
+    memcpy(idx16, indices, n * sizeof(uint16_t));
+    rsxDrawInlineIndexArray16(ctx, gcm_prim, 0, n, idx16);
 }

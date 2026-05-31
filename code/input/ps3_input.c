@@ -94,24 +94,24 @@ static void PS3_RumbleStop(void)
 
 /* Cross/Circle dual-map: always K_JOY*, plus K_ENTER/K_ESCAPE when UI active. */
 static const int q3_key_map[NUM_PS3_BUTTONS] = {
-    K_JOY1,             /*  0: Cross    */
-    K_JOY2,             /*  1: Circle   */
-    K_JOY3,             /*  2: Square   */
-    K_JOY4,             /*  3: Triangle */
-    K_JOY5,             /*  4: L1       */
-    K_JOY6,             /*  5: R1       */
-    K_JOY7,             /*  6: L2       */
-    K_JOY8,             /*  7: R2       */
-    K_JOY9,             /*  8: L3       */
-    K_JOY10,            /*  9: R3       */
-    K_ESCAPE,           /* 10: Start    */
-    K_JOY11,            /* 11: Select   */
-    K_UPARROW,          /* 12: D-Up     */
-    K_DOWNARROW,        /* 13: D-Down   */
-    K_LEFTARROW,        /* 14: D-Left   */
-    K_RIGHTARROW,       /* 15: D-Right  */
-    K_JOY7,             /* 16: L2 analog */
-    K_JOY8,             /* 17: R2 analog */
+    K_JOY1,             /* Cross */
+    K_JOY2,             /* Circle */
+    K_JOY3,             /* Square */
+    K_JOY4,             /* Triangle */
+    K_JOY5,             /* L1 */
+    K_JOY6,             /* R1 */
+    K_JOY7,             /* L2 */
+    K_JOY8,             /* R2 */
+    K_JOY9,             /* L3 */
+    K_JOY10,            /* R3 */
+    K_ESCAPE,           /* Start */
+    K_JOY11,            /* Select */
+    K_UPARROW,          /* D-Up */
+    K_DOWNARROW,        /* D-Down */
+    K_LEFTARROW,        /* D-Left */
+    K_RIGHTARROW,       /* D-Right */
+    K_JOY7,             /* L2 analog */
+    K_JOY8,             /* R2 analog */
 };
 
 /* Can't reuse BTN_CROSS -- those are padData bitfield member names. */
@@ -212,25 +212,40 @@ void PS3_Input_Frame(void)
                             !ps3_btn_prev[PS3_BTN_IDX_TRIANGLE]);
     int triangle_consumed = 0;
 
-    if (triangle_pressed) {
-        if (btn_cur[PS3_BTN_IDX_SELECT]) {
-            Com_QueueEvent(0, SE_KEY, K_CONSOLE, qtrue, 0, NULL);
-            Com_QueueEvent(0, SE_KEY, K_CONSOLE, qfalse, 0, NULL);
-            triangle_consumed = 1;
-        } else if (in_text) {
-            qboolean in_chat = (catchers & KEYCATCH_MESSAGE) ? qtrue : qfalse;
-            PS3_OSK_Open(128, in_chat);
-            triangle_consumed = 1;
-        }
+    /* SELECT+TRIANGLE: toggle console */
+    if (triangle_pressed && btn_cur[PS3_BTN_IDX_SELECT]) {
+        Com_QueueEvent(0, SE_KEY, K_CONSOLE, qtrue, 0, NULL);
+        Com_QueueEvent(0, SE_KEY, K_CONSOLE, qfalse, 0, NULL);
+        triangle_consumed = 1;
     }
 
     int cross_pressed = (btn_cur[PS3_BTN_IDX_CROSS] &&
                          !ps3_btn_prev[PS3_BTN_IDX_CROSS]);
     int cross_consumed = 0;
 
-    if (cross_pressed && btn_cur[PS3_BTN_IDX_SELECT] && !in_menu && !in_text) {
-        Cbuf_ExecuteText(EXEC_APPEND, "messagemode\n");
-        cross_consumed = 1;
+    if (cross_pressed) {
+        if (btn_cur[PS3_BTN_IDX_SELECT] && !in_menu && !in_text) {
+            /* SELECT+CROSS: open chat */
+            Cbuf_ExecuteText(EXEC_APPEND, "messagemode\n");
+            cross_consumed = 1;
+        } else if (in_text) {
+            /* CROSS in console: prepend '/' so result is treated as a command.
+             * CROSS in chat: no slash, text is the message body. */
+            qboolean in_console = (catchers & KEYCATCH_CONSOLE) ? qtrue : qfalse;
+            PS3_OSK_Open(128, qtrue, in_console);
+            cross_consumed = 1;
+        }
+    }
+
+    int circle_pressed = (btn_cur[PS3_BTN_IDX_CIRCLE] &&
+                          !ps3_btn_prev[PS3_BTN_IDX_CIRCLE]);
+    int circle_consumed = 0;
+
+    /* CIRCLE closes the console when it's open */
+    if (circle_pressed && (catchers & KEYCATCH_CONSOLE)) {
+        Com_QueueEvent(0, SE_KEY, K_CONSOLE, qtrue, 0, NULL);
+        Com_QueueEvent(0, SE_KEY, K_CONSOLE, qfalse, 0, NULL);
+        circle_consumed = 1;
     }
 
     /* L3+R3 (edge-detected): toggle rumble enable. */
@@ -267,15 +282,19 @@ void PS3_Input_Frame(void)
                 continue;
             }
 
-            Com_QueueEvent(0, SE_KEY, q3_key_map[i],
-                           cur ? qtrue : qfalse, 0, NULL);
+            if (i == PS3_BTN_IDX_CIRCLE && circle_consumed && cur) {
+                ps3_btn_prev[i] = cur;
+                continue;
+            }
 
             if (i == PS3_BTN_IDX_CROSS && in_menu) {
                 Com_QueueEvent(0, SE_KEY, K_ENTER,
                                cur ? qtrue : qfalse, 0, NULL);
-            }
-            if (i == PS3_BTN_IDX_CIRCLE && in_menu) {
+            } else if (i == PS3_BTN_IDX_CIRCLE && in_menu) {
                 Com_QueueEvent(0, SE_KEY, K_ESCAPE,
+                               cur ? qtrue : qfalse, 0, NULL);
+            } else {
+                Com_QueueEvent(0, SE_KEY, q3_key_map[i],
                                cur ? qtrue : qfalse, 0, NULL);
             }
         }
@@ -375,7 +394,6 @@ void IN_Init(void *windowData)
     ps3_rumbleEnable = Cvar_Get("ps3_rumbleEnable", "1",   CVAR_ARCHIVE);
     ps3_rumbleScale  = Cvar_Get("ps3_rumbleScale",  "1.0", CVAR_ARCHIVE);
 
-    /* Axis numbering matches Xbox 360 / twin-stick FPS layout. */
     Cvar_Set("in_joystick", "1");
     Cvar_Set("in_joystickUseAnalog", "1");
     Cvar_Set("j_pitch_axis", "3");

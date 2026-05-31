@@ -103,7 +103,9 @@ static void enable_disable(GLenum cap, int val)
     case GL_MULTISAMPLE:
     case GL_NORMALIZE:
     case GL_POLYGON_OFFSET_LINE:
+        break;
     case GL_CLIP_PLANE0:
+        ps3gl.clip_plane_enabled = val;
         break;
     default:
         break;
@@ -242,7 +244,21 @@ void ps3gl_StencilOp(GLenum fail, GLenum zfail, GLenum zpass)
 }
 
 void ps3gl_LineWidth(GLfloat width)  { (void)width; }
-void ps3gl_ClipPlane(GLenum plane, const GLdouble *eq) { (void)plane; (void)eq; }
+
+void ps3gl_ClipPlane(GLenum plane, const GLdouble *eq)
+{
+    /* Intentional no-op: Q3's portal renderer uses ps3gl_SetWorldClipPlane
+     * instead, which stores the plane in world space for correct evaluation. */
+    (void)plane; (void)eq;
+}
+
+void ps3gl_SetWorldClipPlane(float nx, float ny, float nz, float dist)
+{
+    ps3gl.clip_plane[0] = nx;
+    ps3gl.clip_plane[1] = ny;
+    ps3gl.clip_plane[2] = nz;
+    ps3gl.clip_plane[3] = dist;
+}
 
 /* ----------------------------------------------------------------
  * Clear

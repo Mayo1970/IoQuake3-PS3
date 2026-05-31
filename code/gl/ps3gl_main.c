@@ -68,8 +68,6 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
         }
     }
     memset(ps3gl_ptr, 0, sizeof(ps3gl_state_t));
-
-    /* Verify ps3gl_ptr is still valid after memset (paranoia check) */
     snprintf(dbg, sizeof(dbg), "ps3gl_init: after memset ps3gl_ptr=%p", (void*)ps3gl_ptr);
     ps3_log(dbg);
 
@@ -84,7 +82,6 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
     ps3gl.screen_h = h;
     ps3gl.dirty    = PS3GL_DIRTY_ALL;
 
-    /* Default color: opaque white */
     ps3gl.imm.color = ps3gl_pack_color(1.0f, 1.0f, 1.0f, 1.0f);
 
     /* Default render state */
@@ -131,7 +128,6 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
     ps3gl.rs.clear_depth        = 1.0f;
     ps3gl.rs.clear_stencil      = 0;
 
-    /* TMU defaults */
     for (int i = 0; i < PS3GL_MAX_TMUS; i++) {
         ps3gl.tmu[i].bound   = NULL;
         ps3gl.tmu[i].enabled = 0;

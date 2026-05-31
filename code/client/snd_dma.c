@@ -1436,8 +1436,6 @@ static void S_OpenBackgroundStream( const char *filename ) {
 		return;
 	}
 
-	Com_Printf( "S_OpenBackgroundStream: opened %s rate=%d ch=%d\n",
-		filename, s_backgroundStream->info.rate, s_backgroundStream->info.channels );
 	if(s_backgroundStream->info.channels != 2 || s_backgroundStream->info.rate != 22050) {
 		Com_Printf(S_COLOR_YELLOW "WARNING: music file %s is not 22k stereo\n", filename );
 	}
@@ -1455,7 +1453,7 @@ void S_Base_StartBackgroundTrack( const char *intro, const char *loop ){
 	if ( !loop || !loop[0] ) {
 		loop = intro;
 	}
-	Com_Printf( "S_StartBackgroundTrack( %s, %s )\n", intro, loop );
+	//Com_Printf( "S_StartBackgroundTrack( %s, %s )\n", intro, loop );
 
 	if(!*intro)
 	{

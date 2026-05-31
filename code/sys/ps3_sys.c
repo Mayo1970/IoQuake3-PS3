@@ -272,9 +272,10 @@ char **Sys_ListFiles(const char *directory, const char *extension,
         }
 
         if (dironly) {
-            snprintf(search, sizeof(search), "%s/%s", directory, d->d_name);
+            char dirbuf[MAX_OSPATH * 2];
+            snprintf(dirbuf, sizeof(dirbuf), "%s/%s", directory, d->d_name);
             struct stat st;
-            if (stat(search, &st) == -1) continue;
+            if (stat(dirbuf, &st) == -1) continue;
             if (!S_ISDIR(st.st_mode)) continue;
         }
 
@@ -535,7 +536,6 @@ qboolean Sys_DllExtension(const char *name)
     return qfalse;
 }
 
-/* Everything links statically on PS3. */
 void *Sys_LoadDll(const char *name, qboolean useSystemLib)
 {
     (void)name; (void)useSystemLib;
@@ -605,7 +605,6 @@ int munmap(void *addr, size_t length)
     return 0;
 }
 
-/* minizip file callbacks for pk3 reading via unzip.c. */
 #include "qcommon/unzip.h"
 
 static voidpf ZCALLBACK fopen_file_func(voidpf opaque, const char *filename, int mode)

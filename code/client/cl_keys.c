@@ -106,6 +106,22 @@ keyname_t keynames[] =
 	{"MWHEELUP",	K_MWHEELUP },
 	{"MWHEELDOWN",	K_MWHEELDOWN },
 
+	// PS3 DualShock 3 button name aliases -- placed before JOY* so they
+	// take precedence in Key_KeynumToString (Controls menu / key displays).
+#ifdef __PS3__
+	{"CROSS",    K_JOY1},
+	{"CIRCLE",   K_JOY2},
+	{"SQUARE",   K_JOY3},
+	{"TRIANGLE", K_JOY4},
+	{"L1",       K_JOY5},
+	{"R1",       K_JOY6},
+	{"L2",       K_JOY7},
+	{"R2",       K_JOY8},
+	{"L3",       K_JOY9},
+	{"R3",       K_JOY10},
+	{"SELECT",   K_JOY11},
+#endif
+
 	{"JOY1", K_JOY1},
 	{"JOY2", K_JOY2},
 	{"JOY3", K_JOY3},
