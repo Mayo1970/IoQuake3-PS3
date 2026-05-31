@@ -81,27 +81,43 @@ export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PS3DEV/spu/bin:$PATH
 cd /e/path/to/ioquake3-PS3
 ```
 
-### Build all three variants
-
-PKG (recommended — includes SFO + icon, installs via Package Manager):
+### Build all three variants at once
 
 ```bash
-make clean              && make pkg
-make -f Makefile.oa clean && make -f Makefile.oa pkg
-make -f Makefile.ta clean && make -f Makefile.ta pkg
+make clean && make all-flavors
 ```
 
-ELF / SELF only:
+This builds Q3A, Open Arena, and Team Arena PKGs in sequence:
+- `build/ioquake3_ps3.pkg`
+- `build_oa/ioquake3_oa_ps3.pkg`
+- `build_ta/ioquake3_ta_ps3.pkg`
+
+### Build individual variants
+
+PKG (recommended):
 
 ```bash
-make            # ELF
-make self       # ELF + EBOOT.BIN (fake SELF)
-make install    # FTP-ready EBOOT + PARAM.SFO + ICON0.PNG layout
-make pkg        # full installable PKG
-make clean
+make clean && make pkg              # ioQuake3 (Q3A)
+make clean && make OA=1 pkg         # Open Arena
+make clean && make TA=1 pkg         # Team Arena
 ```
 
-The `Makefile.oa` / `Makefile.ta` variants accept the same targets.
+Or use the shorthand targets:
+
+```bash
+make clean && make oa && make OA=1 pkg    # Open Arena (two steps)
+make clean && make ta && make TA=1 pkg    # Team Arena (two steps)
+```
+
+Other targets (all variants):
+
+```bash
+make              # ELF binary
+make self         # ELF + EBOOT.BIN (fake SELF)
+make install      # FTP-ready EBOOT + PARAM.SFO + ICON0.PNG layout
+make pkg          # full installable PKG
+make clean        # wipe all build dirs (build/, build_oa/, build_ta/)
+```
 
 ### Build flags
 
@@ -117,18 +133,20 @@ The `Makefile.oa` / `Makefile.ta` variants accept the same targets.
 | Open Arena | `build_oa/ioquake3_oa_ps3.pkg` |
 | Team Arena | `build_ta/ioquake3_ta_ps3.pkg` |
 
-Always run the variant's `clean` before rebuilding after a flag change.
+Always run `make clean` before rebuilding after a flag change.
 
-### Standalone macros (under the hood)
+### Compiler flags (under the hood)
 
-- `Makefile.oa` defines `-DSTANDALONEOA`. OA uses `gamename = "Quake3Arena"`
+The Makefile detects `OA=1` / `TA=1` and sets the appropriate defines:
+
+- `OA=1` → `-DSTANDALONEOA`. OA uses `gamename = "Quake3Arena"`
   (real OA 0.8.8 keeps the legacy Q3 gamename for master/auth compat).
-- `Makefile.ta` defines `-DSTANDALONETA`. TA keeps `BASEGAME = "baseq3"` and
+- `TA=1` → `-DSTANDALONETA`. TA keeps `BASEGAME = "baseq3"` and
   forces `+set fs_game missionpack` on boot.
-- Q3 (default) has no standalone define.
+- Neither → Q3A (default, no standalone define).
 
-XMB titles are set via `make_sfo.py --title` in each Makefile's `pkg` /
-`install` target. Icons are picked from `icons/<q3|oa|ta>/ICON0.PNG`.
+XMB titles and icons are set via `make_sfo.py --title` and picked from
+`icons/<q3|oa|ta>/ICON0.PNG` respectively.
 
 ---
 
