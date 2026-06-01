@@ -9,8 +9,8 @@ Three separate builds are produced from the same source tree:
 | Variant | XMB title | TITLE_ID | Game dir on HDD |
 |---|---|---|---|
 | ioQuake3       | **ioQuake3**   | `IOQ3PS300` | `baseq3/` |
-| Open Arena     | **Open Arena** | `IOQ3OA00`  | `baseoa/` |
-| Team Arena     | **Team Arena** | `IOQ3TA00`  | `baseq3/` + `missionpack/` |
+| Open Arena     | **Open Arena** | `IOOAPS300`  | `baseoa/` |
+| Team Arena     | **Team Arena** | `IOTAPS300`  | `baseq3/` + `missionpack/` |
 
 ## Status
 
