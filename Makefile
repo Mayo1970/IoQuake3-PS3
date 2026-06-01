@@ -42,7 +42,7 @@ endif
 ifeq ($(TA),1)
   FLAVOR        := ta
   TITLE         := Team Arena
-  TITLE_ID      := IOQ3TA00
+  TITLE_ID      := IOTAPS300
   TARGET        := ioquake3_ta_ps3
   BUILD         := build_ta
   DEFINES_EXTRA := -DSTANDALONETA
@@ -50,7 +50,7 @@ ifeq ($(TA),1)
 else ifeq ($(OA),1)
   FLAVOR        := oa
   TITLE         := Open Arena
-  TITLE_ID      := IOQ3OA00
+  TITLE_ID      := IOOAPS300
   TARGET        := ioquake3_oa_ps3
   BUILD         := build_oa
   DEFINES_EXTRA := -DSTANDALONEOA
