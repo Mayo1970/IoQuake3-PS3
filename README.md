@@ -374,6 +374,18 @@ Don't raise `DEF_COMHUNKMEGS` above 112 without re-measuring.
   cinematic), delete the on-PS3 `*config.cfg` for that variant — stale
   cvar values can override defaults.
 
+### Known renderer limitations
+
+- `glCopyTexSubImage2D` is a no-op stub. The RSX layer never reads back
+  from the framebuffer, so effects that depend on it would silently render
+  without the copied texture data. Nothing in stock Q3A/TA/OA hits it in
+  practice.
+- `glDrawArrays` / `glArrayElement` are stubs; the Q3 renderer only uses
+  indexed `glDrawElements`.
+- Mirrors/portals are clipped by software triangle culling instead of a
+  hardware clip plane (no fixed-function `GL_CLIP_PLANE` on RSX);
+  straddling triangles produce a thin sliver of over-draw at worst.
+
 ## License
 
 ioQuake3 is GPLv2. This port layer is also GPLv2. See `LICENSE`.

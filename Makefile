@@ -360,6 +360,7 @@ CXXFLAGS := $(CFLAGS)
 LDFLAGS := \
   -L$(PSL1GHT_LIB) \
   -L$(PORTLIBS_LIB) \
+  -Wl,-Map=$(BUILD)/$(TARGET).map \
   -Wl,--wrap,CL_GenerateQKey \
   -Wl,--wrap,Com_Printf
 

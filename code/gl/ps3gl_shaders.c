@@ -114,12 +114,17 @@ void ps3gl_apply_shader(void)
         }
 
         ps3gl.active_shader = key;
+        /* Program load rewrites the VP constant defaults */
+        ps3gl.mvp_uploaded = 0;
     }
 
-    /* MVP matrix must be uploaded every draw call (changes per-surface) */
-    const float *mvp = ps3gl_get_mvp();
-    if (s->mvp_const) {
-        rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const, mvp);
+    /* Upload the MVP only when it changed since the last upload (17 FIFO
+     * words per draw saved -- the 2D/UI layer issues hundreds of draws
+     * under one unchanged ortho matrix). */
+    if (s->mvp_const && !ps3gl.mvp_uploaded) {
+        rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const,
+                                     ps3gl_get_mvp());
+        ps3gl.mvp_uploaded = 1;
     }
 
     /* Upload world-space clip plane when the recompiled shader supports it.

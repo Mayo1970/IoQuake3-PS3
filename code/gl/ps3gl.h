@@ -18,11 +18,27 @@
 #define PS3GL_MAX_TEXTURES      4096
 #define PS3GL_MAX_VERTS         16384   /* per-batch immediate mode */
 
-/* Vertex ring buffer size (RSX memory) */
-#define PS3GL_VRING_SIZE        (2 * 1024 * 1024)
+/* Vertex ring buffer size (RSX memory). Split into two fenced segments;
+ * a single frame normally stays inside the first 8 MB segment. */
+#define PS3GL_VRING_SIZE        (16 * 1024 * 1024)
+
+/* GCM label index for the vertex ring fences. Indices below 64 are
+ * reserved for the system / libgcm internals. */
+#define PS3GL_LABEL_VRING       64
+
+/* GCM label index for the tess arena fences (Session 4 Stage B). */
+#define PS3GL_LABEL_TARENA      65
+
+/* Bytes reserved at the start of the tess arena for carve-once static
+ * buffers (never reset per frame). Currently holds the renderer's
+ * constantColor255 array. */
+#define PS3GL_TARENA_STATIC     4096
 
 /* Identity ARGB remap. Fallback for varying PSL1GHT macro definitions. */
 #define PS3GL_TEX_REMAP_IDENTITY  0x00AAE4
+
+/* Max mip levels: 4096x4096 -> 13 (gcmTexture.mipmap is the level COUNT) */
+#define PS3GL_TEX_MAX_LEVELS    13
 
 /* Dirty flags */
 #define PS3GL_DIRTY_BLEND       0x0001u
@@ -75,6 +91,11 @@ typedef struct {
     uint8_t         bpp;
     uint8_t         wrap_s, wrap_t;
     uint8_t         min_filter, mag_filter;
+    uint8_t         num_levels;     /* mip levels uploaded so far (>=1) */
+    uint8_t         swizzled;       /* SWZ layout (pow2 + mip chain), else LIN */
+    uint8_t         sub_updated;    /* got TexSubImage2D: must stay linear */
+    uint32_t        level_offset[PS3GL_TEX_MAX_LEVELS];
+    uint32_t        total_size;     /* full allocation size (all levels) */
     gcmTexture      gcm_tex;
     int             dirty;
 } ps3gl_texture_t;
@@ -94,20 +115,35 @@ typedef struct {
     int     dirty;
 } ps3gl_matstack_t;
 
-/* Vertex array pointers (glDrawElements path) */
+/* Vertex array pointers (glDrawElements path). enabled tracks
+ * gl{Enable,Disable}ClientState; the pointer itself is never cleared,
+ * matching real GL semantics (disable+re-enable keeps the pointer). */
 typedef struct {
     const void *ptr;
     GLint       size;
     GLenum      type;
     GLsizei     stride;
+    int         enabled;
 } ps3gl_array_ptr_t;
 
-/* Vertex ring buffer in RSX memory */
+/* Vertex ring buffer in RSX memory. Two fenced segments: when the
+ * current segment fills mid-frame, a GCM label fence is written after
+ * the draws that used it, and the other segment is reused only after
+ * the GPU reports that fence — overwriting unread vertices is no
+ * longer possible. */
 typedef struct {
     uint8_t    *base;
     uint32_t    base_off;
     uint32_t    capacity;
     uint32_t    head;
+    uint32_t    seg_size;       /* capacity / 2 */
+    int         cur_seg;        /* segment being filled (0 or 1) */
+    uint32_t    fence_counter;  /* monotonic fence value source */
+    uint32_t    seg_fence[2];   /* fence the GPU must pass before reuse; 0 = free */
+    uint32_t    label_index;    /* GCM label backing this ring's fences */
+    volatile uint32_t *label_addr; /* CPU view of that label */
+    uint32_t   *stat_bytes;     /* per-ring counters in ps3gl_stats_cur */
+    uint32_t   *stat_wraps;
 } ps3gl_vring_t;
 
 /* Shader program pair (vertex + fragment) */
@@ -194,11 +230,23 @@ typedef struct {
 
     ps3gl_vring_t       vring;
 
+    /* Tess vertex arena (Session 4 Stage B): RSX-mapped XDR region the
+     * renderer's tess arrays live in, so the GPU fetches vertex data
+     * directly from main memory (GCM_LOCATION_CELL) with no PPE copy.
+     * tarena.base is the ring portion; tarena_lo/span cover the whole
+     * region including the static carve-once header. */
+    ps3gl_vring_t       tarena;
+    uint8_t            *tarena_lo;       /* region start (static header) */
+    uint32_t            tarena_lo_off;   /* RSX IO offset of tarena_lo */
+    uint32_t            tarena_span;     /* total region size in bytes */
+    uint32_t            tarena_static_used;
+
     ps3gl_texture_t     textures[PS3GL_MAX_TEXTURES];
     GLuint              tex_next_name;
 
     ps3gl_shader_t      shaders[PS3GL_TENV_COUNT];
     int                 active_shader;
+    int                 mvp_uploaded;   /* current MVP already in VP constants */
 
 } ps3gl_state_t;
 
@@ -206,8 +254,31 @@ typedef struct {
 extern ps3gl_state_t *ps3gl_ptr;
 #define ps3gl (*ps3gl_ptr)
 
+/* Per-frame renderer counters (Session 0 instrumentation).
+ * Accumulated into ps3gl_stats_cur during the frame; snapshotted to
+ * ps3gl_stats_last and reset in ps3gl_begin_frame. Lives in .data
+ * (static storage outside the heap state) so it survives state resets. */
+typedef struct {
+    uint32_t draw_calls;       /* DrawElements + immediate-mode flushes */
+    uint32_t draws_elements;   /* DrawElements draws */
+    uint32_t streams_direct;   /* attribute streams bound straight from the arena */
+    uint32_t streams_copied;   /* attribute streams copied through the vring */
+    uint32_t verts_copied;     /* vertices that needed at least one stream copy */
+    uint32_t vring_bytes;      /* bytes allocated from the vertex ring */
+    uint32_t vring_wraps;      /* mid-frame segment switches (fenced, safe) */
+    uint32_t vring_drops;      /* draws dropped: single draw > one segment */
+    uint32_t tarena_bytes;     /* bytes carved from the tess arena */
+    uint32_t tarena_wraps;     /* tess arena segment switches */
+    uint32_t tex_binds;        /* rsxLoadTexture calls */
+    uint32_t tris_clipculled;  /* triangles dropped by sw clip plane */
+    uint32_t idx_bytes;        /* index bytes written to the ring */
+} ps3gl_stats_t;
+
+extern ps3gl_stats_t ps3gl_stats_cur;   /* frame in progress */
+extern ps3gl_stats_t ps3gl_stats_last;  /* last completed frame */
+extern uint32_t      ps3gl_stats_frames; /* frames since init */
+
 gcmContextData *ps3gl_get_ctx(void);
-void ps3gl_restore_if_needed(void);
 
 /* Module init/shutdown */
 void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h);
@@ -233,8 +304,31 @@ void ps3gl_apply_matrices(void);
 void ps3gl_apply_textures(void);
 void ps3gl_apply_shader(void);
 
-/* Vertex ring buffer */
+/* Vertex ring buffer. Index data shares the same ring and fences;
+ * a draw that allocates both vertices and indices must pre-reserve the
+ * combined size with ps3gl_vring_ensure so the segment switch (and its
+ * fence) cannot fall between the two allocations. */
 ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset);
+uint16_t *ps3gl_iring_alloc(int count, uint32_t *out_offset);
+void *ps3gl_vring_alloc_bytes(uint32_t bytes, uint32_t align, uint32_t *out_offset);
+int ps3gl_vring_ensure(uint32_t bytes);
+void ps3gl_vring_frame_reset(void);  /* call at frame start (after WaitFlip) */
+void ps3gl_vring_frame_end(void);    /* call at frame end (before gcmSetFlip) */
+
+/* Tess vertex arena (Session 4 Stage B). The renderer carves its tess
+ * vertex arrays from here so DrawElements can bind them directly with
+ * GCM_LOCATION_CELL. Same fenced-segment discipline as the vring; a
+ * caller making multiple carves that one draw will read must pre-reserve
+ * the combined size with ps3gl_tess_ensure (tr_shade.c does this once
+ * per surface in RB_BeginSurface). The frame reset/end hooks are driven
+ * by the vring frame functions above. */
+void ps3gl_tess_arena_init(void *base, uint32_t size);
+int  ps3gl_tess_ensure(uint32_t bytes);
+void *ps3gl_tess_alloc(uint32_t bytes);
+void *ps3gl_tess_static_alloc(uint32_t bytes); /* carve-once, never reset */
+void ps3gl_tess_trim(void *new_head);          /* give back the ring tail */
+int  ps3gl_tess_owns(const void *p);
+uint32_t ps3gl_tess_offset(const void *p);
 
 /* Texture helpers */
 ps3gl_texture_t *ps3gl_texture_find(GLuint name);

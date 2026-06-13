@@ -242,11 +242,20 @@ void ps3gl_apply_matrices(void)
 
     /* Compute MVP = projection * modelview */
     float mvp[16];
+    float mvp_t[16];
     mat4_mul(mvp, ps3gl.proj.stack[ps3gl.proj.depth],
                   ps3gl.mv.stack[ps3gl.mv.depth]);
 
     /* RSX VP expects constants in row-major order */
-    mat4_transpose(s_mvp, mvp);
+    mat4_transpose(mvp_t, mvp);
+
+    /* Only invalidate the uploaded VP constant when the result actually
+     * changed -- Q3 reloads an identical modelview per surface, and the
+     * 2D/UI layer issues hundreds of draws under one ortho matrix. */
+    if (memcmp(s_mvp, mvp_t, sizeof(s_mvp)) != 0) {
+        memcpy(s_mvp, mvp_t, sizeof(s_mvp));
+        ps3gl.mvp_uploaded = 0;
+    }
 
     ps3gl.mv.dirty  = 0;
     ps3gl.proj.dirty = 0;

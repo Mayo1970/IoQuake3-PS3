@@ -1181,6 +1181,7 @@ void R_Init( void ) {
 	Com_Memset( &tr, 0, sizeof( tr ) );
 	Com_Memset( &backEnd, 0, sizeof( backEnd ) );
 	Com_Memset( &tess, 0, sizeof( tess ) );
+	RB_PS3_TessInitPointers();	/* PS3: tess GPU arrays are arena pointers */
 
 	if(sizeof(glconfig_t) != 11332)
 		ri.Error( ERR_FATAL, "Mod ABI incompatible: sizeof(glconfig_t) == %u != 11332", (unsigned int) sizeof(glconfig_t));
@@ -1190,7 +1191,8 @@ void R_Init( void ) {
 	if ( (intptr_t)tess.xyz & 15 ) {
 		ri.Printf( PRINT_WARNING, "tess.xyz not 16 byte aligned\n" );
 	}
-	Com_Memset( tess.constantColor255, 255, sizeof( tess.constantColor255 ) );
+	/* PS3: constantColor255 is a pointer now -- sizeof() would memset 8 bytes */
+	Com_Memset( tess.constantColor255, 255, SHADER_MAX_VERTEXES * sizeof( color4ub_t ) );
 
 	//
 	// init function tables

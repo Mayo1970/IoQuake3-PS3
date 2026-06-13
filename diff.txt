@@ -1,0 +1,2777 @@
+diff --git a/Makefile b/Makefile
+index e15e178..a7f8248 100644
+--- a/Makefile
++++ b/Makefile
+@@ -360,6 +360,7 @@ CXXFLAGS := $(CFLAGS)
+ LDFLAGS := \
+   -L$(PSL1GHT_LIB) \
+   -L$(PORTLIBS_LIB) \
++  -Wl,-Map=$(BUILD)/$(TARGET).map \
+   -Wl,--wrap,CL_GenerateQKey \
+   -Wl,--wrap,Com_Printf
+ 
+diff --git a/README.md b/README.md
+index b99454e..bffb59b 100644
+--- a/README.md
++++ b/README.md
+@@ -374,6 +374,18 @@ Don't raise `DEF_COMHUNKMEGS` above 112 without re-measuring.
+   cinematic), delete the on-PS3 `*config.cfg` for that variant — stale
+   cvar values can override defaults.
+ 
++### Known renderer limitations
++
++- `glCopyTexSubImage2D` is a no-op stub. The RSX layer never reads back
++  from the framebuffer, so effects that depend on it would silently render
++  without the copied texture data. Nothing in stock Q3A/TA/OA hits it in
++  practice.
++- `glDrawArrays` / `glArrayElement` are stubs; the Q3 renderer only uses
++  indexed `glDrawElements`.
++- Mirrors/portals are clipped by software triangle culling instead of a
++  hardware clip plane (no fixed-function `GL_CLIP_PLANE` on RSX);
++  straddling triangles produce a thin sliver of over-draw at worst.
++
+ ## License
+ 
+ ioQuake3 is GPLv2. This port layer is also GPLv2. See `LICENSE`.
+diff --git a/code/gl/ps3gl.h b/code/gl/ps3gl.h
+index 09a9d77..9dee6b6 100644
+--- a/code/gl/ps3gl.h
++++ b/code/gl/ps3gl.h
+@@ -18,12 +18,28 @@
+ #define PS3GL_MAX_TEXTURES      4096
+ #define PS3GL_MAX_VERTS         16384   /* per-batch immediate mode */
+ 
+-/* Vertex ring buffer size (RSX memory) */
+-#define PS3GL_VRING_SIZE        (2 * 1024 * 1024)
++/* Vertex ring buffer size (RSX memory). Split into two fenced segments;
++ * a single frame normally stays inside the first 8 MB segment. */
++#define PS3GL_VRING_SIZE        (16 * 1024 * 1024)
++
++/* GCM label index for the vertex ring fences. Indices below 64 are
++ * reserved for the system / libgcm internals. */
++#define PS3GL_LABEL_VRING       64
++
++/* GCM label index for the tess arena fences (Session 4 Stage B). */
++#define PS3GL_LABEL_TARENA      65
++
++/* Bytes reserved at the start of the tess arena for carve-once static
++ * buffers (never reset per frame). Currently holds the renderer's
++ * constantColor255 array. */
++#define PS3GL_TARENA_STATIC     4096
+ 
+ /* Identity ARGB remap. Fallback for varying PSL1GHT macro definitions. */
+ #define PS3GL_TEX_REMAP_IDENTITY  0x00AAE4
+ 
++/* Max mip levels: 4096x4096 -> 13 (gcmTexture.mipmap is the level COUNT) */
++#define PS3GL_TEX_MAX_LEVELS    13
++
+ /* Dirty flags */
+ #define PS3GL_DIRTY_BLEND       0x0001u
+ #define PS3GL_DIRTY_ALPHA       0x0002u
+@@ -75,6 +91,11 @@ typedef struct {
+     uint8_t         bpp;
+     uint8_t         wrap_s, wrap_t;
+     uint8_t         min_filter, mag_filter;
++    uint8_t         num_levels;     /* mip levels uploaded so far (>=1) */
++    uint8_t         swizzled;       /* SWZ layout (pow2 + mip chain), else LIN */
++    uint8_t         sub_updated;    /* got TexSubImage2D: must stay linear */
++    uint32_t        level_offset[PS3GL_TEX_MAX_LEVELS];
++    uint32_t        total_size;     /* full allocation size (all levels) */
+     gcmTexture      gcm_tex;
+     int             dirty;
+ } ps3gl_texture_t;
+@@ -94,20 +115,35 @@ typedef struct {
+     int     dirty;
+ } ps3gl_matstack_t;
+ 
+-/* Vertex array pointers (glDrawElements path) */
++/* Vertex array pointers (glDrawElements path). enabled tracks
++ * gl{Enable,Disable}ClientState; the pointer itself is never cleared,
++ * matching real GL semantics (disable+re-enable keeps the pointer). */
+ typedef struct {
+     const void *ptr;
+     GLint       size;
+     GLenum      type;
+     GLsizei     stride;
++    int         enabled;
+ } ps3gl_array_ptr_t;
+ 
+-/* Vertex ring buffer in RSX memory */
++/* Vertex ring buffer in RSX memory. Two fenced segments: when the
++ * current segment fills mid-frame, a GCM label fence is written after
++ * the draws that used it, and the other segment is reused only after
++ * the GPU reports that fence — overwriting unread vertices is no
++ * longer possible. */
+ typedef struct {
+     uint8_t    *base;
+     uint32_t    base_off;
+     uint32_t    capacity;
+     uint32_t    head;
++    uint32_t    seg_size;       /* capacity / 2 */
++    int         cur_seg;        /* segment being filled (0 or 1) */
++    uint32_t    fence_counter;  /* monotonic fence value source */
++    uint32_t    seg_fence[2];   /* fence the GPU must pass before reuse; 0 = free */
++    uint32_t    label_index;    /* GCM label backing this ring's fences */
++    volatile uint32_t *label_addr; /* CPU view of that label */
++    uint32_t   *stat_bytes;     /* per-ring counters in ps3gl_stats_cur */
++    uint32_t   *stat_wraps;
+ } ps3gl_vring_t;
+ 
+ /* Shader program pair (vertex + fragment) */
+@@ -194,11 +230,23 @@ typedef struct {
+ 
+     ps3gl_vring_t       vring;
+ 
++    /* Tess vertex arena (Session 4 Stage B): RSX-mapped XDR region the
++     * renderer's tess arrays live in, so the GPU fetches vertex data
++     * directly from main memory (GCM_LOCATION_CELL) with no PPE copy.
++     * tarena.base is the ring portion; tarena_lo/span cover the whole
++     * region including the static carve-once header. */
++    ps3gl_vring_t       tarena;
++    uint8_t            *tarena_lo;       /* region start (static header) */
++    uint32_t            tarena_lo_off;   /* RSX IO offset of tarena_lo */
++    uint32_t            tarena_span;     /* total region size in bytes */
++    uint32_t            tarena_static_used;
++
+     ps3gl_texture_t     textures[PS3GL_MAX_TEXTURES];
+     GLuint              tex_next_name;
+ 
+     ps3gl_shader_t      shaders[PS3GL_TENV_COUNT];
+     int                 active_shader;
++    int                 mvp_uploaded;   /* current MVP already in VP constants */
+ 
+ } ps3gl_state_t;
+ 
+@@ -206,8 +254,31 @@ typedef struct {
+ extern ps3gl_state_t *ps3gl_ptr;
+ #define ps3gl (*ps3gl_ptr)
+ 
++/* Per-frame renderer counters (Session 0 instrumentation).
++ * Accumulated into ps3gl_stats_cur during the frame; snapshotted to
++ * ps3gl_stats_last and reset in ps3gl_begin_frame. Lives in .data
++ * (static storage outside the heap state) so it survives state resets. */
++typedef struct {
++    uint32_t draw_calls;       /* DrawElements + immediate-mode flushes */
++    uint32_t draws_elements;   /* DrawElements draws */
++    uint32_t streams_direct;   /* attribute streams bound straight from the arena */
++    uint32_t streams_copied;   /* attribute streams copied through the vring */
++    uint32_t verts_copied;     /* vertices that needed at least one stream copy */
++    uint32_t vring_bytes;      /* bytes allocated from the vertex ring */
++    uint32_t vring_wraps;      /* mid-frame segment switches (fenced, safe) */
++    uint32_t vring_drops;      /* draws dropped: single draw > one segment */
++    uint32_t tarena_bytes;     /* bytes carved from the tess arena */
++    uint32_t tarena_wraps;     /* tess arena segment switches */
++    uint32_t tex_binds;        /* rsxLoadTexture calls */
++    uint32_t tris_clipculled;  /* triangles dropped by sw clip plane */
++    uint32_t idx_bytes;        /* index bytes written to the ring */
++} ps3gl_stats_t;
++
++extern ps3gl_stats_t ps3gl_stats_cur;   /* frame in progress */
++extern ps3gl_stats_t ps3gl_stats_last;  /* last completed frame */
++extern uint32_t      ps3gl_stats_frames; /* frames since init */
++
+ gcmContextData *ps3gl_get_ctx(void);
+-void ps3gl_restore_if_needed(void);
+ 
+ /* Module init/shutdown */
+ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h);
+@@ -233,8 +304,31 @@ void ps3gl_apply_matrices(void);
+ void ps3gl_apply_textures(void);
+ void ps3gl_apply_shader(void);
+ 
+-/* Vertex ring buffer */
++/* Vertex ring buffer. Index data shares the same ring and fences;
++ * a draw that allocates both vertices and indices must pre-reserve the
++ * combined size with ps3gl_vring_ensure so the segment switch (and its
++ * fence) cannot fall between the two allocations. */
+ ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset);
++uint16_t *ps3gl_iring_alloc(int count, uint32_t *out_offset);
++void *ps3gl_vring_alloc_bytes(uint32_t bytes, uint32_t align, uint32_t *out_offset);
++int ps3gl_vring_ensure(uint32_t bytes);
++void ps3gl_vring_frame_reset(void);  /* call at frame start (after WaitFlip) */
++void ps3gl_vring_frame_end(void);    /* call at frame end (before gcmSetFlip) */
++
++/* Tess vertex arena (Session 4 Stage B). The renderer carves its tess
++ * vertex arrays from here so DrawElements can bind them directly with
++ * GCM_LOCATION_CELL. Same fenced-segment discipline as the vring; a
++ * caller making multiple carves that one draw will read must pre-reserve
++ * the combined size with ps3gl_tess_ensure (tr_shade.c does this once
++ * per surface in RB_BeginSurface). The frame reset/end hooks are driven
++ * by the vring frame functions above. */
++void ps3gl_tess_arena_init(void *base, uint32_t size);
++int  ps3gl_tess_ensure(uint32_t bytes);
++void *ps3gl_tess_alloc(uint32_t bytes);
++void *ps3gl_tess_static_alloc(uint32_t bytes); /* carve-once, never reset */
++void ps3gl_tess_trim(void *new_head);          /* give back the ring tail */
++int  ps3gl_tess_owns(const void *p);
++uint32_t ps3gl_tess_offset(const void *p);
+ 
+ /* Texture helpers */
+ ps3gl_texture_t *ps3gl_texture_find(GLuint name);
+diff --git a/code/gl/ps3gl_draw.c b/code/gl/ps3gl_draw.c
+index 8211aa9..79db090 100644
+--- a/code/gl/ps3gl_draw.c
++++ b/code/gl/ps3gl_draw.c
+@@ -38,20 +38,21 @@ void ps3gl_ColorPointer(GLint size, GLenum type, GLsizei stride,
+     ps3gl.va_color.stride = stride;
+ }
+ 
+-void ps3gl_EnableClientState(GLenum cap)  { (void)cap; }
+-
+-void ps3gl_DisableClientState(GLenum cap)
++static void ps3gl_set_client_state(GLenum cap, int enabled)
+ {
+     switch (cap) {
+-    case GL_VERTEX_ARRAY:        ps3gl.va_vertex.ptr = NULL; break;
+-    case GL_COLOR_ARRAY:         ps3gl.va_color.ptr  = NULL; break;
++    case GL_VERTEX_ARRAY:        ps3gl.va_vertex.enabled = enabled; break;
++    case GL_COLOR_ARRAY:         ps3gl.va_color.enabled  = enabled; break;
+     case GL_TEXTURE_COORD_ARRAY:
+-        ps3gl.va_texcoord[ps3gl.client_active_tmu].ptr = NULL;
++        ps3gl.va_texcoord[ps3gl.client_active_tmu].enabled = enabled;
+         break;
+     default: break;
+     }
+ }
+ 
++void ps3gl_EnableClientState(GLenum cap)  { ps3gl_set_client_state(cap, 1); }
++void ps3gl_DisableClientState(GLenum cap) { ps3gl_set_client_state(cap, 0); }
++
+ void ps3gl_LockArraysEXT(GLint first, GLsizei count)
+ {
+     ps3gl.va_locked     = 1;
+@@ -75,8 +76,9 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
+                         const void *indices)
+ {
+     if (count <= 0) return;
+-    if (!ps3gl.va_vertex.ptr) return;
++    if (!ps3gl.va_vertex.enabled || !ps3gl.va_vertex.ptr) return;
+     ps3gl_inc_draw_count();
++    ps3gl_stats_cur.draw_calls++;
+ 
+     /* Apply all deferred state */
+     ps3gl_apply_states();
+@@ -109,152 +111,182 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
+     int vs = ps3gl.va_vertex.stride;
+     if (vs == 0) vs = ps3gl.va_vertex.size * sizeof(float);
+ 
+-    const uint8_t *tp0 = (const uint8_t *)ps3gl.va_texcoord[0].ptr;
++    /* A disabled client array is treated as absent even if a stale
++     * pointer is still set (GL semantics; pointers survive disable). */
++    const uint8_t *tp0 = ps3gl.va_texcoord[0].enabled
++                       ? (const uint8_t *)ps3gl.va_texcoord[0].ptr : NULL;
+     int ts0 = ps3gl.va_texcoord[0].stride;
+     if (ts0 == 0) ts0 = 2 * sizeof(float);
+ 
+-    const uint8_t *tp1 = (const uint8_t *)ps3gl.va_texcoord[1].ptr;
++    const uint8_t *tp1 = ps3gl.va_texcoord[1].enabled
++                       ? (const uint8_t *)ps3gl.va_texcoord[1].ptr : NULL;
+     int ts1 = ps3gl.va_texcoord[1].stride;
+     if (ts1 == 0) ts1 = 2 * sizeof(float);
+ 
+-    const uint8_t *cp  = (const uint8_t *)ps3gl.va_color.ptr;
++    const uint8_t *cp  = ps3gl.va_color.enabled
++                       ? (const uint8_t *)ps3gl.va_color.ptr : NULL;
+     int cs = ps3gl.va_color.stride;
+     if (cs == 0) cs = 4;
+ 
+     const int has_z = (ps3gl.va_vertex.size >= 3);
+ 
+     /*
+-     * Direct-bind path: if all four arrays live in main XDR memory that the
+-     * RSX DMA engine can reach, convert their host pointers to RSX offsets and
+-     * bind them directly — no copy into the ring buffer needed.
+-     *
+-     * rsxAddressToOffset returns 0 on success. It works for any memory
+-     * allocated through the PS3 system allocator (hunk, zone, stack) because
+-     * PSL1GHT maps all XDR RAM into the RSX IO address space at init time.
++     * Zero-copy vertex fetch (Session 4 Stage B).
+      *
+-     * Q3's tr_shade.c passes:
+-     *   position : stride 16, float4 (w is padding) — binds as 4×F32
+-     *   texcoord : stride 8 or 16, float2            — binds as 2×F32
+-     *   color    : stride 4, GL_UNSIGNED_BYTE×4      — binds as 4×U8
++     * The renderer's tess arrays live in the RSX-mapped XDR tess arena
++     * (ps3gl_tess_*), so any stream whose pointer falls inside it is
++     * bound directly with GCM_LOCATION_CELL — the RSX DMA engine pulls
++     * the data straight from main memory, no PPE copy. Streams outside
++     * the arena (the dlight pass's static arrays, immediate-mode-less
++     * callers) take the Stage A bulk-copy path into the VRAM vring;
++     * the two can mix freely within one draw since each attribute binds
++     * with its own offset, stride and location.
+      *
+-     * Fall back to the interleave-copy path if any offset conversion fails
+-     * (e.g. RSX-local allocation, NULL pointer, or misaligned address).
++     * Position binds with va_vertex.size components; the RSX supplies
++     * the standard (0,0,0,1) defaults for missing components, which
++     * reproduces the w=1.0 the old repack loop wrote. Binding the 4th
++     * source float instead would feed SIMD padding garbage into pos.w.
+      */
+     {
+-        uint32_t off_pos  = 0;
+-        uint32_t off_tc0  = 0;
+-        uint32_t off_tc1  = 0;
+-        uint32_t off_col  = 0;
+-
+-        int direct =
+-            (rsxAddressToOffset((void *)vp,  &off_pos) == 0) &&
+-            (!tp0 || rsxAddressToOffset((void *)tp0, &off_tc0) == 0) &&
+-            (!tp1 || rsxAddressToOffset((void *)tp1, &off_tc1) == 0) &&
+-            (!cp  || rsxAddressToOffset((void *)cp,  &off_col) == 0);
+-
+-        if (direct) {
+-            /* Bind Q3's arrays straight from main memory — zero PPE copy. */
+-            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0,
+-                                     off_pos, vs,
+-                                     ps3gl.va_vertex.size >= 4 ? 4 : 4,
+-                                     GCM_VERTEX_DATA_TYPE_F32,
+-                                     GCM_LOCATION_CELL);
+-            if (tp0)
+-                rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0,
+-                                         off_tc0, ts0, 2,
+-                                         GCM_VERTEX_DATA_TYPE_F32,
+-                                         GCM_LOCATION_CELL);
+-            if (tp1)
+-                rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1, 0,
+-                                         off_tc1, ts1, 2,
+-                                         GCM_VERTEX_DATA_TYPE_F32,
+-                                         GCM_LOCATION_CELL);
+-            if (cp)
+-                rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0,
+-                                         off_col, cs, 4,
+-                                         GCM_VERTEX_DATA_TYPE_U8,
+-                                         GCM_LOCATION_CELL);
++        int pos_size = ps3gl.va_vertex.size;
++        if (pos_size < 2) pos_size = 2;
++        else if (pos_size > 4) pos_size = 4;
++
++        const int pos_direct = ps3gl_tess_owns(vp);
++        const int tc0_direct = tp0 && ps3gl_tess_owns(tp0);
++        const int tc1_direct = tp1 && ps3gl_tess_owns(tp1);
++        const int col_direct = cp  && ps3gl_tess_owns(cp);
++
++        /* Copy (n-1)*stride + elem_size bytes: covers every vertex without
++         * reading past the last element of the source array. 0 = direct. */
++        uint32_t esz_pos   = (uint32_t)pos_size * sizeof(float);
++        uint32_t pos_bytes = pos_direct ? 0
++                           : (uint32_t)(num_verts - 1) * (uint32_t)vs + esz_pos;
++        uint32_t tc0_bytes = tc0_direct ? 0
++                           : tp0 ? (uint32_t)(num_verts - 1) * (uint32_t)ts0 + 8
++                                 : (uint32_t)num_verts * 8;
++        uint32_t tc1_bytes = (tp1 && !tc1_direct)
++                           ? (uint32_t)(num_verts - 1) * (uint32_t)ts1 + 8
++                           : 0;
++        uint32_t col_bytes = col_direct ? 0
++                           : cp  ? (uint32_t)(num_verts - 1) * (uint32_t)cs + 4
++                                 : (uint32_t)num_verts * 4;
++
++        /* Reserve all vring carves (copied streams + indices) together:
++         * a segment switch between carves would fence data this draw
++         * still reads (+16 per stream / +128 cover the alignment pads). */
++        uint32_t reserve = 128 + (uint32_t)count * sizeof(uint16_t);
++        if (pos_bytes) reserve += pos_bytes + 16;
++        if (tc0_bytes) reserve += tc0_bytes + 16;
++        if (tc1_bytes) reserve += tc1_bytes + 16;
++        if (col_bytes) reserve += col_bytes + 16;
++        if (!ps3gl_vring_ensure(reserve)) return;
++
++        ps3gl_stats_cur.draws_elements++;
++        ps3gl_stats_cur.streams_direct +=
++            pos_direct + tc0_direct + tc1_direct + col_direct;
++        if (pos_bytes || tc0_bytes || tc1_bytes || col_bytes) {
++            ps3gl_stats_cur.verts_copied += (uint32_t)num_verts;
++            ps3gl_stats_cur.streams_copied +=
++                (pos_bytes != 0) + (tc0_bytes != 0) +
++                (tc1_bytes != 0) + (col_bytes != 0);
++        }
++
++        uint32_t off_pos, off_tc0, off_tc1, off_col;
++        uint8_t  loc_pos, loc_tc0, loc_tc1, loc_col;
++        uint8_t *dst;
++
++        if (pos_direct) {
++            off_pos = ps3gl_tess_offset(vp);
++            loc_pos = GCM_LOCATION_CELL;
++        } else {
++            dst = ps3gl_vring_alloc_bytes(pos_bytes, 16, &off_pos);
++            if (!dst) return;
++            memcpy(dst, vp, pos_bytes);
++            loc_pos = GCM_LOCATION_RSX;
++        }
++
++        /* No texcoord array (rare: untextured passes): splat zeros once;
++         * the fragment program doesn't sample, values just need to be
++         * valid memory for the vertex fetch. */
++        int bind_ts0 = tp0 ? ts0 : 8;
++        if (tc0_direct) {
++            off_tc0 = ps3gl_tess_offset(tp0);
++            loc_tc0 = GCM_LOCATION_CELL;
+         } else {
+-            /* Fallback: interleave-copy into RSX ring buffer. */
+-            uint32_t vb_offset;
+-            ps3gl_vertex_t *verts = ps3gl_vring_alloc(num_verts, &vb_offset);
+-            if (!verts) return;
+-
+-            const uint32_t imm_c = ps3gl.imm.color;
+-
+-            if (tp0 && tp1 && cp) {
+-                for (int i = 0; i < num_verts; i++) {
+-                    const float   *pos = (const float *)(vp  + i * vs);
+-                    const float   *tc0 = (const float *)(tp0 + i * ts0);
+-                    const float   *tc1 = (const float *)(tp1 + i * ts1);
+-                    const uint8_t *c   = cp + i * cs;
+-                    ps3gl_vertex_t *v  = &verts[i];
+-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+-                    v->u0 = tc0[0]; v->v0 = tc0[1];
+-                    v->u1 = tc1[0]; v->v1 = tc1[1];
+-                    v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
+-                }
+-            } else if (tp0 && cp) {
+-                for (int i = 0; i < num_verts; i++) {
+-                    const float   *pos = (const float *)(vp  + i * vs);
+-                    const float   *tc0 = (const float *)(tp0 + i * ts0);
+-                    const uint8_t *c   = cp + i * cs;
+-                    ps3gl_vertex_t *v  = &verts[i];
+-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+-                    v->u0 = tc0[0]; v->v0 = tc0[1];
+-                    v->u1 = 0.0f;  v->v1 = 0.0f;
+-                    v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
+-                }
++            dst = ps3gl_vring_alloc_bytes(tc0_bytes, 16, &off_tc0);
++            if (!dst) return;
++            if (tp0) memcpy(dst, tp0, tc0_bytes);
++            else     memset(dst, 0, tc0_bytes);
++            loc_tc0 = GCM_LOCATION_RSX;
++        }
++
++        /* No TEX1 array (the common single-texture case): re-bind the
++         * TEX0 stream — valid data, ignored by the fragment program,
++         * zero extra copy. */
++        int bind_ts1;
++        if (tp1) {
++            if (tc1_direct) {
++                off_tc1 = ps3gl_tess_offset(tp1);
++                loc_tc1 = GCM_LOCATION_CELL;
+             } else {
+-                for (int i = 0; i < num_verts; i++) {
+-                    const float   *pos = (const float *)(vp + i * vs);
+-                    ps3gl_vertex_t *v  = &verts[i];
+-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+-                    if (tp0) { const float *tc = (const float *)(tp0 + i * ts0); v->u0 = tc[0]; v->v0 = tc[1]; }
+-                    else     { v->u0 = 0.0f; v->v0 = 0.0f; }
+-                    if (tp1) { const float *tc = (const float *)(tp1 + i * ts1); v->u1 = tc[0]; v->v1 = tc[1]; }
+-                    else     { v->u1 = 0.0f; v->v1 = 0.0f; }
+-                    if (cp)  { const uint8_t *c = cp + i * cs; v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]); }
+-                    else     { v->color = imm_c; }
+-                }
++                dst = ps3gl_vring_alloc_bytes(tc1_bytes, 16, &off_tc1);
++                if (!dst) return;
++                memcpy(dst, tp1, tc1_bytes);
++                loc_tc1 = GCM_LOCATION_RSX;
+             }
++            bind_ts1 = ts1;
++        } else {
++            off_tc1  = off_tc0;
++            loc_tc1  = loc_tc0;
++            bind_ts1 = bind_ts0;
++        }
+ 
+-            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0,
+-                                     vb_offset + PS3GL_VATTR_POS_OFF,
+-                                     PS3GL_VERTEX_SIZE, 4,
+-                                     GCM_VERTEX_DATA_TYPE_F32,
+-                                     GCM_LOCATION_RSX);
+-            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0,
+-                                     vb_offset + PS3GL_VATTR_TC0_OFF,
+-                                     PS3GL_VERTEX_SIZE, 2,
+-                                     GCM_VERTEX_DATA_TYPE_F32,
+-                                     GCM_LOCATION_RSX);
+-            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1, 0,
+-                                     vb_offset + PS3GL_VATTR_TC1_OFF,
+-                                     PS3GL_VERTEX_SIZE, 2,
+-                                     GCM_VERTEX_DATA_TYPE_F32,
+-                                     GCM_LOCATION_RSX);
+-            rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0,
+-                                     vb_offset + PS3GL_VATTR_COLOR_OFF,
+-                                     PS3GL_VERTEX_SIZE, 4,
+-                                     GCM_VERTEX_DATA_TYPE_U8,
+-                                     GCM_LOCATION_RSX);
++        /* Source color bytes are r,g,b,a in memory — identical to what
++         * ps3gl_pack_color_ub produced on big-endian, so the raw stream
++         * binds (or copies) without repacking. */
++        int bind_cs = cp ? cs : 4;
++        if (col_direct) {
++            off_col = ps3gl_tess_offset(cp);
++            loc_col = GCM_LOCATION_CELL;
++        } else {
++            dst = ps3gl_vring_alloc_bytes(col_bytes, 16, &off_col);
++            if (!dst) return;
++            if (cp) {
++                memcpy(dst, cp, col_bytes);
++            } else {
++                const uint32_t imm_c = ps3gl.imm.color;
++                uint32_t *cd = (uint32_t *)dst;
++                for (int i = 0; i < num_verts; i++) cd[i] = imm_c;
++            }
++            loc_col = GCM_LOCATION_RSX;
+         }
++
++        rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0,
++                                 off_pos, vs, pos_size,
++                                 GCM_VERTEX_DATA_TYPE_F32, loc_pos);
++        rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0,
++                                 off_tc0, bind_ts0, 2,
++                                 GCM_VERTEX_DATA_TYPE_F32, loc_tc0);
++        rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1, 0,
++                                 off_tc1, bind_ts1, 2,
++                                 GCM_VERTEX_DATA_TYPE_F32, loc_tc1);
++        rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0,
++                                 off_col, bind_cs, 4,
++                                 GCM_VERTEX_DATA_TYPE_U8, loc_col);
+     }
+ 
+     /*
+      * Issue indexed draw.
+-     * For RSX we use inline index submission (indices live in main memory,
+-     * pushed into command buffer). This avoids needing index data in RSX memory.
++     * Indices are written once into the shared ring buffer and the draw
++     * references them by RSX offset — ~7 FIFO words per draw, instead of
++     * pushing every index through the command buffer (a 6000-index draw
++     * used to inject 12 KB of FIFO traffic via rsxDrawInlineIndexArray16).
+      */
+     uint32_t gcm_prim = GCM_TYPE_TRIANGLES; /* Q3 always uses GL_TRIANGLES here */
+     (void)mode; /* mode is always GL_TRIANGLES in practice */
+ 
+-    /* RSX inline index draw expects 16-bit indices.
+-     * SHADER_MAX_INDEXES = 6000, SHADER_MAX_VERTEXES = 1000, so 65536 is
+-     * more than enough. Static buffer avoids a large stack allocation. */
+-    static uint16_t idx16[65536];
+-    int n = (count > 65536) ? 65536 : count;
++    int n = count;
+ 
+     /*
+      * Software GL_CLIP_PLANE0 culling.
+@@ -288,23 +320,33 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
+             clip_dist[i] = nx*wx + ny*wy + nz*wz - dist;
+         }
+ 
++        uint32_t idx_off;
++        uint16_t *idst = ps3gl_iring_alloc(n, &idx_off);
++        if (!idst) return;
++
+         int out = 0;
+         const uint16_t *src16 = (const uint16_t *)indices;
+         for (int i = 0; i + 2 < n; i += 3) {
+             uint16_t i0 = src16[i], i1 = src16[i+1], i2 = src16[i+2];
+             if (clip_dist[i0] < 0.0f && clip_dist[i1] < 0.0f && clip_dist[i2] < 0.0f)
+                 continue;
+-            idx16[out++] = i0;
+-            idx16[out++] = i1;
+-            idx16[out++] = i2;
++            idst[out++] = i0;
++            idst[out++] = i1;
++            idst[out++] = i2;
+         }
++        ps3gl_stats_cur.tris_clipculled += (uint32_t)((n - out) / 3);
+         if (out > 0)
+-            rsxDrawInlineIndexArray16(ctx, gcm_prim, 0, out, idx16);
++            rsxDrawIndexArray(ctx, gcm_prim, idx_off, out,
++                              GCM_INDEX_TYPE_16B, GCM_LOCATION_RSX);
+         return;
+     }
+ 
+-    /* Q3 always passes GL_UNSIGNED_SHORT indices (glIndex_t = uint16_t in tr_local.h).
+-     * Direct memcpy into idx16 — no conversion needed. */
+-    memcpy(idx16, indices, n * sizeof(uint16_t));
+-    rsxDrawInlineIndexArray16(ctx, gcm_prim, 0, n, idx16);
++    /* Q3 always passes GL_UNSIGNED_SHORT indices (glIndex_t = uint16_t in
++     * tr_local.h) — straight memcpy into the ring, no conversion needed. */
++    uint32_t idx_off;
++    uint16_t *idst = ps3gl_iring_alloc(n, &idx_off);
++    if (!idst) return;
++    memcpy(idst, indices, n * sizeof(uint16_t));
++    rsxDrawIndexArray(ctx, gcm_prim, idx_off, n,
++                      GCM_INDEX_TYPE_16B, GCM_LOCATION_RSX);
+ }
+diff --git a/code/gl/ps3gl_main.c b/code/gl/ps3gl_main.c
+index 59c141d..7103fef 100644
+--- a/code/gl/ps3gl_main.c
++++ b/code/gl/ps3gl_main.c
+@@ -6,78 +6,32 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ 
+-/* Initialized to non-zero to place in .data (not .bss).
+- * Any non-zero init forces the compiler to emit this in .data.
+- * Overwritten with real malloc'd pointer in ps3gl_init(). */
+-ps3gl_state_t *ps3gl_ptr = (ps3gl_state_t *)0x1;
++extern void ps3_log(const char *msg);
+ 
+-/* Backup of ps3gl_ptr stored in .data section (initialized = not in .bss).
+- * BSS corruption can zero ps3gl_ptr; this backup survives because .data
+- * is a separate section loaded from the ELF image. */
+-static ps3gl_state_t *s_ps3gl_ptr_backup = (ps3gl_state_t *)0xDEAD;
++ps3gl_state_t *ps3gl_ptr = NULL;
+ 
+-/* Backup context pointer. */
+-static gcmContextData *s_gcm_ctx_backup = (gcmContextData *)0xDEAD;
+-
+-/* Restore ps3gl_ptr from .data backup if corrupted or still sentinel. */
+-void ps3gl_restore_if_needed(void)
+-{
+-    if ((uintptr_t)ps3gl_ptr <= 0x1000) {
+-        extern void ps3_log(const char *msg);
+-        char dbg[128];
+-        snprintf(dbg, sizeof(dbg), "ps3gl_restore: ptr=%p backup=%p",
+-                 (void*)ps3gl_ptr, (void*)s_ps3gl_ptr_backup);
+-        ps3_log(dbg);
+-
+-        if (s_ps3gl_ptr_backup && (uintptr_t)s_ps3gl_ptr_backup > 0x1000) {
+-            ps3gl_ptr = s_ps3gl_ptr_backup;
+-            ps3_log("ps3gl_restore: RESTORED from .data backup");
+-        } else {
+-            ps3_log("ps3gl_restore: backup invalid, cannot restore!");
+-        }
+-    }
+-}
++/* Per-frame renderer counters (Session 0 instrumentation). */
++ps3gl_stats_t ps3gl_stats_cur;
++ps3gl_stats_t ps3gl_stats_last;
++uint32_t      ps3gl_stats_frames = 0;
+ 
+ gcmContextData *ps3gl_get_ctx(void)
+ {
+-    ps3gl_restore_if_needed();
+-    if ((uintptr_t)ps3gl_ptr > 0x1000 && ps3gl_ptr->ctx) return ps3gl_ptr->ctx;
+-    if ((uintptr_t)s_gcm_ctx_backup > 0x1000)
+-        return s_gcm_ctx_backup;
+-    return NULL;
++    return ps3gl_ptr ? ps3gl.ctx : NULL;
+ }
+ 
+ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
+ {
+-    extern void ps3_log(const char *msg);
+-    char dbg[256];
+-
+-    snprintf(dbg, sizeof(dbg), "ps3gl_init: entry ps3gl_ptr=%p &ps3gl_ptr=%p",
+-             (void*)ps3gl_ptr, (void*)&ps3gl_ptr);
+-    ps3_log(dbg);
+-
+-    /* ps3gl_ptr starts as sentinel 0x1 (.data section) or may be a real
+-     * pointer from a previous init. Only malloc if not a valid heap pointer. */
+-    if ((uintptr_t)ps3gl_ptr <= 0x1000) {
++    if (!ps3gl_ptr) {
+         ps3gl_ptr = (ps3gl_state_t *)malloc(sizeof(ps3gl_state_t));
+-        snprintf(dbg, sizeof(dbg), "ps3gl_init: malloc returned %p", (void*)ps3gl_ptr);
+-        ps3_log(dbg);
+         if (!ps3gl_ptr) {
+             ps3_log("ps3gl_init: FATAL malloc failed!");
+             return;
+         }
+     }
+     memset(ps3gl_ptr, 0, sizeof(ps3gl_state_t));
+-    snprintf(dbg, sizeof(dbg), "ps3gl_init: after memset ps3gl_ptr=%p", (void*)ps3gl_ptr);
+-    ps3_log(dbg);
+ 
+-    ps3gl.ctx        = ctx;
+-    s_ps3gl_ptr_backup = ps3gl_ptr;  /* .data backup of heap pointer */
+-    s_gcm_ctx_backup   = ctx;
+-
+-    snprintf(dbg, sizeof(dbg), "ps3gl_init: backup=%p ctx=%p",
+-             (void*)s_ps3gl_ptr_backup, (void*)s_gcm_ctx_backup);
+-    ps3_log(dbg);
++    ps3gl.ctx      = ctx;
+     ps3gl.screen_w = w;
+     ps3gl.screen_h = h;
+     ps3gl.dirty    = PS3GL_DIRTY_ALL;
+@@ -144,9 +98,6 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
+     ps3gl_shaders_init();
+     ps3gl_states_init();
+ 
+-    snprintf(dbg, sizeof(dbg), "ps3gl_init: done ps3gl_ptr=%p backup=%p",
+-             (void*)ps3gl_ptr, (void*)s_ps3gl_ptr_backup);
+-    ps3_log(dbg);
+     printf("[ps3gl] Initialized (%ux%u)\n", w, h);
+ }
+ 
+@@ -158,23 +109,21 @@ void ps3gl_shutdown(void)
+ 
+     free(ps3gl_ptr);
+     ps3gl_ptr = NULL;
+-    s_ps3gl_ptr_backup = NULL;
+-    s_gcm_ctx_backup = NULL;
+ 
+     printf("[ps3gl] Shutdown\n");
+ }
+ 
+ void ps3gl_begin_frame(void)
+ {
+-    ps3gl_restore_if_needed();
+-    if ((uintptr_t)ps3gl_ptr <= 0x1000) return;
++    if (!ps3gl_ptr) return;
+ 
+-    /* Restore ctx from backup if it was corrupted */
+-    if (!ps3gl.ctx && (uintptr_t)s_gcm_ctx_backup > 0x1000)
+-        ps3gl.ctx = s_gcm_ctx_backup;
++    /* Snapshot last frame's counters, reset for this frame */
++    ps3gl_stats_last = ps3gl_stats_cur;
++    memset(&ps3gl_stats_cur, 0, sizeof(ps3gl_stats_cur));
++    ps3gl_stats_frames++;
+ 
+-    /* Reset ring buffer head for this frame */
+-    ps3gl.vring.head = 0;
++    /* Rewind ring buffer to segment 0 for this frame (fence-checked) */
++    ps3gl_vring_frame_reset();
+ 
+     /* Mark all state dirty so it gets pushed at first draw */
+     ps3gl.dirty     = PS3GL_DIRTY_ALL;
+@@ -187,5 +136,9 @@ void ps3gl_begin_frame(void)
+ 
+ void ps3gl_end_frame(void)
+ {
+-    /* Nothing needed -- flip is handled by ps3_glimp.c */
++    if (!ps3gl_ptr) return;
++
++    /* Fence the vertex ring segment this frame finished in; the flip in
++     * ps3_glimp.c flushes the command buffer right after. */
++    ps3gl_vring_frame_end();
+ }
+diff --git a/code/gl/ps3gl_matrices.c b/code/gl/ps3gl_matrices.c
+index dcc9399..b484ece 100644
+--- a/code/gl/ps3gl_matrices.c
++++ b/code/gl/ps3gl_matrices.c
+@@ -242,11 +242,20 @@ void ps3gl_apply_matrices(void)
+ 
+     /* Compute MVP = projection * modelview */
+     float mvp[16];
++    float mvp_t[16];
+     mat4_mul(mvp, ps3gl.proj.stack[ps3gl.proj.depth],
+                   ps3gl.mv.stack[ps3gl.mv.depth]);
+ 
+     /* RSX VP expects constants in row-major order */
+-    mat4_transpose(s_mvp, mvp);
++    mat4_transpose(mvp_t, mvp);
++
++    /* Only invalidate the uploaded VP constant when the result actually
++     * changed -- Q3 reloads an identical modelview per surface, and the
++     * 2D/UI layer issues hundreds of draws under one ortho matrix. */
++    if (memcmp(s_mvp, mvp_t, sizeof(s_mvp)) != 0) {
++        memcpy(s_mvp, mvp_t, sizeof(s_mvp));
++        ps3gl.mvp_uploaded = 0;
++    }
+ 
+     ps3gl.mv.dirty  = 0;
+     ps3gl.proj.dirty = 0;
+diff --git a/code/gl/ps3gl_shaders.c b/code/gl/ps3gl_shaders.c
+index 67a0a55..78a2917 100644
+--- a/code/gl/ps3gl_shaders.c
++++ b/code/gl/ps3gl_shaders.c
+@@ -114,12 +114,17 @@ void ps3gl_apply_shader(void)
+         }
+ 
+         ps3gl.active_shader = key;
++        /* Program load rewrites the VP constant defaults */
++        ps3gl.mvp_uploaded = 0;
+     }
+ 
+-    /* MVP matrix must be uploaded every draw call (changes per-surface) */
+-    const float *mvp = ps3gl_get_mvp();
+-    if (s->mvp_const) {
+-        rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const, mvp);
++    /* Upload the MVP only when it changed since the last upload (17 FIFO
++     * words per draw saved -- the 2D/UI layer issues hundreds of draws
++     * under one unchanged ortho matrix). */
++    if (s->mvp_const && !ps3gl.mvp_uploaded) {
++        rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const,
++                                     ps3gl_get_mvp());
++        ps3gl.mvp_uploaded = 1;
+     }
+ 
+     /* Upload world-space clip plane when the recompiled shader supports it.
+diff --git a/code/gl/ps3gl_spu.c b/code/gl/ps3gl_spu.c
+deleted file mode 100644
+index b3e10b1..0000000
+--- a/code/gl/ps3gl_spu.c
++++ /dev/null
+@@ -1,205 +0,0 @@
+-/*
+- * ps3gl_spu.c -- PPE management of the SPU vertex interleave thread.
+- *
+- * The SPU output goes to s_staging[] in XDR (normal host memory, DMA-accessible).
+- * After ps3gl_spu_wait() the PPE copies s_staging → RSX ring buffer with memcpy.
+- * The SPU never writes to RSX VRAM directly — that would fault.
+- */
+-
+-#include <stdio.h>
+-#include <string.h>
+-#include <malloc.h>
+-
+-#include <ppu-types.h>
+-#include <sys/spu.h>
+-#include <sys/event_queue.h>
+-#include <lv2/spu.h>
+-
+-#include "ps3gl_spu.h"
+-
+-extern void ps3_log(const char *msg);
+-
+-/* Embedded SPU ELF (generated by bin2s from spu_vtx.elf).
+- * bin2s derives symbol names from the filename:
+- *   spu_vtx_elf[]     — byte array of the ELF
+- *   spu_vtx_elf_size  — uint32 length */
+-extern const uint8_t  spu_vtx_elf[];
+-extern const uint32_t spu_vtx_elf_size;
+-
+-/* SPU thread handles */
+-static sys_spu_group_t   s_group     = 0;
+-static sys_spu_thread_t  s_thread    = 0;
+-static sys_event_queue_t s_evq       = 0;
+-static int               s_available = 0;
+-
+-/* Job descriptor in XDR — 128-byte aligned so SPU DMA can fetch it. */
+-static spu_vtx_job_t s_job __attribute__((aligned(128)));
+-
+-/*
+- * XDR staging buffer — SPU DMA-puts interleaved vertices here.
+- * 1000 vertices × 36 bytes = 36000 bytes; round to 36096 (128-byte aligned).
+- * PPE then copies this to the RSX ring buffer after the SPU signals done.
+- */
+-#define STAGING_SIZE 36096
+-static uint8_t s_staging[STAGING_SIZE] __attribute__((aligned(128)));
+-
+-/* SPU event port for outbound mailbox → PPE event queue */
+-#define EVT_PORT 1
+-
+-int ps3gl_spu_init(void)
+-{
+-    s_available = 0;
+-
+-    s32 ret = sysSpuInitialize(1, 0);
+-    if (ret != 0 && ret != (s32)0x80010003 /* EEXIST */) {
+-        char buf[96];
+-        snprintf(buf, sizeof(buf), "ps3gl_spu: sysSpuInitialize: 0x%08x", (unsigned)ret);
+-        ps3_log(buf);
+-        return 0;
+-    }
+-
+-    sysSpuImage image;
+-    ret = sysSpuImageImport(&image, spu_vtx_elf, 0);
+-    if (ret != 0) {
+-        char buf[96];
+-        snprintf(buf, sizeof(buf), "ps3gl_spu: sysSpuImageImport: 0x%08x", (unsigned)ret);
+-        ps3_log(buf);
+-        return 0;
+-    }
+-
+-    /* Event queue: SPU outbound mailbox → PPE */
+-    sys_event_queue_attr_t evq_attr;
+-    evq_attr.attr_protocol = SYS_EVENT_QUEUE_FIFO;
+-    evq_attr.type          = SYS_EVENT_QUEUE_PPU;
+-    memset(evq_attr.name, 0, sizeof(evq_attr.name));
+-    evq_attr.name[0] = 'v'; evq_attr.name[1] = 't'; evq_attr.name[2] = 'x';
+-
+-    ret = sysEventQueueCreate(&s_evq, &evq_attr, SYS_EVENT_QUEUE_KEY_LOCAL, 1);
+-    if (ret != 0) {
+-        char buf[96];
+-        snprintf(buf, sizeof(buf), "ps3gl_spu: sysEventQueueCreate: 0x%08x", (unsigned)ret);
+-        ps3_log(buf);
+-        sysSpuImageClose(&image);
+-        return 0;
+-    }
+-
+-    sysSpuThreadGroupAttribute grp_attr;
+-    sysSpuThreadGroupAttributeInitialize(grp_attr);
+-    sysSpuThreadGroupAttributeName(grp_attr, "vtx_spu");
+-
+-    ret = sysSpuThreadGroupCreate(&s_group, 1, 100, &grp_attr);
+-    if (ret != 0) {
+-        char buf[96];
+-        snprintf(buf, sizeof(buf), "ps3gl_spu: ThreadGroupCreate: 0x%08x", (unsigned)ret);
+-        ps3_log(buf);
+-        sysEventQueueDestroy(s_evq, 0);
+-        sysSpuImageClose(&image);
+-        return 0;
+-    }
+-
+-    sysSpuThreadAttribute thr_attr;
+-    sysSpuThreadAttributeInitialize(thr_attr);
+-    sysSpuThreadAttributeName(thr_attr, "vtx_spu_t");
+-
+-    sysSpuThreadArgument args;
+-    sysSpuThreadArgumentInitialize(args);
+-
+-    ret = sysSpuThreadInitialize(&s_thread, s_group, 0, &image, &thr_attr, &args);
+-    if (ret != 0) {
+-        char buf[96];
+-        snprintf(buf, sizeof(buf), "ps3gl_spu: ThreadInitialize: 0x%08x", (unsigned)ret);
+-        ps3_log(buf);
+-        sysSpuThreadGroupDestroy(s_group);
+-        sysEventQueueDestroy(s_evq, 0);
+-        sysSpuImageClose(&image);
+-        return 0;
+-    }
+-
+-    /* Connect SPU outbound mailbox event to our PPE event queue */
+-    ret = sysSpuThreadConnectEvent(s_thread, s_evq, SPU_THREAD_EVENT_USER, EVT_PORT);
+-    if (ret != 0) {
+-        char buf[96];
+-        snprintf(buf, sizeof(buf), "ps3gl_spu: ConnectEvent: 0x%08x", (unsigned)ret);
+-        ps3_log(buf);
+-        sysSpuThreadGroupDestroy(s_group);
+-        sysEventQueueDestroy(s_evq, 0);
+-        sysSpuImageClose(&image);
+-        return 0;
+-    }
+-
+-    ret = sysSpuThreadGroupStart(s_group);
+-    if (ret != 0) {
+-        char buf[96];
+-        snprintf(buf, sizeof(buf), "ps3gl_spu: ThreadGroupStart: 0x%08x", (unsigned)ret);
+-        ps3_log(buf);
+-        sysSpuThreadDisconnectEvent(s_thread, SPU_THREAD_EVENT_USER, EVT_PORT);
+-        sysSpuThreadGroupDestroy(s_group);
+-        sysEventQueueDestroy(s_evq, 0);
+-        sysSpuImageClose(&image);
+-        return 0;
+-    }
+-
+-    sysSpuImageClose(&image);
+-    s_available = 1;
+-    ps3_log("ps3gl_spu: vertex SPU thread started");
+-    return 1;
+-}
+-
+-void ps3gl_spu_shutdown(void)
+-{
+-    if (!s_available) return;
+-    s_available = 0;
+-
+-    sysSpuThreadWriteMb(s_thread, SPU_VTX_CMD_QUIT);
+-
+-    u32 cause, status;
+-    sysSpuThreadGroupJoin(s_group, &cause, &status);
+-
+-    sysSpuThreadDisconnectEvent(s_thread, SPU_THREAD_EVENT_USER, EVT_PORT);
+-    sysSpuThreadGroupDestroy(s_group);
+-    sysEventQueueDestroy(s_evq, 0);
+-
+-    ps3_log("ps3gl_spu: vertex SPU thread stopped");
+-}
+-
+-void ps3gl_spu_dispatch(const spu_vtx_job_t *job)
+-{
+-    memcpy(&s_job, job, sizeof(s_job));
+-
+-    uint64_t ea = (uint64_t)(uintptr_t)&s_job;
+-
+-    /* Log first dispatch so we can confirm the SPU receives it */
+-    static int s_first = 1;
+-    if (s_first) {
+-        char buf[96];
+-        snprintf(buf, sizeof(buf), "ps3gl_spu: first dispatch ea=0x%08x%08x n=%u",
+-                 (u32)(ea >> 32), (u32)(ea & 0xFFFFFFFFu), (unsigned)job->num_verts);
+-        ps3_log(buf);
+-        s_first = 0;
+-    }
+-
+-    sysSpuThreadWriteMb(s_thread, SPU_VTX_CMD_JOB);
+-    sysSpuThreadWriteMb(s_thread, (u32)(ea >> 32));
+-    sysSpuThreadWriteMb(s_thread, (u32)(ea & 0xFFFFFFFFu));
+-}
+-
+-void ps3gl_spu_wait(void)
+-{
+-    sys_event_t ev;
+-    /* 500 ms timeout — if SPU doesn't respond, disable it and fall back to scalar */
+-    s32 ret = sysEventQueueReceive(s_evq, &ev, 500 * 1000);
+-    if (ret != 0) {
+-        ps3_log("ps3gl_spu: timeout waiting for SPU — disabling SPU path");
+-        s_available = 0;
+-    }
+-}
+-
+-void *ps3gl_spu_staging(void)
+-{
+-    return s_staging;
+-}
+-
+-int ps3gl_spu_available(void)
+-{
+-    return s_available;
+-}
+diff --git a/code/gl/ps3gl_spu.h b/code/gl/ps3gl_spu.h
+deleted file mode 100644
+index 6570f89..0000000
+--- a/code/gl/ps3gl_spu.h
++++ /dev/null
+@@ -1,38 +0,0 @@
+-/* ps3gl_spu.h -- PPE interface to the SPU vertex interleave thread. */
+-
+-#ifndef PS3GL_SPU_H
+-#define PS3GL_SPU_H
+-
+-#include <stdint.h>
+-#include "../spu/spu_vtx_shared.h"
+-
+-/* Start the SPU vertex thread. Returns 1 on success, 0 on failure (scalar fallback). */
+-int  ps3gl_spu_init(void);
+-
+-/* Stop the SPU vertex thread. */
+-void ps3gl_spu_shutdown(void);
+-
+-/*
+- * Dispatch a vertex interleave job.
+- * Copies job descriptor to the shared XDR buffer and sends mailbox to SPU.
+- * Returns immediately — SPU works in parallel.
+- */
+-void ps3gl_spu_dispatch(const spu_vtx_job_t *job);
+-
+-/*
+- * Block until the SPU signals job completion via outbound mailbox.
+- * Must be called before using the staging buffer contents.
+- */
+-void ps3gl_spu_wait(void);
+-
+-/*
+- * Pointer to the XDR staging buffer where the SPU writes its output.
+- * After ps3gl_spu_wait() returns, copy this to the RSX ring buffer.
+- * Aligned to 128 bytes, size = SHADER_MAX_VERTEXES * SPU_VTX_VERTEX_SIZE.
+- */
+-void *ps3gl_spu_staging(void);
+-
+-/* 1 if SPU thread initialized successfully, 0 if using scalar fallback. */
+-int  ps3gl_spu_available(void);
+-
+-#endif /* PS3GL_SPU_H */
+diff --git a/code/gl/ps3gl_textures.c b/code/gl/ps3gl_textures.c
+index 339511d..65edbca 100644
+--- a/code/gl/ps3gl_textures.c
++++ b/code/gl/ps3gl_textures.c
+@@ -154,6 +154,21 @@ static void convert_pixels(uint8_t *dst, const uint8_t *src,
+                            GLenum src_format)
+ {
+     int npix = width * height;
++
++    if (src_bpp == 4) {
++        /* RGBA -> ARGB on big-endian is a rotate of the 32-bit word:
++         * (R<<24|G<<16|B<<8|A) -> (A<<24|R<<16|G<<8|B). One load, one
++         * rotate, one store per pixel -- this is the hot path for
++         * cinematic frames (30 full-texture uploads per second). */
++        const uint32_t *s32 = (const uint32_t *)src;
++        uint32_t *d32 = (uint32_t *)dst;
++        for (int i = 0; i < npix; i++) {
++            uint32_t p = s32[i];
++            d32[i] = (p >> 8) | (p << 24);
++        }
++        return;
++    }
++
+     for (int i = 0; i < npix; i++) {
+         uint8_t r, g, b, a;
+         switch (src_bpp) {
+@@ -193,12 +208,89 @@ static void convert_pixels(uint8_t *dst, const uint8_t *src,
+     }
+ }
+ 
++/* ----------------------------------------------------------------
++ * Mip chain / swizzle helpers
++ * ---------------------------------------------------------------- */
++
++static int is_pow2(int v)
++{
++    return v > 0 && (v & (v - 1)) == 0;
++}
++
++static int log2i(int v)
++{
++    int l = 0;
++    while (v > 1) { v >>= 1; l++; }
++    return l;
++}
++
++/* Number of levels in a full mip chain down to 1x1 */
++static int mip_chain_levels(int w, int h)
++{
++    int l = 1;
++    while (w > 1 || h > 1) {
++        w = (w > 1) ? (w >> 1) : 1;
++        h = (h > 1) ? (h >> 1) : 1;
++        l++;
++    }
++    return (l > PS3GL_TEX_MAX_LEVELS) ? PS3GL_TEX_MAX_LEVELS : l;
++}
++
++/*
++ * Morton/Z-order address of pixel (x,y) in a w x h pow2 image
++ * (NV40 swizzle: x and y bits interleaved, x in the lowest position;
++ * once the smaller dimension's bits are exhausted, the remaining bits
++ * of the larger dimension continue linearly).
++ */
++static uint32_t swizzle_offset(uint32_t x, uint32_t y, int lw, int lh)
++{
++    uint32_t offset = 0;
++    int shift = 0;
++    while (lw | lh) {
++        if (lw) { offset |= (x & 1) << shift; x >>= 1; shift++; lw--; }
++        if (lh) { offset |= (y & 1) << shift; y >>= 1; shift++; lh--; }
++    }
++    return offset;
++}
++
++/* Swizzle a 32bpp pow2 image from a linear source into dst */
++static void swizzle_argb8(uint32_t *dst, const uint32_t *src, int w, int h)
++{
++    int lw = log2i(w), lh = log2i(h);
++    for (int y = 0; y < h; y++) {
++        for (int x = 0; x < w; x++) {
++            dst[swizzle_offset(x, y, lw, lh)] = src[y * w + x];
++        }
++    }
++}
++
++/* Deswizzle level 0 of a 32bpp pow2 image into a linear dst */
++static void deswizzle_argb8(uint32_t *dst, const uint32_t *src, int w, int h)
++{
++    int lw = log2i(w), lh = log2i(h);
++    for (int y = 0; y < h; y++) {
++        for (int x = 0; x < w; x++) {
++            dst[y * w + x] = src[swizzle_offset(x, y, lw, lh)];
++        }
++    }
++}
++
++/* Queue an RSX texture cache invalidation (data changed under a live bind) */
++static void invalidate_texture_cache(void)
++{
++    gcmContextData *ctx = ps3gl_get_ctx();
++    if (ctx)
++        rsxInvalidateTextureCache(ctx, GCM_INVALIDATE_TEXTURE);
++}
++
+ /* Build gcmTexture descriptor */
+ static void build_gcm_texture(ps3gl_texture_t *t)
+ {
+     memset(&t->gcm_tex, 0, sizeof(t->gcm_tex));
+-    t->gcm_tex.format    = GCM_TEXTURE_FORMAT_A8R8G8B8 | GCM_TEXTURE_FORMAT_LIN;
+-    t->gcm_tex.mipmap    = 1;
++    t->gcm_tex.format    = GCM_TEXTURE_FORMAT_A8R8G8B8 |
++                           (t->swizzled ? GCM_TEXTURE_FORMAT_SWZ
++                                        : GCM_TEXTURE_FORMAT_LIN);
++    t->gcm_tex.mipmap    = (t->num_levels > 0) ? t->num_levels : 1;
+     t->gcm_tex.dimension = GCM_TEXTURE_DIMS_2D;
+     t->gcm_tex.cubemap   = GCM_FALSE;
+     t->gcm_tex.remap     = PS3GL_TEX_REMAP_IDENTITY;
+@@ -206,7 +298,7 @@ static void build_gcm_texture(ps3gl_texture_t *t)
+     t->gcm_tex.height    = t->height;
+     t->gcm_tex.depth     = 1;
+     t->gcm_tex.location  = GCM_LOCATION_RSX;
+-    t->gcm_tex.pitch     = t->width * 4;
++    t->gcm_tex.pitch     = t->swizzled ? 0 : (uint32_t)t->width * 4;
+     t->gcm_tex.offset    = t->offset;
+ }
+ 
+@@ -219,53 +311,120 @@ void ps3gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
+ {
+     (void)target; (void)border; (void)type;
+ 
+-    if (level != 0) return; /* only base mip level */
+-
+     ps3gl_texture_t *t = ps3gl.tmu[ps3gl.active_tmu].bound;
+-    if (!t) return;
+-
+-    /* Log first 30 texture uploads for diagnostics */
+-    if (ps3gl_teximg_diag_count < 30) {
+-        char dbg[128];
+-        snprintf(dbg, sizeof(dbg),
+-                 "PS3GL_TEXIMG: tex=%d %dx%d intfmt=0x%x fmt=0x%x type=0x%x px=%p",
+-                 t->glname, (int)width, (int)height,
+-                 (unsigned)internalformat, (unsigned)format,
+-                 (unsigned)type, pixels);
+-        ps3_log(dbg);
+-        ps3gl_teximg_diag_count++;
+-    }
++    if (!t || width <= 0 || height <= 0) return;
++
++    if (level == 0) {
++        /* Log first 30 texture uploads for diagnostics */
++        if (ps3gl_teximg_diag_count < 30) {
++            char dbg[128];
++            snprintf(dbg, sizeof(dbg),
++                     "PS3GL_TEXIMG: tex=%d %dx%d intfmt=0x%x fmt=0x%x type=0x%x px=%p",
++                     t->glname, (int)width, (int)height,
++                     (unsigned)internalformat, (unsigned)format,
++                     (unsigned)type, pixels);
++            ps3_log(dbg);
++            ps3gl_teximg_diag_count++;
++        }
+ 
+-    /* Free old data if dimensions changed */
+-    if (t->data && (t->width != (uint16_t)width || t->height != (uint16_t)height)) {
+-        rsxFree(t->data);
+-        t->data = NULL;
+-    }
++        /* Pow2 textures get a swizzled full mip chain; non-pow2 (and
++         * anything that has received TexSubImage2D, i.e. cinematics)
++         * stays linear, base level only. */
++        int want_swz = is_pow2(width) && is_pow2(height) && !t->sub_updated;
++        int levels   = want_swz ? mip_chain_levels(width, height) : 1;
++
++        uint32_t lvl_off[PS3GL_TEX_MAX_LEVELS];
++        uint32_t total = 0;
++        int w = width, h = height;
++        for (int i = 0; i < levels; i++) {
++            lvl_off[i] = total;
++            total += (uint32_t)(w * h * 4);
++            w = (w > 1) ? (w >> 1) : 1;
++            h = (h > 1) ? (h >> 1) : 1;
++        }
+ 
+-    t->width  = (uint16_t)width;
+-    t->height = (uint16_t)height;
+-    t->bpp    = 4; /* always store as ARGB8888 */
++        /* Free old data if dimensions or layout changed */
++        if (t->data && (t->width != (uint16_t)width ||
++                        t->height != (uint16_t)height ||
++                        (int)t->swizzled != want_swz ||
++                        t->total_size != total)) {
++            rsxFree(t->data);
++            t->data = NULL;
++        }
+ 
+-    uint32_t size = (uint32_t)(width * height * 4);
+-    if (!t->data) {
+-        t->data = (uint8_t *)rsxMemalign(64, size);
+         if (!t->data) {
+-            printf("[ps3gl] WARNING: failed to allocate %u bytes for texture %d\n",
+-                   size, t->glname);
+-            return;
++            t->data = (uint8_t *)rsxMemalign(128, total);
++            if (!t->data && want_swz) {
++                /* Mip chain didn't fit -- degrade to linear base level */
++                want_swz = 0;
++                levels = 1;
++                total = (uint32_t)(width * height * 4);
++                lvl_off[0] = 0;
++                t->data = (uint8_t *)rsxMemalign(128, total);
++            }
++            if (!t->data) {
++                printf("[ps3gl] WARNING: failed to allocate %u bytes for texture %d\n",
++                       total, t->glname);
++                return;
++            }
++            rsxAddressToOffset(t->data, &t->offset);
+         }
+-        rsxAddressToOffset(t->data, &t->offset);
++
++        t->width      = (uint16_t)width;
++        t->height     = (uint16_t)height;
++        t->bpp        = 4; /* always store as ARGB8888 */
++        t->swizzled   = (uint8_t)want_swz;
++        t->total_size = total;
++        memcpy(t->level_offset, lvl_off, sizeof(lvl_off));
++        t->num_levels = 1; /* restart the chain; grows as levels arrive */
++    } else {
++        /* Mip level upload: only valid for swizzled (pow2) textures and
++         * only when dimensions match the expected chain level. */
++        if (!t->data || !t->swizzled) return;
++        if (level >= mip_chain_levels(t->width, t->height)) return;
++        int ew = (t->width  >> level) > 1 ? (t->width  >> level) : 1;
++        int eh = (t->height >> level) > 1 ? (t->height >> level) : 1;
++        if (width != ew || height != eh) return;
+     }
+ 
++    uint8_t *dst = t->data + t->level_offset[level];
++    uint32_t lvl_size = (uint32_t)(width * height * 4);
++
+     if (pixels) {
+         int src_bpp = gl_format_bpp(format);
+-        convert_pixels(t->data, (const uint8_t *)pixels,
+-                       width, height, src_bpp, format);
++        if (t->swizzled) {
++            /* Convert into a temporary linear buffer, then swizzle into
++             * VRAM (sequential VRAM writes; no read-modify-write). */
++            uint8_t *tmp = (uint8_t *)malloc(lvl_size);
++            if (!tmp) {
++                if (level > 0) return; /* skip this mip, chain stays short */
++                /* Base level must not be lost: degrade to linear in place
++                 * (allocation is chain-sized, base level always fits). */
++                t->swizzled   = 0;
++                t->num_levels = 1;
++                convert_pixels(dst, (const uint8_t *)pixels,
++                               width, height, src_bpp, format);
++            } else {
++                convert_pixels(tmp, (const uint8_t *)pixels,
++                               width, height, src_bpp, format);
++                swizzle_argb8((uint32_t *)dst, (const uint32_t *)tmp,
++                              width, height);
++                free(tmp);
++                if (level + 1 > t->num_levels)
++                    t->num_levels = (uint8_t)(level + 1);
++            }
++        } else {
++            convert_pixels(dst, (const uint8_t *)pixels,
++                           width, height, src_bpp, format);
++        }
+     } else {
+-        memset(t->data, 0, size);
++        memset(dst, 0, lvl_size);
++        if (t->swizzled && level + 1 > t->num_levels)
++            t->num_levels = (uint8_t)(level + 1);
+     }
+ 
+     build_gcm_texture(t);
++    invalidate_texture_cache();
+     t->dirty = 1;
+ }
+ 
+@@ -279,9 +438,44 @@ void ps3gl_TexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff,
+     ps3gl_texture_t *t = ps3gl.tmu[ps3gl.active_tmu].bound;
+     if (!t || !t->data) return;
+ 
++    /* Sub-updates into a swizzled layout would scatter writes Morton-order
++     * through write-combined VRAM every frame (cinematics). Convert the
++     * texture to linear once; the chain-sized allocation is reused since
++     * the base level always fits at offset 0. */
++    if (t->swizzled) {
++        if (xoff != 0 || yoff != 0 || w != t->width || h != t->height) {
++            /* Partial update: preserve existing texels by deswizzling
++             * level 0 through a temporary linear buffer (one-time cost). */
++            uint32_t base_size = (uint32_t)t->width * t->height * 4;
++            uint32_t *tmp = (uint32_t *)malloc(base_size);
++            if (!tmp) return; /* can't convert safely; drop the update */
++            deswizzle_argb8(tmp, (const uint32_t *)t->data,
++                            t->width, t->height);
++            memcpy(t->data, tmp, base_size);
++            free(tmp);
++        }
++        /* Full-rect update overwrites everything; just flip the layout. */
++        t->swizzled   = 0;
++        t->num_levels = 1;
++        build_gcm_texture(t);
++    }
++    t->sub_updated = 1;
++
+     int src_bpp = gl_format_bpp(format);
+     const uint8_t *src = (const uint8_t *)pixels;
+ 
++    /* Fast path: full-width, in-bounds update (cinematics upload the
++     * whole frame). Rows are contiguous in source and dest, so the whole
++     * rect converts in one sequential pass -- no per-pixel bounds checks. */
++    if (xoff == 0 && w == t->width && h > 0 &&
++        yoff >= 0 && yoff + h <= t->height) {
++        convert_pixels(t->data + (uint32_t)yoff * t->width * 4,
++                       src, w, h, src_bpp, format);
++        invalidate_texture_cache();
++        t->dirty = 1;
++        return;
++    }
++
+     for (int row = 0; row < h; row++) {
+         int dy = yoff + row;
+         if (dy < 0 || dy >= t->height) continue;
+@@ -313,6 +507,8 @@ void ps3gl_TexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff,
+         }
+     }
+ 
++    /* RSX texture cache can hold stale tiles after an in-place update */
++    invalidate_texture_cache();
+     t->dirty = 1;
+ }
+ 
+@@ -456,8 +652,12 @@ void ps3gl_apply_textures(void)
+         /* Skip re-bind if nothing changed on this TMU */
+         if (!tmu->dirty && !t->dirty) continue;
+ 
++        ps3gl_stats_cur.tex_binds++;
+         rsxLoadTexture(ctx, i, &t->gcm_tex);
+-        rsxTextureControl(ctx, i, GCM_TRUE, 0, 0, GCM_TEXTURE_MAX_ANISO_1);
++        /* min/max LOD clamps are 4.8 fixed point; maxlod must cover the
++         * mip chain or the RSX never samples below level 0 */
++        uint16_t maxlod = (uint16_t)(((t->num_levels > 0 ? t->num_levels : 1) - 1) << 8);
++        rsxTextureControl(ctx, i, GCM_TRUE, 0, maxlod, GCM_TEXTURE_MAX_ANISO_1);
+         rsxTextureFilter(ctx, i, 0, t->min_filter, t->mag_filter,
+                          GCM_TEXTURE_CONVOLUTION_QUINCUNX);
+         rsxTextureWrapMode(ctx, i, t->wrap_s, t->wrap_t,
+diff --git a/code/gl/ps3gl_vertices.c b/code/gl/ps3gl_vertices.c
+index 70e3ff0..d9780f3 100644
+--- a/code/gl/ps3gl_vertices.c
++++ b/code/gl/ps3gl_vertices.c
+@@ -6,18 +6,28 @@
+  * and issuing a draw call on glEnd().
+  *
+  * The vertex ring buffer is a contiguous block of RSX memory that
+- * vertices are written into sequentially each frame. It wraps around
+- * at frame boundaries (reset in ps3gl_begin_frame).
++ * vertices are written into sequentially each frame. It is split into
++ * two segments guarded by GCM label fences: a segment is only reused
++ * after the GPU signals it has consumed all draws that referenced it,
++ * so a mid-frame wrap can never overwrite vertices the RSX hasn't
++ * fetched yet. The head resets to segment 0 each frame
++ * (ps3gl_vring_frame_reset, after WaitFlip).
+  */
+ 
+ #include "ps3gl.h"
+ #include <stdio.h>
++#include <unistd.h>
+ 
+ /* Forward declaration from ps3gl_matrices.c */
+ extern const float *ps3gl_get_mvp(void);
+ 
+ /* ----------------------------------------------------------------
+  * Ring buffer management
++ *
++ * Two rings share this logic: the vring (VRAM, draw-local copies and
++ * index data) and the tess arena (RSX-mapped XDR, the renderer's tess
++ * arrays bound with GCM_LOCATION_CELL). Each has its own GCM label and
++ * fence counter.
+  * ---------------------------------------------------------------- */
+ 
+ void ps3gl_vring_init(void)
+@@ -31,8 +41,82 @@ void ps3gl_vring_init(void)
+     }
+     rsxAddressToOffset(ps3gl.vring.base, &ps3gl.vring.base_off);
+     ps3gl.vring.head = 0;
+-    printf("[ps3gl] Vertex ring buffer: %u bytes at %p (offset 0x%08x)\n",
+-           PS3GL_VRING_SIZE, ps3gl.vring.base, ps3gl.vring.base_off);
++    ps3gl.vring.seg_size = PS3GL_VRING_SIZE / 2;
++    ps3gl.vring.cur_seg = 0;
++    ps3gl.vring.fence_counter = 0;
++    ps3gl.vring.seg_fence[0] = 0;
++    ps3gl.vring.seg_fence[1] = 0;
++    ps3gl.vring.label_index = PS3GL_LABEL_VRING;
++    ps3gl.vring.label_addr = (vu32 *)gcmGetLabelAddress(PS3GL_LABEL_VRING);
++    if (ps3gl.vring.label_addr)
++        *ps3gl.vring.label_addr = 0; /* CPU init so the first fence compare is sane */
++    ps3gl.vring.stat_bytes = &ps3gl_stats_cur.vring_bytes;
++    ps3gl.vring.stat_wraps = &ps3gl_stats_cur.vring_wraps;
++
++    printf("[ps3gl] Vertex ring buffer: %u bytes at %p (offset 0x%08x), "
++           "2 x %u KB fenced segments\n",
++           PS3GL_VRING_SIZE, ps3gl.vring.base, ps3gl.vring.base_off,
++           ps3gl.vring.seg_size / 1024);
++}
++
++/* Spin until the GPU has written a label value >= fence. Wrap-safe
++ * signed compare; bounded so a wedged GPU degrades to a loud warning
++ * instead of a hard hang. With double-buffered flips this almost never
++ * actually waits — it exists to make segment reuse safe, not fast. */
++static void ring_wait_fence(ps3gl_vring_t *vr, uint32_t fence)
++{
++    int spins = 0;
++
++    if (!fence || !vr->label_addr) return;
++    while ((int32_t)(*vr->label_addr - fence) < 0) {
++        usleep(100);
++        if (++spins > 5000) {   /* ~0.5 s */
++            printf("[ps3gl] WARNING: ring fence %u timed out (label %u=%u)\n",
++                   fence, vr->label_index, *vr->label_addr);
++            break;
++        }
++    }
++}
++
++/* Frame start (after WaitFlip): rewind to segment 0. The previous
++ * frame's draws are already complete, so any pending fence on segment 0
++ * is satisfied and this wait is free in the normal case. */
++static void ring_frame_reset(ps3gl_vring_t *vr)
++{
++    if (!vr->base) return;
++    ring_wait_fence(vr, vr->seg_fence[0]);
++    vr->seg_fence[0] = 0;
++    vr->cur_seg = 0;
++    vr->head = 0;
++}
++
++/* Frame end: fence the segment the frame finished in, after its last
++ * draw. Backend label: written only after the pipeline has fully
++ * consumed all preceding draws (a command label is written by the FIFO
++ * front-end and can race ahead of vertex fetch). No flush needed —
++ * PS3_RSX_EndFrame flushes right after with the flip. Makes the
++ * cross-frame reuse safe even if the WaitFlip semantics in
++ * ps3_glimp.c ever change. */
++static void ring_frame_end(ps3gl_vring_t *vr)
++{
++    gcmContextData *ctx = ps3gl_get_ctx();
++
++    if (!ctx || !vr->base) return;
++    vr->fence_counter++;
++    rsxSetWriteBackendLabel(ctx, vr->label_index, vr->fence_counter);
++    vr->seg_fence[vr->cur_seg] = vr->fence_counter;
++}
++
++void ps3gl_vring_frame_reset(void)
++{
++    ring_frame_reset(&ps3gl.vring);
++    ring_frame_reset(&ps3gl.tarena);
++}
++
++void ps3gl_vring_frame_end(void)
++{
++    ring_frame_end(&ps3gl.vring);
++    ring_frame_end(&ps3gl.tarena);
+ }
+ 
+ void ps3gl_vring_shutdown(void)
+@@ -41,20 +125,221 @@ void ps3gl_vring_shutdown(void)
+         rsxFree(ps3gl.vring.base);
+         ps3gl.vring.base = NULL;
+     }
++    /* The tess arena lives inside the rsxInit IO buffer — nothing to free. */
+ }
+ 
+-ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
++/* Make `needed` contiguous bytes available in the current segment,
++ * switching to the other (fenced) segment if it doesn't fit. Returns 0
++ * if the request can never fit (bigger than a whole segment). */
++static int ring_ensure(ps3gl_vring_t *vr, uint32_t needed)
+ {
+-    uint32_t needed = (uint32_t)(count * PS3GL_VERTEX_SIZE);
++    if (!vr->base) return 0;
++
++    /* A single draw bigger than one segment can never be made safe:
++     * drop it loudly. A missing surface beats corrupted memory. */
++    if (needed > vr->seg_size) {
++        ps3gl_stats_cur.vring_drops++;
++        printf("[ps3gl] WARNING: ring carve dropped (%u bytes > "
++               "segment %u bytes)\n", needed, vr->seg_size);
++        return 0;
++    }
+ 
+-    /* If we'd overflow, wrap to start (previous frame data is consumed) */
+-    if (ps3gl.vring.head + needed > ps3gl.vring.capacity) {
+-        ps3gl.vring.head = 0;
++    /* Segment full: fence it after the draws already emitted, switch to
++     * the other half, and wait for the GPU to release that half before
++     * writing into it. */
++    if (vr->head + needed > (uint32_t)vr->cur_seg * vr->seg_size + vr->seg_size) {
++        gcmContextData *ctx = ps3gl_get_ctx();
++        if (ctx) {
++            vr->fence_counter++;
++            rsxSetWriteBackendLabel(ctx, vr->label_index, vr->fence_counter);
++            rsxFlushBuffer(ctx);    /* GPU must see the fence while we spin */
++            vr->seg_fence[vr->cur_seg] = vr->fence_counter;
++        }
++        vr->cur_seg ^= 1;
++        ring_wait_fence(vr, vr->seg_fence[vr->cur_seg]);
++        vr->seg_fence[vr->cur_seg] = 0;
++        vr->head = (uint32_t)vr->cur_seg * vr->seg_size;
++        (*vr->stat_wraps)++;
+     }
++    return 1;
++}
++
++/* Pre-reserve space for a draw that will make MORE THAN ONE alloc call
++ * (vertices + indices). The segment switch must happen here, before any
++ * data for the draw is written: if it happened between the two allocs,
++ * the fence written on the way out of the old segment would predate the
++ * draw that still reads vertex data from it, and a later wrap could
++ * overwrite vertices in flight. After this returns 1, allocs totalling
++ * <= `needed` bytes are guaranteed not to switch segments. */
++int ps3gl_vring_ensure(uint32_t needed)
++{
++    return ring_ensure(&ps3gl.vring, needed);
++}
++
++/* Byte-granular carve from the ring. `align` must be a power of two
++ * and the carve self-aligns its own start: F32 vertex attributes need
++ * at least 4-byte aligned offsets, and earlier carves can leave the
++ * head on any 2-byte boundary -- a misaligned position attribute is
++ * undefined on the RSX and wedges the vertex fetch engine (hard
++ * console freeze, found the hard way 2026-06-12). */
++static void *ring_alloc_bytes(ps3gl_vring_t *vr, uint32_t bytes, uint32_t align,
++                              uint32_t *out_offset)
++{
++    uint32_t mask = align - 1;
++    uint32_t pad;
++
++    if (!vr->base) return NULL;
++
++    pad = ((vr->head + mask) & ~mask) - vr->head;
++    if (!ring_ensure(vr, pad + bytes)) return NULL;
+ 
+-    ps3gl_vertex_t *ptr = (ps3gl_vertex_t *)(ps3gl.vring.base + ps3gl.vring.head);
+-    *out_offset = ps3gl.vring.base_off + ps3gl.vring.head;
+-    ps3gl.vring.head += needed;
++    /* A segment switch rewinds head to a segment start, which is
++     * 128-aligned -- realign to pick up either case. */
++    vr->head = (vr->head + mask) & ~mask;
++    *vr->stat_bytes += bytes;
++
++    void *ptr = vr->base + vr->head;
++    *out_offset = vr->base_off + vr->head;
++    vr->head += bytes;
++    return ptr;
++}
++
++void *ps3gl_vring_alloc_bytes(uint32_t bytes, uint32_t align, uint32_t *out_offset)
++{
++    return ring_alloc_bytes(&ps3gl.vring, bytes, align, out_offset);
++}
++
++/* ----------------------------------------------------------------
++ * Tess vertex arena (Session 4 Stage B)
++ *
++ * Lives in the top half of the 32 MB rsxInit IO buffer: that whole
++ * buffer is mapped into the RSX's IO space at init (the FIFO only uses
++ * the first RSX_CB_SIZE bytes), so vertex data written here by the
++ * renderer is fetched directly by the RSX DMA engine with
++ * GCM_LOCATION_CELL — no PPE copy, no extra allocation, and the CPU
++ * side stays normal cached XDR (reads in the deform/fog code are free).
++ *
++ * Layout: [PS3GL_TARENA_STATIC carve-once header][fenced ring].
++ * ---------------------------------------------------------------- */
++
++void ps3gl_tess_arena_init(void *base, uint32_t size)
++{
++    ps3gl_vring_t *ar = &ps3gl.tarena;
++    uint32_t off;
++
++    ps3gl.tarena_lo = NULL;
++    ar->base = NULL;
++
++    if (!base || size < PS3GL_TARENA_STATIC + 2 * 128) {
++        printf("[ps3gl] tess arena disabled (no usable region)\n");
++        return;
++    }
++
++    /* The region must be RSX-mapped (it is, when rsxInit succeeded on
++     * this buffer). If we got here through a recovered GCM context the
++     * mapping may not exist — disable and fall back to vring copies. */
++    if (rsxAddressToOffset(base, &off) != 0) {
++        printf("[ps3gl] tess arena disabled (region not RSX-mapped)\n");
++        return;
++    }
++
++    ps3gl.tarena_lo = (uint8_t *)base;
++    ps3gl.tarena_lo_off = off;
++    ps3gl.tarena_span = size;
++    ps3gl.tarena_static_used = 0;
++
++    ar->base = (uint8_t *)base + PS3GL_TARENA_STATIC;
++    ar->base_off = off + PS3GL_TARENA_STATIC;
++    ar->capacity = size - PS3GL_TARENA_STATIC;
++    ar->seg_size = (ar->capacity / 2) & ~127u;
++    ar->capacity = ar->seg_size * 2;
++    ar->head = 0;
++    ar->cur_seg = 0;
++    ar->fence_counter = 0;
++    ar->seg_fence[0] = 0;
++    ar->seg_fence[1] = 0;
++    ar->label_index = PS3GL_LABEL_TARENA;
++    ar->label_addr = (vu32 *)gcmGetLabelAddress(PS3GL_LABEL_TARENA);
++    if (ar->label_addr)
++        *ar->label_addr = 0;
++    ar->stat_bytes = &ps3gl_stats_cur.tarena_bytes;
++    ar->stat_wraps = &ps3gl_stats_cur.tarena_wraps;
++
++    printf("[ps3gl] Tess arena: %u bytes at %p (offset 0x%08x), "
++           "2 x %u KB fenced segments\n",
++           ar->capacity, ar->base, ar->base_off, ar->seg_size / 1024);
++}
++
++int ps3gl_tess_ensure(uint32_t bytes)
++{
++    return ring_ensure(&ps3gl.tarena, bytes);
++}
++
++void *ps3gl_tess_alloc(uint32_t bytes)
++{
++    uint32_t off;
++    return ring_alloc_bytes(&ps3gl.tarena, bytes, 16, &off);
++}
++
++/* Carve-once allocation from the static header (never reset per frame).
++ * For buffers with constant contents that live for the whole run. */
++void *ps3gl_tess_static_alloc(uint32_t bytes)
++{
++    uint32_t used = (ps3gl.tarena_static_used + 15) & ~15u;
++
++    if (!ps3gl.tarena_lo || used + bytes > PS3GL_TARENA_STATIC)
++        return NULL;
++    ps3gl.tarena_static_used = used + bytes;
++    return ps3gl.tarena_lo + used;
++}
++
++/* Rewind the ring head to `new_head`, releasing the tail of the most
++ * recent carve once its real size is known (the renderer carves tess
++ * geometry at SHADER_MAX_VERTEXES size before the vertex count exists).
++ * Only valid while nothing has been carved after it; out-of-range
++ * pointers are ignored. */
++void ps3gl_tess_trim(void *new_head)
++{
++    ps3gl_vring_t *ar = &ps3gl.tarena;
++    uint32_t pos, seg_start;
++
++    if (!ar->base) return;
++    pos = (uint32_t)((uint8_t *)new_head - ar->base);
++    seg_start = (uint32_t)ar->cur_seg * ar->seg_size;
++    if (pos >= seg_start && pos <= ar->head) {
++        ps3gl_stats_cur.tarena_bytes -= ar->head - pos;
++        ar->head = pos;
++    }
++}
++
++int ps3gl_tess_owns(const void *p)
++{
++    return ps3gl.tarena_lo &&
++           (const uint8_t *)p >= ps3gl.tarena_lo &&
++           (const uint8_t *)p < ps3gl.tarena_lo + ps3gl.tarena_span;
++}
++
++uint32_t ps3gl_tess_offset(const void *p)
++{
++    return ps3gl.tarena_lo_off + (uint32_t)((const uint8_t *)p - ps3gl.tarena_lo);
++}
++
++ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
++{
++    return (ps3gl_vertex_t *)ps3gl_vring_alloc_bytes(
++        (uint32_t)count * PS3GL_VERTEX_SIZE, 16, out_offset);
++}
++
++/* Carve index storage from the same ring (same segments, same fence).
++ * The returned offset is 128-byte aligned: rsxDrawIndexArray splits a
++ * misaligned draw into extra FIFO batches, alignment keeps it to the
++ * minimal ~7-word command sequence. */
++uint16_t *ps3gl_iring_alloc(int count, uint32_t *out_offset)
++{
++    uint32_t needed = (uint32_t)count * sizeof(uint16_t);
++    uint16_t *ptr = (uint16_t *)ps3gl_vring_alloc_bytes(needed, 128, out_offset);
++    if (ptr)
++        ps3gl_stats_cur.idx_bytes += needed;
+     return ptr;
+ }
+ 
+@@ -87,6 +372,8 @@ static void flush_immediate(void)
+ {
+     int count = ps3gl.imm.count;
+     if (count == 0) return;
++    ps3gl_stats_cur.draw_calls++;
++    ps3gl_stats_cur.verts_copied += (uint32_t)count;
+ 
+     /* Apply all deferred state */
+     ps3gl_apply_states();
+diff --git a/code/qcommon/q_platform.h b/code/qcommon/q_platform.h
+index 2864492..a841657 100644
+--- a/code/qcommon/q_platform.h
++++ b/code/qcommon/q_platform.h
+@@ -327,6 +327,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ 
+ #define IOAPI_NO_64BIT
+ 
++/* Do NOT define HAVE_VM_COMPILED: lv2 has no executable-page protection in
++ * its user API (sys/memory.h knows only PROT_READ_ONLY/READ_WRITE), and
++ * instruction fetch from heap pages raises a storage fault — verified on
++ * hardware 2026-06-13 with a minimal li/blr probe. The QVM JIT
++ * (vm_powerpc.c, PS3-patched and otherwise working) cannot run; vm.c
++ * safely downgrades vm_* 2 to the bytecode interpreter without this. */
++
+ #endif
+ 
+ //============================================================ EMSCRIPTEN ===
+diff --git a/code/qcommon/vm_powerpc.c b/code/qcommon/vm_powerpc.c
+index 31b51a2..0a62c99 100644
+--- a/code/qcommon/vm_powerpc.c
++++ b/code/qcommon/vm_powerpc.c
+@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ #include <stddef.h>
+ #include <string.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <inttypes.h>
+ 
+ #ifndef MAP_ANONYMOUS
+@@ -1146,6 +1147,11 @@ static clock_t time_total_vm = 0;
+  */
+ 
+ //#define VM_SYSTEM_MALLOC
++#ifdef __PS3__
++/* Keep compile-time transients (several MB for ui.qvm) off the 24 MB zone;
++ * the system heap frees them right back after VM_Compile. */
++#define VM_SYSTEM_MALLOC
++#endif
+ #ifdef VM_SYSTEM_MALLOC
+ static inline void *
+ PPC_Malloc( size_t size )
+@@ -2906,11 +2912,21 @@ PPC_ComputeCode( vm_t *vm )
+ 
+ 	// get the memory for the generated code, smarter ppcs need the
+ 	// mem to be marked as executable (whill change later)
++#ifdef __PS3__
++	/* PSL1GHT has no mmap; lv2 user pages are RWX, so plain heap works.
++	 * i-cache coherency is handled explicitly at the end of VM_Compile. */
++	unsigned char *dataAndCode = malloc( codeLength );
++
++	if (dataAndCode == NULL)
++		DIE( "Not enough memory" );
++	memset( dataAndCode, 0, codeLength );
++#else
+ 	unsigned char *dataAndCode = mmap( NULL, codeLength,
+ 		PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0 );
+ 
+ 	if (dataAndCode == MAP_FAILED)
+ 		DIE( "Not enough memory" );
++#endif
+ 
+ 	ppc_instruction_t *codeNow, *codeBegin;
+ 	codeNow = codeBegin = (ppc_instruction_t *)( dataAndCode + VM_Data_Offset( data[ data_acc ] ) );
+@@ -3060,8 +3076,12 @@ static void
+ VM_Destroy_Compiled( vm_t *self )
+ {
+ 	if ( self->codeBase ) {
++#ifdef __PS3__
++		free( self->codeBase );
++#else
+ 		if ( munmap( self->codeBase, self->codeLength ) )
+ 			Com_Printf( S_COLOR_RED "Memory unmap failed, possible memory leak\n" );
++#endif
+ 	}
+ 	self->codeBase = NULL;
+ }
+@@ -3084,12 +3104,11 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
+ 	i_first = PPC_Malloc( sizeof( source_instruction_t ) );
+ 	i_first->next = NULL;
+ 
+-	// realloc instructionPointers with correct size
+-	// use Z_Malloc so vm.c will be able to free the memory
+-	if ( sizeof( void * ) != sizeof( int ) ) {
+-		Z_Free( vm->instructionPointers );
+-		vm->instructionPointers = Z_Malloc( header->instructionCount * sizeof( void * ) );
+-	}
++	/* Upstream "realloc instructionPointers with correct size" block removed:
++	 * it Z_Free'd a pointer that vm.c:VM_Create allocates with Hunk_Alloc
++	 * (instant ERR_FATAL "freed a pointer without ZONEID" on the first
++	 * compile), a relic from an old vm.c that allocated 4 bytes per entry.
++	 * This vm.c already allocates instructionCount * sizeof(intptr_t). */
+ 	di_pointers = (void *)vm->instructionPointers;
+ 	memset( di_pointers, 0, header->instructionCount * sizeof( void * ) );
+ 
+@@ -3152,6 +3171,25 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
+ 			Com_Printf( S_COLOR_RED "Pointer %ld not initialized !\n", i );
+ #endif
+ 
++#ifdef __PS3__
++	/* No page protection on PS3 (heap is already RWX). PowerPC requires an
++	 * explicit d-cache flush + i-cache invalidate before executing freshly
++	 * written instructions. The Cell PPU cache line is 128 bytes; a 32-byte
++	 * stride is over-conservative but safe (redundant ops on the same line
++	 * are no-ops) and covers any smaller-line assumption. */
++	{
++		unsigned char *base = vm->codeBase;
++		unsigned char *end = vm->codeBase + vm->codeLength;
++		unsigned char *p;
++
++		for ( p = base; p < end; p += 32 )
++			__asm__ volatile( "dcbst 0,%0" : : "r"(p) : "memory" );
++		__asm__ volatile( "sync" : : : "memory" );
++		for ( p = base; p < end; p += 32 )
++			__asm__ volatile( "icbi 0,%0" : : "r"(p) : "memory" );
++		__asm__ volatile( "isync" : : : "memory" );
++	}
++#else
+ 	/* mark memory as executable and not writeable */
+ 	if ( mprotect( vm->codeBase, vm->codeLength, PROT_READ|PROT_EXEC ) ) {
+ 
+@@ -3159,6 +3197,7 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
+ 		VM_Destroy_Compiled( vm );
+ 		DIE( "mprotect failed" );
+ 	}
++#endif
+ 
+ 	vm->destroy = VM_Destroy_Compiled;
+ 	vm->compiled = qtrue;
+@@ -3170,6 +3209,18 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
+ 			vm->name, vm->codeLength, vm->codeBase, vm->codeBase+vm->codeLength );
+ 
+ 		gettimeofday(&tvdone, NULL);
++#ifndef timersub
++		/* PSL1GHT newlib doesn't provide the BSD timersub macro */
++#define timersub(a, b, result)						\
++	do {								\
++		(result)->tv_sec = (a)->tv_sec - (b)->tv_sec;		\
++		(result)->tv_usec = (a)->tv_usec - (b)->tv_usec;	\
++		if ((result)->tv_usec < 0) {				\
++			--(result)->tv_sec;				\
++			(result)->tv_usec += 1000000;			\
++		}							\
++	} while (0)
++#endif
+ 		timersub(&tvdone, &tvstart, &dur);
+ 		Com_Printf( "compilation took %lu.%06lu seconds\n",
+ 			(long unsigned int)dur.tv_sec, (long unsigned int)dur.tv_usec );
+diff --git a/code/renderergl1/tr_init.c b/code/renderergl1/tr_init.c
+index 878ad01..22c5e74 100644
+--- a/code/renderergl1/tr_init.c
++++ b/code/renderergl1/tr_init.c
+@@ -1181,6 +1181,7 @@ void R_Init( void ) {
+ 	Com_Memset( &tr, 0, sizeof( tr ) );
+ 	Com_Memset( &backEnd, 0, sizeof( backEnd ) );
+ 	Com_Memset( &tess, 0, sizeof( tess ) );
++	RB_PS3_TessInitPointers();	/* PS3: tess GPU arrays are arena pointers */
+ 
+ 	if(sizeof(glconfig_t) != 11332)
+ 		ri.Error( ERR_FATAL, "Mod ABI incompatible: sizeof(glconfig_t) == %u != 11332", (unsigned int) sizeof(glconfig_t));
+@@ -1190,7 +1191,8 @@ void R_Init( void ) {
+ 	if ( (intptr_t)tess.xyz & 15 ) {
+ 		ri.Printf( PRINT_WARNING, "tess.xyz not 16 byte aligned\n" );
+ 	}
+-	Com_Memset( tess.constantColor255, 255, sizeof( tess.constantColor255 ) );
++	/* PS3: constantColor255 is a pointer now -- sizeof() would memset 8 bytes */
++	Com_Memset( tess.constantColor255, 255, SHADER_MAX_VERTEXES * sizeof( color4ub_t ) );
+ 
+ 	//
+ 	// init function tables
+diff --git a/code/renderergl1/tr_local.h b/code/renderergl1/tr_local.h
+index a31048b..9000e00 100644
+--- a/code/renderergl1/tr_local.h
++++ b/code/renderergl1/tr_local.h
+@@ -1219,25 +1219,34 @@ TESSELATOR/SHADER DECLARATIONS
+ */
+ typedef byte color4ub_t[4];
+ 
++/* PS3: the GPU-visible tess arrays (xyz, texCoords, svars,
++   constantColor255) are pointers into the RSX-mapped tess arena instead
++   of static arrays, so the RSX fetches vertex data straight from XDR
++   with no per-draw copy. xyz/texCoords rotate per surface
++   (RB_BeginSurface), svars rotates per stage (the GPU may still be
++   reading the previous stage's draw), constantColor255 is a carve-once
++   constant. Indexing is source-compatible with the upstream arrays.
++   CPU-only arrays (normal, vertexColors, indexes, vertexDlightBits)
++   stay in .bss. */
+ typedef struct stageVars
+ {
+-	color4ub_t	colors[SHADER_MAX_VERTEXES];
+-	vec2_t		texcoords[NUM_TEXTURE_BUNDLES][SHADER_MAX_VERTEXES];
++	color4ub_t	*colors;
++	vec2_t		*texcoords[NUM_TEXTURE_BUNDLES];
+ } stageVars_t;
+ 
+ 
+-typedef struct shaderCommands_s 
++typedef struct shaderCommands_s
+ {
+ 	glIndex_t	indexes[SHADER_MAX_INDEXES] Q_ALIGN(16);
+-	vec4_t		xyz[SHADER_MAX_VERTEXES] Q_ALIGN(16);
++	vec4_t		*xyz;
+ 	vec4_t		normal[SHADER_MAX_VERTEXES] Q_ALIGN(16);
+-	vec2_t		texCoords[SHADER_MAX_VERTEXES][2] Q_ALIGN(16);
++	vec2_t		(*texCoords)[2];
+ 	color4ub_t	vertexColors[SHADER_MAX_VERTEXES] Q_ALIGN(16);
+ 	int			vertexDlightBits[SHADER_MAX_VERTEXES] Q_ALIGN(16);
+ 
+-	stageVars_t	svars Q_ALIGN(16);
++	stageVars_t	svars;
+ 
+-	color4ub_t	constantColor255[SHADER_MAX_VERTEXES] Q_ALIGN(16);
++	color4ub_t	*constantColor255;
+ 
+ 	shader_t	*shader;
+ 	double		shaderTime;
+@@ -1258,6 +1267,7 @@ extern	shaderCommands_t	tess;
+ 
+ void RB_BeginSurface(shader_t *shader, int fogNum );
+ void RB_EndSurface(void);
++void RB_PS3_TessInitPointers( void );	/* PS3: reset tess arena pointers (tr_shade.c) */
+ void RB_CheckOverflow( int verts, int indexes );
+ #define RB_CHECKOVERFLOW(v,i) if (tess.numVertexes + (v) >= SHADER_MAX_VERTEXES || tess.numIndexes + (i) >= SHADER_MAX_INDEXES ) {RB_CheckOverflow(v,i);}
+ 
+diff --git a/code/renderergl1/tr_shade.c b/code/renderergl1/tr_shade.c
+index 9d1fdc8..2759989 100644
+--- a/code/renderergl1/tr_shade.c
++++ b/code/renderergl1/tr_shade.c
+@@ -208,6 +208,104 @@ SURFACE SHADERS
+ shaderCommands_t	tess;
+ static qboolean	setArraysOnce;
+ 
++/*
++================
++PS3 tess vertex arena (Session 4 Stage B)
++
++The GPU-visible tess arrays are carved per surface / per stage from the
++RSX-mapped XDR arena (code/gl/ps3gl_vertices.c) so DrawElements binds
++them directly with GCM_LOCATION_CELL — zero per-draw copying. Rotation
++is mandatory: the previous carve may still be in flight on the GPU, and
++the arena's fenced segments only protect data that is never rewritten
++after its draw is emitted.
++
++If the arena is unavailable the static fallback arrays below are used
++and the GL layer transparently falls back to copying through the VRAM
++vertex ring (the Stage A path).
++================
++*/
++extern int   ps3gl_tess_ensure( unsigned int bytes );
++extern void *ps3gl_tess_alloc( unsigned int bytes );
++extern void *ps3gl_tess_static_alloc( unsigned int bytes );
++extern void  ps3gl_tess_trim( void *new_head );
++
++static qboolean tess_arena_active = qfalse;
++
++static vec4_t		tess_xyz_fallback[SHADER_MAX_VERTEXES] Q_ALIGN(16);
++static vec2_t		tess_texCoords_fallback[SHADER_MAX_VERTEXES][2] Q_ALIGN(16);
++static color4ub_t	tess_svars_colors_fallback[SHADER_MAX_VERTEXES] Q_ALIGN(16);
++static vec2_t		tess_svars_texcoords_fallback[NUM_TEXTURE_BUNDLES][SHADER_MAX_VERTEXES] Q_ALIGN(16);
++static color4ub_t	tess_constantColor255_fallback[SHADER_MAX_VERTEXES] Q_ALIGN(16);
++
++#define TESS_XYZ_BYTES		( SHADER_MAX_VERTEXES * sizeof( vec4_t ) )
++#define TESS_TC_BYTES		( SHADER_MAX_VERTEXES * 2 * sizeof( vec2_t ) )
++#define TESS_GEOM_BYTES		( TESS_XYZ_BYTES + TESS_TC_BYTES )
++#define TESS_SVARS_MAX		( SHADER_MAX_VERTEXES * ( sizeof( color4ub_t ) + 2 * sizeof( vec2_t ) ) )
++
++/* Worst case one surface can carve: the geometry block plus one svars
++   block per shader stage and one for the fog pass (+ alignment pads).
++   Pre-reserving this in RB_BeginSurface guarantees the arena's fenced
++   segment switch can only happen between surfaces, never between a
++   surface's carves and the draws that read them. */
++#define TESS_SURF_RESERVE	( TESS_GEOM_BYTES + 16 + \
++				  ( MAX_SHADER_STAGES + 1 ) * ( TESS_SVARS_MAX + 64 ) )
++
++/*
++==============
++RB_PS3_TessInitPointers
++
++Called from R_Init right after tess is zeroed: points the tess arrays at
++their fallbacks and (once) carves the constantColor255 block from the
++arena's static area. Real arena carves happen per surface in
++RB_BeginSurface.
++==============
++*/
++void RB_PS3_TessInitPointers( void ) {
++	static color4ub_t *ccArena = NULL;
++
++	if ( !ccArena ) {
++		ccArena = ps3gl_tess_static_alloc( SHADER_MAX_VERTEXES * sizeof( color4ub_t ) );
++	}
++	tess.constantColor255 = ccArena ? ccArena : tess_constantColor255_fallback;
++
++	tess.xyz = tess_xyz_fallback;
++	tess.texCoords = tess_texCoords_fallback;
++	tess.svars.colors = tess_svars_colors_fallback;
++	tess.svars.texcoords[0] = tess_svars_texcoords_fallback[0];
++	tess.svars.texcoords[1] = tess_svars_texcoords_fallback[1];
++	tess_arena_active = qfalse;
++}
++
++/*
++==============
++RB_PS3_RotateStageVars
++
++Carve a fresh svars block (colors + both texcoord sets) sized for the
++current vertex count. Must be called before each "fill svars then draw"
++sequence: a stage that rewrote the previous stage's svars in place would
++corrupt a draw the GPU hasn't fetched yet. The blocks are 16-aligned and
++each sub-array starts on a 16-byte boundary.
++==============
++*/
++static void RB_PS3_RotateStageVars( void ) {
++	if ( tess_arena_active ) {
++		unsigned int n = (unsigned int)tess.numVertexes;
++		unsigned int c_bytes = ( n * sizeof( color4ub_t ) + 15 ) & ~15u;
++		unsigned int t_bytes = ( n * sizeof( vec2_t ) + 15 ) & ~15u;
++		byte *p = ps3gl_tess_alloc( c_bytes + 2 * t_bytes );
++
++		if ( p ) {
++			tess.svars.colors = (color4ub_t *)p;
++			tess.svars.texcoords[0] = (vec2_t *)( p + c_bytes );
++			tess.svars.texcoords[1] = (vec2_t *)( p + c_bytes + t_bytes );
++			return;
++		}
++	}
++	tess.svars.colors = tess_svars_colors_fallback;
++	tess.svars.texcoords[0] = tess_svars_texcoords_fallback[0];
++	tess.svars.texcoords[1] = tess_svars_texcoords_fallback[1];
++}
++
+ /*
+ =================
+ R_BindAnimatedImage
+@@ -334,7 +432,30 @@ void RB_BeginSurface( shader_t *shader, int fogNum ) {
+ 		tess.shaderTime = tess.shader->clampTime;
+ 	}
+ 
++	/* PS3: rotate the GPU-visible geometry arrays into a fresh arena
++	   carve — the previous surface's draws may still be in flight. The
++	   carve is max-sized (vertex count unknown until RB_EndSurface,
++	   which trims the tail back). See TESS_SURF_RESERVE for why the
++	   reserve must cover the whole surface. */
++	{
++		byte *geom = NULL;
+ 
++		if ( ps3gl_tess_ensure( TESS_SURF_RESERVE ) ) {
++			geom = ps3gl_tess_alloc( TESS_GEOM_BYTES );
++		}
++		if ( geom ) {
++			tess.xyz = (vec4_t *)geom;
++			tess.texCoords = (vec2_t (*)[2])( geom + TESS_XYZ_BYTES );
++			/* recycled ring memory: re-arm RB_EndSurface's vertex
++			   overflow canary, which upstream got from .bss zero-init */
++			tess.xyz[SHADER_MAX_VERTEXES-1][0] = 0;
++			tess_arena_active = qtrue;
++		} else {
++			tess.xyz = tess_xyz_fallback;
++			tess.texCoords = tess_texCoords_fallback;
++			tess_arena_active = qfalse;
++		}
++	}
+ }
+ 
+ /*
+@@ -579,6 +700,10 @@ static void RB_FogPass( void ) {
+ 	fog_t		*fog;
+ 	int			i;
+ 
++	/* PS3: the fog pass rewrites svars after the stage draws — carve a
++	   fresh block so those draws keep their data. */
++	RB_PS3_RotateStageVars();
++
+ 	qglEnableClientState( GL_COLOR_ARRAY );
+ 	qglColorPointer( 4, GL_UNSIGNED_BYTE, 0, tess.svars.colors );
+ 
+@@ -938,6 +1063,12 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
+ 			break;
+ 		}
+ 
++		/* PS3: fresh svars carve before this stage overwrites the
++		   previous stage's (possibly still in flight) data. The GL
++		   array pointers are re-set below every stage (setArraysOnce
++		   is forced off on PS3). */
++		RB_PS3_RotateStageVars();
++
+ 		ComputeColors( pStage );
+ 		ComputeTexCoords( pStage );
+ 
+@@ -1018,27 +1149,15 @@ void RB_StageIteratorGeneric( void )
+ 	}
+ 
+ 	//
+-	// if there is only a single pass then we can enable color
+-	// and texture arrays before we compile, otherwise we need
+-	// to avoid compiling those arrays since they will change
+-	// during multipass rendering
++	// PS3: svars rotates to a fresh arena carve every stage, so the GL
++	// array pointers must be (re-)set after each rotation — the upstream
++	// single-pass shortcut would capture a pointer the first rotate
++	// invalidates. Setting a pointer is just a state store in the
++	// GL-to-RSX layer, so this costs nothing.
+ 	//
+-	if ( tess.numPasses > 1 || shader->multitextureEnv )
+-	{
+-		setArraysOnce = qfalse;
+-		qglDisableClientState (GL_COLOR_ARRAY);
+-		qglDisableClientState (GL_TEXTURE_COORD_ARRAY);
+-	}
+-	else
+-	{
+-		setArraysOnce = qtrue;
+-
+-		qglEnableClientState( GL_COLOR_ARRAY);
+-		qglColorPointer( 4, GL_UNSIGNED_BYTE, 0, tess.svars.colors );
+-
+-		qglEnableClientState( GL_TEXTURE_COORD_ARRAY);
+-		qglTexCoordPointer( 2, GL_FLOAT, 0, tess.svars.texcoords[0] );
+-	}
++	setArraysOnce = qfalse;
++	qglDisableClientState (GL_COLOR_ARRAY);
++	qglDisableClientState (GL_TEXTURE_COORD_ARRAY);
+ 
+ 	//
+ 	// lock XYZ
+@@ -1112,6 +1231,7 @@ void RB_StageIteratorVertexLitTexture( void )
+ 	//
+ 	// compute colors
+ 	//
++	RB_PS3_RotateStageVars();	/* PS3: fresh svars carve for this draw */
+ 	RB_CalcDiffuseColor( ( unsigned char * ) tess.svars.colors );
+ 
+ 	//
+@@ -1301,6 +1421,20 @@ void RB_EndSurface( void ) {
+ 		ri.Error (ERR_DROP, "RB_EndSurface() - SHADER_MAX_VERTEXES hit");
+ 	}
+ 
++	/* PS3: the geometry carve was sized for SHADER_MAX_VERTEXES; the
++	   vertex count is final now, so give the unused tail of the texcoord
++	   block back to the arena before the stage iterators carve their
++	   svars blocks. Nothing has been carved since RB_BeginSurface, so
++	   the geometry block is still the top of the ring.
++	   Sky is the exception: RB_StageIteratorSky REFILLS tess with the
++	   cloud dome (R_BuildCloudData), which can have more vertexes than
++	   the surface had -- it must keep the full-size carve. */
++	if ( tess_arena_active &&
++	     input->currentStageIteratorFunc != RB_StageIteratorSky ) {
++		ps3gl_tess_trim( (byte *)tess.texCoords +
++		                 input->numVertexes * 2 * sizeof( vec2_t ) );
++	}
++
+ 	if ( tess.shader == tr.shadowShader ) {
+ 		RB_ShadowTessEnd();
+ 		return;
+diff --git a/code/spu/spu_vtx.c b/code/spu/spu_vtx.c
+deleted file mode 100644
+index 74eeef5..0000000
+--- a/code/spu/spu_vtx.c
++++ /dev/null
+@@ -1,199 +0,0 @@
+-/*
+- * spu_vtx.c -- SPU vertex interleave program.
+- *
+- * Compiled with spu-gcc. Runs as a persistent SPU thread that blocks
+- * on the inbound mailbox waiting for jobs from the PPE.
+- *
+- * Protocol (per job):
+- *   PPE sends 3 inbound mailbox words:
+- *     [0] SPU_VTX_CMD_JOB
+- *     [1] descriptor EA high 32 bits
+- *     [2] descriptor EA low  32 bits
+- *   SPU:
+- *     DMA-get descriptor (128 bytes, tag 0)
+- *     DMA-get source arrays into LS (tag 1, serialized per array)
+- *     interleave into LS output buffer
+- *     DMA-put output to XDR staging buffer (tag 2)
+- *     write outbound mailbox: SPU_VTX_DONE
+- *
+- * IMPORTANT: dst_ea must point to XDR (normal host memory).
+- * SPU DMA cannot reach RSX VRAM. The PPE copies staging→RSX ring after wait.
+- *
+- * Local store layout:
+- *   ls_desc  [128 B, 128-aligned]  job descriptor
+- *   ls_pos   [16 KB, 16-aligned]   position array  (1000 × 16)
+- *   ls_tc0   [16 KB, 16-aligned]   texcoord 0      (1000 × 16 worst-case)
+- *   ls_tc1   [16 KB, 16-aligned]   texcoord 1
+- *   ls_col   [ 4 KB, 16-aligned]   color array     (1000 × 4)
+- *   ls_out   [36 KB, 128-aligned]  interleaved output (1000 × 36 = 36000, pad to 36096)
+- *   Total: ~88 KB of 256 KB LS used.
+- */
+-
+-#include <stdint.h>
+-#include <string.h>
+-#include <spu_intrinsics.h>
+-#include <spu_mfcio.h>
+-
+-#include "spu_vtx_shared.h"
+-
+-#define TAG_DESC  0
+-#define TAG_SRC   1
+-#define TAG_OUT   2
+-
+-/* Round size up to next multiple of 16 for DMA. */
+-static inline uint32_t dma_size(uint32_t n)
+-{
+-    return (n + 15u) & ~15u;
+-}
+-
+-static inline void dma_get(void *ls, uint64_t ea, uint32_t size, uint32_t tag)
+-{
+-    mfc_get(ls, ea, dma_size(size), tag, 0, 0);
+-}
+-
+-static inline void dma_put(void *ls, uint64_t ea, uint32_t size, uint32_t tag)
+-{
+-    mfc_put(ls, ea, dma_size(size), tag, 0, 0);
+-}
+-
+-static inline void dma_wait(uint32_t tag)
+-{
+-    mfc_write_tag_mask(1u << tag);
+-    mfc_read_tag_status_all();
+-}
+-
+-static void interleave(
+-    const spu_vtx_job_t *job,
+-    const uint8_t *pos_ls,
+-    const uint8_t *tc0_ls,
+-    const uint8_t *tc1_ls,
+-    const uint8_t *col_ls,
+-    uint8_t *out_ls)
+-{
+-    const int n       = (int)job->num_verts;
+-    const int has_z   = (job->pos_size >= 3);
+-    const int has_tc0 = (job->tc0_ea != 0);
+-    const int has_tc1 = (job->tc1_ea != 0);
+-    const int has_col = (job->col_ea != 0);
+-    const uint32_t imm = job->imm_color;
+-    const int vs  = (int)job->pos_stride;
+-    const int ts0 = (int)job->tc0_stride;
+-    const int ts1 = (int)job->tc1_stride;
+-    const int cs  = (int)job->col_stride;
+-
+-    uint8_t *dst = out_ls;
+-
+-    if (has_tc0 && has_tc1 && has_col) {
+-        for (int i = 0; i < n; i++) {
+-            const float   *p  = (const float *)(pos_ls + i * vs);
+-            const float   *t0 = (const float *)(tc0_ls + i * ts0);
+-            const float   *t1 = (const float *)(tc1_ls + i * ts1);
+-            const uint8_t *c  = col_ls + i * cs;
+-            float *o = (float *)dst;
+-            o[0] = p[0]; o[1] = p[1]; o[2] = has_z ? p[2] : 0.0f; o[3] = 1.0f;
+-            o[4] = t0[0]; o[5] = t0[1];
+-            o[6] = t1[0]; o[7] = t1[1];
+-            *(uint32_t *)(dst + 32) = ((uint32_t)c[0] << 24) | ((uint32_t)c[1] << 16)
+-                                    | ((uint32_t)c[2] << 8)  |  (uint32_t)c[3];
+-            dst += SPU_VTX_VERTEX_SIZE;
+-        }
+-    } else if (has_tc0 && has_col) {
+-        for (int i = 0; i < n; i++) {
+-            const float   *p  = (const float *)(pos_ls + i * vs);
+-            const float   *t0 = (const float *)(tc0_ls + i * ts0);
+-            const uint8_t *c  = col_ls + i * cs;
+-            float *o = (float *)dst;
+-            o[0] = p[0]; o[1] = p[1]; o[2] = has_z ? p[2] : 0.0f; o[3] = 1.0f;
+-            o[4] = t0[0]; o[5] = t0[1];
+-            o[6] = 0.0f;  o[7] = 0.0f;
+-            *(uint32_t *)(dst + 32) = ((uint32_t)c[0] << 24) | ((uint32_t)c[1] << 16)
+-                                    | ((uint32_t)c[2] << 8)  |  (uint32_t)c[3];
+-            dst += SPU_VTX_VERTEX_SIZE;
+-        }
+-    } else {
+-        for (int i = 0; i < n; i++) {
+-            const float *p = (const float *)(pos_ls + i * vs);
+-            float *o = (float *)dst;
+-            o[0] = p[0]; o[1] = p[1]; o[2] = has_z ? p[2] : 0.0f; o[3] = 1.0f;
+-            if (has_tc0) {
+-                const float *t0 = (const float *)(tc0_ls + i * ts0);
+-                o[4] = t0[0]; o[5] = t0[1];
+-            } else { o[4] = 0.0f; o[5] = 0.0f; }
+-            if (has_tc1) {
+-                const float *t1 = (const float *)(tc1_ls + i * ts1);
+-                o[6] = t1[0]; o[7] = t1[1];
+-            } else { o[6] = 0.0f; o[7] = 0.0f; }
+-            if (has_col) {
+-                const uint8_t *c = col_ls + i * cs;
+-                *(uint32_t *)(dst + 32) = ((uint32_t)c[0] << 24) | ((uint32_t)c[1] << 16)
+-                                        | ((uint32_t)c[2] << 8)  |  (uint32_t)c[3];
+-            } else {
+-                *(uint32_t *)(dst + 32) = imm;
+-            }
+-            dst += SPU_VTX_VERTEX_SIZE;
+-        }
+-    }
+-}
+-
+-int main(void)
+-{
+-    static uint8_t ls_desc[128]   __attribute__((aligned(128)));
+-    static uint8_t ls_pos[16384]  __attribute__((aligned(16)));
+-    static uint8_t ls_tc0[16384]  __attribute__((aligned(16)));
+-    static uint8_t ls_tc1[16384]  __attribute__((aligned(16)));
+-    static uint8_t ls_col[4096]   __attribute__((aligned(16)));
+-    /* 1000 × 36 = 36000; round to 36096 (next multiple of 128) */
+-    static uint8_t ls_out[36096]  __attribute__((aligned(128)));
+-
+-    while (1) {
+-        uint32_t cmd = spu_read_in_mbox();
+-        if (cmd == SPU_VTX_CMD_QUIT)
+-            break;
+-
+-        /* Read descriptor EA as two 32-bit words */
+-        uint32_t ea_hi = spu_read_in_mbox();
+-        uint32_t ea_lo = spu_read_in_mbox();
+-        uint64_t desc_ea = ((uint64_t)ea_hi << 32) | ea_lo;
+-
+-        /* Fetch descriptor */
+-        dma_get(ls_desc, desc_ea, sizeof(spu_vtx_job_t), TAG_DESC);
+-        dma_wait(TAG_DESC);
+-
+-        const spu_vtx_job_t *job = (const spu_vtx_job_t *)ls_desc;
+-        const int n = (int)job->num_verts;
+-
+-        if (n <= 0) {
+-            spu_write_out_mbox(SPU_VTX_DONE);
+-            continue;
+-        }
+-
+-        /* Fetch source arrays */
+-        dma_get(ls_pos, job->pos_ea, (uint32_t)(n * (int)job->pos_stride), TAG_SRC);
+-        dma_wait(TAG_SRC);
+-
+-        if (job->tc0_ea) {
+-            dma_get(ls_tc0, job->tc0_ea, (uint32_t)(n * (int)job->tc0_stride), TAG_SRC);
+-            dma_wait(TAG_SRC);
+-        }
+-        if (job->tc1_ea) {
+-            dma_get(ls_tc1, job->tc1_ea, (uint32_t)(n * (int)job->tc1_stride), TAG_SRC);
+-            dma_wait(TAG_SRC);
+-        }
+-        if (job->col_ea) {
+-            dma_get(ls_col, job->col_ea, (uint32_t)(n * (int)job->col_stride), TAG_SRC);
+-            dma_wait(TAG_SRC);
+-        }
+-
+-        /* Interleave into LS output buffer */
+-        interleave(job, ls_pos, ls_tc0, ls_tc1, ls_col, ls_out);
+-
+-        /* DMA-put result to XDR staging buffer (NOT RSX VRAM) */
+-        dma_put(ls_out, job->dst_ea, (uint32_t)(n * SPU_VTX_VERTEX_SIZE), TAG_OUT);
+-        dma_wait(TAG_OUT);
+-
+-        /* Signal PPE: job done */
+-        spu_write_out_mbox(SPU_VTX_DONE);
+-    }
+-
+-    return 0;
+-}
+diff --git a/code/spu/spu_vtx_shared.h b/code/spu/spu_vtx_shared.h
+deleted file mode 100644
+index d99c50f..0000000
+--- a/code/spu/spu_vtx_shared.h
++++ /dev/null
+@@ -1,62 +0,0 @@
+-/*
+- * spu_vtx_shared.h -- Job descriptor shared between PPE and SPU.
+- *
+- * Rules:
+- *   - All pointer fields are 64-bit EAs, valid on both sides.
+- *   - dst_ea points to an XDR staging buffer (NOT RSX VRAM).
+- *     SPU DMA cannot reach RSX VRAM; the PPE copies staging→ring after wait.
+- *   - Struct is 128-byte aligned and padded to exactly 128 bytes so the SPU
+- *     can fetch it in a single 128-byte DMA transfer.
+- */
+-
+-#ifndef SPU_VTX_SHARED_H
+-#define SPU_VTX_SHARED_H
+-
+-#include <stdint.h>
+-
+-/* PPE → SPU inbound mailbox commands */
+-#define SPU_VTX_CMD_QUIT   0
+-#define SPU_VTX_CMD_JOB    1
+-
+-/* SPU → PPE outbound mailbox */
+-#define SPU_VTX_DONE       1
+-
+-/* Output vertex stride (must match ps3gl_vertex_t) */
+-#define SPU_VTX_VERTEX_SIZE 36
+-
+-/*
+- * Layout: x,y,z,w (16) + u0,v0 (8) + u1,v1 (8) + color (4) = 36 bytes.
+- *
+- * Byte count of fields below:
+- *   pos_ea(8) pos_stride(4) pos_size(4)
+- *   tc0_ea(8) tc0_stride(4) _pad0(4)
+- *   tc1_ea(8) tc1_stride(4) _pad1(4)
+- *   col_ea(8) col_stride(4) imm_color(4)
+- *   dst_ea(8) num_verts(4) _pad2(4)
+- *   = 80 bytes used → 48 bytes padding to reach 128.
+- */
+-typedef struct __attribute__((aligned(128))) {
+-    uint64_t pos_ea;        /* source position array EA */
+-    uint32_t pos_stride;    /* bytes between elements (always 16) */
+-    uint32_t pos_size;      /* floats per vertex (3 or 4) */
+-
+-    uint64_t tc0_ea;        /* texcoord 0 EA; 0 = none */
+-    uint32_t tc0_stride;
+-    uint32_t _pad0;
+-
+-    uint64_t tc1_ea;        /* texcoord 1 EA; 0 = none */
+-    uint32_t tc1_stride;
+-    uint32_t _pad1;
+-
+-    uint64_t col_ea;        /* color array EA; 0 = use imm_color */
+-    uint32_t col_stride;
+-    uint32_t imm_color;     /* fallback RGBA packed color */
+-
+-    uint64_t dst_ea;        /* XDR staging buffer EA (NOT RSX VRAM) */
+-    uint32_t num_verts;
+-    uint32_t _pad2;
+-
+-    uint8_t  _pad[48];      /* pad to 128 bytes */
+-} spu_vtx_job_t;
+-
+-#endif /* SPU_VTX_SHARED_H */
+diff --git a/code/sys/ps3_glimp.c b/code/sys/ps3_glimp.c
+index 0fc056f..0637d6a 100644
+--- a/code/sys/ps3_glimp.c
++++ b/code/sys/ps3_glimp.c
+@@ -7,7 +7,8 @@
+  * RSXGL (if available) or our GL->RSX translation stubs.
+  *
+  * Display: 1280x720 (720p) or 1920x1080 (1080p) depending on TV capability.
+- * Double-buffered with RSX flip.
++ * Triple-buffered with RSX flip (flip completion tracked via the GCM
++ * flip interrupt handler).
+  */
+ 
+ #include <stdio.h>
+@@ -33,11 +34,12 @@ extern void ps3_log(const char *msg);
+ /* ----------------------------------------------------------------
+  * RSX state
+  * ---------------------------------------------------------------- */
+-#define RSX_FB_COUNT 2
++/* Triple-buffered: with vsync double-buffering any frame that misses one
++ * vblank hard-drops to 30 FPS; a third color buffer absorbs the spike
++ * (depth buffer is shared -- only one frame renders at a time). */
++#define RSX_FB_COUNT 3
+ 
+ static gcmContextData *ps3_gcm_context = NULL;
+-/* Backup in .data section (non-zero init) -- survives BSS corruption */
+-static gcmContextData *ps3_gcm_context_backup = (gcmContextData *)0xDEAD;
+ static u32 ps3_display_width  = 1280;
+ static u32 ps3_display_height = 720;
+ static u32 ps3_color_pitch    = 0;
+@@ -113,6 +115,40 @@ static void PS3_RSX_SetRenderTarget(int index)
+     rsxSetSurface(ps3_gcm_context, &sf);
+ }
+ 
++/* ----------------------------------------------------------------
++ * Flip tracking
++ *
++ * The GCM flip interrupt bumps ps3_flips_completed (single writer,
++ * interrupt thread); the render loop compares it against
++ * ps3_flips_queued to decide when the next back buffer is reusable.
++ * ---------------------------------------------------------------- */
++static volatile u32 ps3_flips_completed = 0;
++static u32 ps3_flips_queued = 0;
++
++static void PS3_RSX_FlipHandler(const u32 head)
++{
++    (void)head;
++    ps3_flips_completed++;
++}
++
++static void PS3_RSX_WaitFlips(void)
++{
++    /* The buffer we are about to render into stops being scanned out when
++     * the flip *before* the most recently queued one completes, so up to
++     * RSX_FB_COUNT-2 flips may stay in flight. Bounded spin: a missed flip
++     * interrupt must never hang the whole console. */
++    int spins = 0;
++    while ((s32)(ps3_flips_queued - ps3_flips_completed) > RSX_FB_COUNT - 2) {
++        usleep(100);
++        if (++spins > 20000) {  /* ~2 s */
++            printf("[ps3] WARNING: flip wait timed out (queued=%u done=%u)\n",
++                   ps3_flips_queued, ps3_flips_completed);
++            ps3_flips_completed = ps3_flips_queued;
++            break;
++        }
++    }
++}
++
+ /* ----------------------------------------------------------------
+  * Public interface
+  * ---------------------------------------------------------------- */
+@@ -217,9 +253,26 @@ void PS3_RSX_Init(void)
+ 
+     gcmResetFlipStatus();
+ 
++    /* Flip completion is tracked via the GCM flip interrupt, not by
++     * polling gcmGetFlipStatus -- required for triple buffering, where
++     * more than one flip can be pending. */
++    ps3_flips_completed = 0;
++    ps3_flips_queued = 0;
++    gcmSetFlipHandler(PS3_RSX_FlipHandler);
++
+     /* Initialize GL-to-RSX translation layer */
+     ps3gl_init(ps3_gcm_context, ps3_display_width, ps3_display_height);
+ 
++    /* Tess vertex arena (Session 4 Stage B): top half of the 32 MB IO
++     * buffer. rsxInit maps the whole buffer into the RSX's IO space but
++     * the FIFO only uses the first RSX_CB_SIZE bytes — the upper half is
++     * free for vertex data the GPU fetches directly from XDR. If we got
++     * here through the recovered-context fallback the mapping may be
++     * stale; ps3gl_tess_arena_init verifies with rsxAddressToOffset and
++     * disables itself (renderer falls back to vring copies). */
++    ps3gl_tess_arena_init((uint8_t *)host_addr + RSX_HOST_SIZE / 2,
++                          RSX_HOST_SIZE / 2);
++
+     {
+         char dbg[256];
+         snprintf(dbg, sizeof(dbg),
+@@ -228,25 +281,12 @@ void PS3_RSX_Init(void)
+         ps3_log(dbg);
+     }
+ 
+-    /* Backup the context pointer -- BSS corruption has been observed */
+-    ps3_gcm_context_backup = ps3_gcm_context;
+-
+-    {
+-        char dbg[256];
+-        snprintf(dbg, sizeof(dbg),
+-                 "PS3_RSX_Init: ctx=%p &ctx=%p backup=%p ps3gl_ptr=%p sizeof=%u",
+-                 (void*)ps3_gcm_context,
+-                 (void*)&ps3_gcm_context,
+-                 (void*)ps3_gcm_context_backup,
+-                 (void*)ps3gl_ptr,
+-                 (unsigned)sizeof(ps3gl_state_t));
+-        ps3_log(dbg);
+-    }
+ }
+ 
+ void PS3_RSX_Shutdown(void)
+ {
+     ps3_current_rt = -1;
++    gcmSetFlipHandler(NULL);
+     ps3gl_shutdown();
+ 
+     rsxFinish(ps3_gcm_context, 1);
+@@ -263,32 +303,13 @@ void PS3_RSX_Shutdown(void)
+     }
+ }
+ 
+-/* Track whether we've submitted a flip that hasn't been waited on yet */
+-static int ps3_flip_pending = 0;
+-
+-static void PS3_RSX_WaitFlip(void)
+-{
+-    if (!ps3_flip_pending) return;
+-
+-    while (gcmGetFlipStatus() != 0) {
+-        usleep(500);
+-    }
+-    gcmResetFlipStatus();
+-    ps3_flip_pending = 0;
+-}
+-
+ void PS3_RSX_BeginFrame(void)
+ {
+-    /* Restore from .data backup if corrupted */
+-    if ((uintptr_t)ps3_gcm_context <= 0x1000
+-        && (uintptr_t)ps3_gcm_context_backup > 0x1000)
+-        ps3_gcm_context = ps3_gcm_context_backup;
+-
+-    if ((uintptr_t)ps3_gcm_context <= 0x1000) return;
++    if (!ps3_gcm_context) return;
+ 
+-    /* Wait for the PREVIOUS frame's flip to complete before we start
+-     * writing into the back buffer. */
+-    PS3_RSX_WaitFlip();
++    /* Block only when too many flips are still in flight for the back
++     * buffer we are about to render into. */
++    PS3_RSX_WaitFlips();
+ 
+     PS3_RSX_SetRenderTarget(ps3_current_fb);
+     ps3gl_begin_frame();
+@@ -296,22 +317,74 @@ void PS3_RSX_BeginFrame(void)
+ 
+ void PS3_RSX_EndFrame(void)
+ {
+-    /* Restore from .data backup if corrupted */
+-    if ((uintptr_t)ps3_gcm_context <= 0x1000
+-        && (uintptr_t)ps3_gcm_context_backup > 0x1000)
+-        ps3_gcm_context = ps3_gcm_context_backup;
+-
+-    if ((uintptr_t)ps3_gcm_context <= 0x1000) return;
++    if (!ps3_gcm_context) return;
+ 
+     ps3gl_end_frame();
+ 
+-    /* Queue flip + flush (non-blocking). Wait happens in next BeginFrame. */
+-    gcmSetWaitFlip(ps3_gcm_context);
++    /* Queue flip + flush. CPU-side wait happens in next BeginFrame via
++     * PS3_RSX_WaitFlips(); gcmSetWaitFlip is intentionally omitted here to
++     * avoid a double V-Sync stall (GPU stall on top of the CPU poll). */
+     gcmSetFlip(ps3_gcm_context, ps3_current_fb);
+     rsxFlushBuffer(ps3_gcm_context);
+ 
+-    ps3_current_fb ^= 1;
+-    ps3_flip_pending = 1;
++    ps3_flips_queued++;
++    ps3_current_fb = (ps3_current_fb + 1) % RSX_FB_COUNT;
++}
++
++/* ----------------------------------------------------------------
++ * Renderer stats console command (Session 0 instrumentation)
++ * ---------------------------------------------------------------- */
++
++/* 0 = off, >0 = print a stats line every N frames */
++static int ps3_stats_auto = 0;
++
++static void PS3GL_PrintStats(const ps3gl_stats_t *s)
++{
++    Com_Printf("ps3gl frame %u: draws=%u (elements=%u) streams direct=%u "
++               "copied=%u (verts=%u)\n",
++               ps3gl_stats_frames, s->draw_calls, s->draws_elements,
++               s->streams_direct, s->streams_copied, s->verts_copied);
++    Com_Printf("  vring: %u KB (%u KB idx), %u wraps, %u dropped | "
++               "arena: %u KB, %u wraps | texbinds=%u clipculled=%u\n",
++               s->vring_bytes / 1024, s->idx_bytes / 1024,
++               s->vring_wraps, s->vring_drops,
++               s->tarena_bytes / 1024, s->tarena_wraps,
++               s->tex_binds, s->tris_clipculled);
++}
++
++static void PS3GL_Stats_f(void)
++{
++    if (Cmd_Argc() >= 2) {
++        ps3_stats_auto = atoi(Cmd_Argv(1));
++        Com_Printf("ps3gl_stats: auto-print %s\n",
++                   ps3_stats_auto > 0 ? va("every %d frames", ps3_stats_auto)
++                                      : "off");
++        return;
++    }
++    PS3GL_PrintStats(&ps3gl_stats_last);
++}
++
++/* ----------------------------------------------------------------
++ * Performance-mode cvar profile: ps3_perf [0|1]
++ * ---------------------------------------------------------------- */
++static void PS3_Perf_f(void)
++{
++    int on = 1;
++    if (Cmd_Argc() >= 2)
++        on = atoi(Cmd_Argv(1));
++
++    if (on) {
++        Cvar_Set("r_dynamic", "0");   /* dynamic lights re-draw affected surfaces */
++        Cvar_Set("r_picmip", "1");
++        Cvar_Set("cg_marks", "0");    /* impact marks add draw calls */
++        Com_Printf("ps3_perf: ON (r_dynamic 0, r_picmip 1, cg_marks 0)\n");
++    } else {
++        Cvar_Set("r_dynamic", "1");
++        Cvar_Set("r_picmip", "0");
++        Cvar_Set("cg_marks", "1");
++        Com_Printf("ps3_perf: OFF (r_dynamic 1, r_picmip 0, cg_marks 1)\n");
++    }
++    Com_Printf("ps3_perf: r_picmip is latched -- vid_restart to apply texture detail\n");
+ }
+ 
+ /* ----------------------------------------------------------------
+@@ -322,6 +395,9 @@ void GLimp_Init(qboolean fixedFunction)
+     (void)fixedFunction;
+     extern glconfig_t glConfig;
+ 
++    Cmd_AddCommand("ps3gl_stats", PS3GL_Stats_f);
++    Cmd_AddCommand("ps3_perf", PS3_Perf_f);
++
+     /* Call IN_Init for default controller binds (upstream calls from sdl_glimp.c) */
+     IN_Init(NULL);
+ 
+@@ -352,11 +428,20 @@ void GLimp_Init(qboolean fixedFunction)
+ void GLimp_Shutdown(qboolean unloadDLL)
+ {
+     (void)unloadDLL;
++    Cmd_RemoveCommand("ps3gl_stats");
++    Cmd_RemoveCommand("ps3_perf");
+ }
+ 
+ void GLimp_EndFrame(void)
+ {
+     PS3_RSX_EndFrame();
++
++    /* At EndFrame all of this frame's draws are submitted, so _cur is the
++     * complete just-finished frame (it is snapshotted to _last and reset
++     * at the next BeginFrame). */
++    if (ps3_stats_auto > 0 &&
++        (ps3gl_stats_frames % (uint32_t)ps3_stats_auto) == 0)
++        PS3GL_PrintStats(&ps3gl_stats_cur);
+ }
+ 
+ void GLimp_Minimize(void)
+diff --git a/code/sys/ps3_sys.c b/code/sys/ps3_sys.c
+index b7f7332..293e39c 100644
+--- a/code/sys/ps3_sys.c
++++ b/code/sys/ps3_sys.c
+@@ -443,6 +443,14 @@ static unsigned ps3_probe_free_user_mem_mb(void)
+     return best;
+ }
+ 
++/* QVM JIT exec-from-heap probe REMOVED (2026-06-13): a verified-correct
++ * probe (instructions written + cache-flushed + called via a proper ELFv1
++ * descriptor — disassembly-checked) hard-froze the console at the bctrl.
++ * lv2 has no executable-page protection in its user API (sys/memory.h:
++ * only PROT_READ_ONLY/READ_WRITE); instruction fetch from heap faults.
++ * Because failure is a freeze, not an error, the probe cannot gate
++ * anything at runtime — do not reinstate it. See CLAUDE.md "PPC JIT". */
++
+ void Sys_PlatformInit(void)
+ {
+     char line[160];

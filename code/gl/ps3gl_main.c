@@ -6,78 +6,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Initialized to non-zero to place in .data (not .bss).
- * Any non-zero init forces the compiler to emit this in .data.
- * Overwritten with real malloc'd pointer in ps3gl_init(). */
-ps3gl_state_t *ps3gl_ptr = (ps3gl_state_t *)0x1;
+extern void ps3_log(const char *msg);
 
-/* Backup of ps3gl_ptr stored in .data section (initialized = not in .bss).
- * BSS corruption can zero ps3gl_ptr; this backup survives because .data
- * is a separate section loaded from the ELF image. */
-static ps3gl_state_t *s_ps3gl_ptr_backup = (ps3gl_state_t *)0xDEAD;
+ps3gl_state_t *ps3gl_ptr = NULL;
 
-/* Backup context pointer. */
-static gcmContextData *s_gcm_ctx_backup = (gcmContextData *)0xDEAD;
-
-/* Restore ps3gl_ptr from .data backup if corrupted or still sentinel. */
-void ps3gl_restore_if_needed(void)
-{
-    if ((uintptr_t)ps3gl_ptr <= 0x1000) {
-        extern void ps3_log(const char *msg);
-        char dbg[128];
-        snprintf(dbg, sizeof(dbg), "ps3gl_restore: ptr=%p backup=%p",
-                 (void*)ps3gl_ptr, (void*)s_ps3gl_ptr_backup);
-        ps3_log(dbg);
-
-        if (s_ps3gl_ptr_backup && (uintptr_t)s_ps3gl_ptr_backup > 0x1000) {
-            ps3gl_ptr = s_ps3gl_ptr_backup;
-            ps3_log("ps3gl_restore: RESTORED from .data backup");
-        } else {
-            ps3_log("ps3gl_restore: backup invalid, cannot restore!");
-        }
-    }
-}
+/* Per-frame renderer counters (Session 0 instrumentation). */
+ps3gl_stats_t ps3gl_stats_cur;
+ps3gl_stats_t ps3gl_stats_last;
+uint32_t      ps3gl_stats_frames = 0;
 
 gcmContextData *ps3gl_get_ctx(void)
 {
-    ps3gl_restore_if_needed();
-    if ((uintptr_t)ps3gl_ptr > 0x1000 && ps3gl_ptr->ctx) return ps3gl_ptr->ctx;
-    if ((uintptr_t)s_gcm_ctx_backup > 0x1000)
-        return s_gcm_ctx_backup;
-    return NULL;
+    return ps3gl_ptr ? ps3gl.ctx : NULL;
 }
 
 void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
 {
-    extern void ps3_log(const char *msg);
-    char dbg[256];
-
-    snprintf(dbg, sizeof(dbg), "ps3gl_init: entry ps3gl_ptr=%p &ps3gl_ptr=%p",
-             (void*)ps3gl_ptr, (void*)&ps3gl_ptr);
-    ps3_log(dbg);
-
-    /* ps3gl_ptr starts as sentinel 0x1 (.data section) or may be a real
-     * pointer from a previous init. Only malloc if not a valid heap pointer. */
-    if ((uintptr_t)ps3gl_ptr <= 0x1000) {
+    if (!ps3gl_ptr) {
         ps3gl_ptr = (ps3gl_state_t *)malloc(sizeof(ps3gl_state_t));
-        snprintf(dbg, sizeof(dbg), "ps3gl_init: malloc returned %p", (void*)ps3gl_ptr);
-        ps3_log(dbg);
         if (!ps3gl_ptr) {
             ps3_log("ps3gl_init: FATAL malloc failed!");
             return;
         }
     }
     memset(ps3gl_ptr, 0, sizeof(ps3gl_state_t));
-    snprintf(dbg, sizeof(dbg), "ps3gl_init: after memset ps3gl_ptr=%p", (void*)ps3gl_ptr);
-    ps3_log(dbg);
 
-    ps3gl.ctx        = ctx;
-    s_ps3gl_ptr_backup = ps3gl_ptr;  /* .data backup of heap pointer */
-    s_gcm_ctx_backup   = ctx;
-
-    snprintf(dbg, sizeof(dbg), "ps3gl_init: backup=%p ctx=%p",
-             (void*)s_ps3gl_ptr_backup, (void*)s_gcm_ctx_backup);
-    ps3_log(dbg);
+    ps3gl.ctx      = ctx;
     ps3gl.screen_w = w;
     ps3gl.screen_h = h;
     ps3gl.dirty    = PS3GL_DIRTY_ALL;
@@ -144,9 +98,6 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
     ps3gl_shaders_init();
     ps3gl_states_init();
 
-    snprintf(dbg, sizeof(dbg), "ps3gl_init: done ps3gl_ptr=%p backup=%p",
-             (void*)ps3gl_ptr, (void*)s_ps3gl_ptr_backup);
-    ps3_log(dbg);
     printf("[ps3gl] Initialized (%ux%u)\n", w, h);
 }
 
@@ -158,23 +109,21 @@ void ps3gl_shutdown(void)
 
     free(ps3gl_ptr);
     ps3gl_ptr = NULL;
-    s_ps3gl_ptr_backup = NULL;
-    s_gcm_ctx_backup = NULL;
 
     printf("[ps3gl] Shutdown\n");
 }
 
 void ps3gl_begin_frame(void)
 {
-    ps3gl_restore_if_needed();
-    if ((uintptr_t)ps3gl_ptr <= 0x1000) return;
+    if (!ps3gl_ptr) return;
 
-    /* Restore ctx from backup if it was corrupted */
-    if (!ps3gl.ctx && (uintptr_t)s_gcm_ctx_backup > 0x1000)
-        ps3gl.ctx = s_gcm_ctx_backup;
+    /* Snapshot last frame's counters, reset for this frame */
+    ps3gl_stats_last = ps3gl_stats_cur;
+    memset(&ps3gl_stats_cur, 0, sizeof(ps3gl_stats_cur));
+    ps3gl_stats_frames++;
 
-    /* Reset ring buffer head for this frame */
-    ps3gl.vring.head = 0;
+    /* Rewind ring buffer to segment 0 for this frame (fence-checked) */
+    ps3gl_vring_frame_reset();
 
     /* Mark all state dirty so it gets pushed at first draw */
     ps3gl.dirty     = PS3GL_DIRTY_ALL;
@@ -187,5 +136,9 @@ void ps3gl_begin_frame(void)
 
 void ps3gl_end_frame(void)
 {
-    /* Nothing needed -- flip is handled by ps3_glimp.c */
+    if (!ps3gl_ptr) return;
+
+    /* Fence the vertex ring segment this frame finished in; the flip in
+     * ps3_glimp.c flushes the command buffer right after. */
+    ps3gl_vring_frame_end();
 }

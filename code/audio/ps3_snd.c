@@ -90,18 +90,7 @@ static void ps3_audio_thread_func(void *arg)
 
         u32 ring_pos = (ps3_audio_blocks_written * (u32)block_samples) % (u32)total_interleaved;
 
-        /*
-         * VMX int16→float32 conversion: 8 samples per iteration.
-         *
-         * ring_pos advances by block_samples (512) each call and wraps at
-         * total_interleaved (also a multiple of 512), so the source slice is
-         * always contiguous — no mid-block wrap needed.
-         *
-         * We convert into a local aligned staging buffer first, then memcpy
-         * to dst. Direct vec_st into the libaudio DMA buffer (audioDataStart)
-         * can stall the PPE on Cell because that memory is not in the PPE's
-         * cache-coherent domain in the same way as regular XDR RAM.
-         */
+        /* VMX conversion: 8 samples/iter into staging first (DMA buffer can stall PPE). */
         {
             static f32 staging[PS3_AUDIO_BLOCK_SIZE * PS3_AUDIO_CHANNELS] __attribute__((aligned(16)));
             const s16 * __restrict__ vsrc = src + ring_pos;

@@ -1,14 +1,4 @@
-/*
- * ioquake3-PS3: sys/ps3_glimp.c
- * RSX / GCM display initialization and frame management.
- *
- * Uses PSL1GHT's librsx to set up the RSX GPU, allocate framebuffers,
- * and manage buffer swapping. The actual GL rendering calls go through
- * RSXGL (if available) or our GL->RSX translation stubs.
- *
- * Display: 1280x720 (720p) or 1920x1080 (1080p) depending on TV capability.
- * Double-buffered with RSX flip.
- */
+/* ps3_glimp.c -- RSX/GCM display and frame management. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,11 +23,10 @@ extern void ps3_log(const char *msg);
 /* ----------------------------------------------------------------
  * RSX state
  * ---------------------------------------------------------------- */
-#define RSX_FB_COUNT 2
+/* Triple-buffered: third buffer absorbs missed vblank spikes (vsync double-buffering hard-drops to 30 FPS). */
+#define RSX_FB_COUNT 3
 
 static gcmContextData *ps3_gcm_context = NULL;
-/* Backup in .data section (non-zero init) -- survives BSS corruption */
-static gcmContextData *ps3_gcm_context_backup = (gcmContextData *)0xDEAD;
 static u32 ps3_display_width  = 1280;
 static u32 ps3_display_height = 720;
 static u32 ps3_color_pitch    = 0;
@@ -113,65 +102,56 @@ static void PS3_RSX_SetRenderTarget(int index)
     rsxSetSurface(ps3_gcm_context, &sf);
 }
 
+/* Flip tracking via GCM interrupt. */
+static volatile u32 ps3_flips_completed = 0;
+static u32 ps3_flips_queued = 0;
+
+static void PS3_RSX_FlipHandler(const u32 head)
+{
+    (void)head;
+    ps3_flips_completed++;
+}
+
+static void PS3_RSX_WaitFlips(void)
+{
+    /* Wait until a back buffer becomes available; bounded spin. */
+    int spins = 0;
+    while ((s32)(ps3_flips_queued - ps3_flips_completed) > RSX_FB_COUNT - 2) {
+        usleep(100);
+        if (++spins > 20000) {  /* ~2 s */
+            printf("[ps3] WARNING: flip wait timed out (queued=%u done=%u)\n",
+                   ps3_flips_queued, ps3_flips_completed);
+            ps3_flips_completed = ps3_flips_queued;
+            break;
+        }
+    }
+}
+
 /* ----------------------------------------------------------------
  * Public interface
  * ---------------------------------------------------------------- */
 
-/* GCM IO buffer must be much larger than cmd buffer.
- * Every working PSL1GHT sample uses 1 MB cmd + 32 MB IO. */
 #define RSX_CB_SIZE     (1 * 1024 * 1024)   /* 1 MB command buffer */
-#define RSX_HOST_SIZE   (32 * 1024 * 1024)  /* 32 MB IO buffer     */
+#define RSX_HOST_SIZE   (32 * 1024 * 1024)  /* 32 MB IO buffer (PSL1GHT standard) */
 
 void PS3_RSX_Init(void)
 {
     ps3_log("PS3_RSX_Init: entered");
 
-    /* Allocate IO buffer -- must be 1 MB aligned, 32 MB total */
+    /* Allocate IO buffer (1 MB aligned, 32 MB total). */
     void *host_addr = memalign(1024 * 1024, RSX_HOST_SIZE);
     if (!host_addr) {
         ps3_log("PS3_RSX_Init: FATAL memalign failed for 32MB IO buffer");
         return;
     }
 
-    {
-        char dbg[128];
-        snprintf(dbg, sizeof(dbg),
-                 "PS3_RSX_Init: host_addr=%p cmdSize=0x%x ioSize=0x%x",
-                 host_addr, RSX_CB_SIZE, RSX_HOST_SIZE);
-        ps3_log(dbg);
-    }
-
     s32 ret = rsxInit(&ps3_gcm_context, RSX_CB_SIZE, RSX_HOST_SIZE, host_addr);
-    {
-        char dbg[128];
-        snprintf(dbg, sizeof(dbg), "PS3_RSX_Init: rsxInit ret=%d ctx=%p",
-                 (int)ret, (void*)ps3_gcm_context);
-        ps3_log(dbg);
-    }
     if (ret != 0 || !ps3_gcm_context) {
-        char dbg[128];
-        snprintf(dbg, sizeof(dbg),
-                 "PS3_RSX_Init: rsxInit FAILED (ret=0x%08x), trying fallbacks",
-                 (unsigned)(ret & 0xFFFFFFFF));
-        ps3_log(dbg);
-
-        /* Fallback 1: recover existing context from previous crash */
+        ps3_log("PS3_RSX_Init: rsxInit failed, trying fallbacks");
         rsxSetDefaultCommandBuffer(&ps3_gcm_context);
-        snprintf(dbg, sizeof(dbg),
-                 "PS3_RSX_Init: rsxSetDefaultCommandBuffer ctx=%p",
-                 (void*)ps3_gcm_context);
-        ps3_log(dbg);
-
-        if (ps3_gcm_context) {
-            ps3_log("PS3_RSX_Init: recovered existing GCM context");
-        } else {
-            /* Fallback 2: gcmInitBody (bypasses gGcmContext global) */
+        if (!ps3_gcm_context) {
+            /* Fallback: gcmInitBody when default context unavailable. */
             ret = gcmInitBody(&ps3_gcm_context, RSX_CB_SIZE, RSX_HOST_SIZE, host_addr);
-            snprintf(dbg, sizeof(dbg),
-                     "PS3_RSX_Init: gcmInitBody ret=%d ctx=%p",
-                     (int)ret, (void*)ps3_gcm_context);
-            ps3_log(dbg);
-
             if (ret == 0 && ps3_gcm_context) {
                 rsxHeapInit();
                 ps3_log("PS3_RSX_Init: gcmInitBody fallback succeeded");
@@ -182,7 +162,7 @@ void PS3_RSX_Init(void)
         }
     }
 
-    /* Render at 720p. Fall back to TV default if unavailable. */
+    /* Try 720p; fall back to TV default if unavailable. */
     s32 vid_res = VIDEO_RESOLUTION_720;
     u8  vid_aspect = VIDEO_ASPECT_16_9;
 
@@ -192,7 +172,7 @@ void PS3_RSX_Init(void)
         videoGetState(0, 0, &state);
         vid_res = state.displayMode.resolution;
         vid_aspect = state.displayMode.aspect;
-        ps3_log("PS3_RSX_Init: 720p not available, using TV default");
+        ps3_log("PS3_RSX_Init: 720p unavailable, using TV default");
     }
 
     videoResolution res;
@@ -217,36 +197,23 @@ void PS3_RSX_Init(void)
 
     gcmResetFlipStatus();
 
-    /* Initialize GL-to-RSX translation layer */
+    /* Flip tracking via interrupt (required for triple buffering). */
+    ps3_flips_completed = 0;
+    ps3_flips_queued = 0;
+    gcmSetFlipHandler(PS3_RSX_FlipHandler);
+
     ps3gl_init(ps3_gcm_context, ps3_display_width, ps3_display_height);
 
-    {
-        char dbg[256];
-        snprintf(dbg, sizeof(dbg),
-                 "PS3_RSX_Init: after ps3gl_init ps3gl_ptr=%p ctx=%p",
-                 (void*)ps3gl_ptr, (void*)ps3_gcm_context);
-        ps3_log(dbg);
-    }
+    /* Tess arena in top half of IO buffer; GPU fetches XDR directly. */
+    ps3gl_tess_arena_init((uint8_t *)host_addr + RSX_HOST_SIZE / 2,
+                          RSX_HOST_SIZE / 2);
 
-    /* Backup the context pointer -- BSS corruption has been observed */
-    ps3_gcm_context_backup = ps3_gcm_context;
-
-    {
-        char dbg[256];
-        snprintf(dbg, sizeof(dbg),
-                 "PS3_RSX_Init: ctx=%p &ctx=%p backup=%p ps3gl_ptr=%p sizeof=%u",
-                 (void*)ps3_gcm_context,
-                 (void*)&ps3_gcm_context,
-                 (void*)ps3_gcm_context_backup,
-                 (void*)ps3gl_ptr,
-                 (unsigned)sizeof(ps3gl_state_t));
-        ps3_log(dbg);
-    }
 }
 
 void PS3_RSX_Shutdown(void)
 {
     ps3_current_rt = -1;
+    gcmSetFlipHandler(NULL);
     ps3gl_shutdown();
 
     rsxFinish(ps3_gcm_context, 1);
@@ -263,66 +230,86 @@ void PS3_RSX_Shutdown(void)
     }
 }
 
-/* Track whether we've submitted a flip that hasn't been waited on yet */
-static int ps3_flip_pending = 0;
-
-static void PS3_RSX_WaitFlip(void)
-{
-    if (!ps3_flip_pending) return;
-
-    while (gcmGetFlipStatus() != 0) {
-        usleep(500);
-    }
-    gcmResetFlipStatus();
-    ps3_flip_pending = 0;
-}
-
 void PS3_RSX_BeginFrame(void)
 {
-    /* Restore from .data backup if corrupted */
-    if ((uintptr_t)ps3_gcm_context <= 0x1000
-        && (uintptr_t)ps3_gcm_context_backup > 0x1000)
-        ps3_gcm_context = ps3_gcm_context_backup;
+    if (!ps3_gcm_context) return;
 
-    if ((uintptr_t)ps3_gcm_context <= 0x1000) return;
-
-    /* Wait for the PREVIOUS frame's flip to complete before we start
-     * writing into the back buffer. */
-    PS3_RSX_WaitFlip();
-
+    PS3_RSX_WaitFlips();
     PS3_RSX_SetRenderTarget(ps3_current_fb);
     ps3gl_begin_frame();
 }
 
 void PS3_RSX_EndFrame(void)
 {
-    /* Restore from .data backup if corrupted */
-    if ((uintptr_t)ps3_gcm_context <= 0x1000
-        && (uintptr_t)ps3_gcm_context_backup > 0x1000)
-        ps3_gcm_context = ps3_gcm_context_backup;
-
-    if ((uintptr_t)ps3_gcm_context <= 0x1000) return;
+    if (!ps3_gcm_context) return;
 
     ps3gl_end_frame();
 
-    /* Queue flip + flush (non-blocking). Wait happens in next BeginFrame. */
-    gcmSetWaitFlip(ps3_gcm_context);
+    /* Queue flip + flush (no WaitFlip here to avoid double V-Sync stall). */
     gcmSetFlip(ps3_gcm_context, ps3_current_fb);
     rsxFlushBuffer(ps3_gcm_context);
 
-    ps3_current_fb ^= 1;
-    ps3_flip_pending = 1;
+    ps3_flips_queued++;
+    ps3_current_fb = (ps3_current_fb + 1) % RSX_FB_COUNT;
 }
 
-/* ----------------------------------------------------------------
- * GLimp interface -- called by ioQ3's renderer
- * ---------------------------------------------------------------- */
+/* Renderer stats command. */
+static int ps3_stats_auto = 0;
+
+static void PS3GL_PrintStats(const ps3gl_stats_t *s)
+{
+    Com_Printf("ps3gl frame %u: draws=%u (elements=%u) streams direct=%u "
+               "copied=%u (verts=%u)\n",
+               ps3gl_stats_frames, s->draw_calls, s->draws_elements,
+               s->streams_direct, s->streams_copied, s->verts_copied);
+    Com_Printf("  vring: %u KB (%u KB idx), %u wraps, %u dropped | "
+               "arena: %u KB, %u wraps | texbinds=%u clipculled=%u\n",
+               s->vring_bytes / 1024, s->idx_bytes / 1024,
+               s->vring_wraps, s->vring_drops,
+               s->tarena_bytes / 1024, s->tarena_wraps,
+               s->tex_binds, s->tris_clipculled);
+}
+
+static void PS3GL_Stats_f(void)
+{
+    if (Cmd_Argc() >= 2) {
+        ps3_stats_auto = atoi(Cmd_Argv(1));
+        Com_Printf("ps3gl_stats: auto-print %s\n",
+                   ps3_stats_auto > 0 ? va("every %d frames", ps3_stats_auto)
+                                      : "off");
+        return;
+    }
+    PS3GL_PrintStats(&ps3gl_stats_last);
+}
+
+static void PS3_Perf_f(void)
+{
+    int on = 1;
+    if (Cmd_Argc() >= 2)
+        on = atoi(Cmd_Argv(1));
+
+    if (on) {
+        Cvar_Set("r_dynamic", "0");
+        Cvar_Set("r_picmip", "1");
+        Cvar_Set("cg_marks", "0");
+        Com_Printf("ps3_perf: ON (r_dynamic 0, r_picmip 1, cg_marks 0)\n");
+    } else {
+        Cvar_Set("r_dynamic", "1");
+        Cvar_Set("r_picmip", "0");
+        Cvar_Set("cg_marks", "1");
+        Com_Printf("ps3_perf: OFF (r_dynamic 1, r_picmip 0, cg_marks 1)\n");
+    }
+    Com_Printf("ps3_perf: r_picmip is latched; vid_restart to apply\n");
+}
+
 void GLimp_Init(qboolean fixedFunction)
 {
     (void)fixedFunction;
     extern glconfig_t glConfig;
 
-    /* Call IN_Init for default controller binds (upstream calls from sdl_glimp.c) */
+    Cmd_AddCommand("ps3gl_stats", PS3GL_Stats_f);
+    Cmd_AddCommand("ps3_perf", PS3_Perf_f);
+
     IN_Init(NULL);
 
     glConfig.vidWidth           = ps3_display_width;
@@ -337,8 +324,8 @@ void GLimp_Init(qboolean fixedFunction)
     glConfig.displayFrequency   = 60;
     glConfig.deviceSupportsGamma = qfalse;
     glConfig.textureCompression = TC_NONE;
-    glConfig.numTextureUnits    = 2;    /* RSX supports multiple texture units */
-    glConfig.textureEnvAddAvailable = qtrue; /* We handle GL_ADD texenv mode */
+    glConfig.numTextureUnits    = 2;
+    glConfig.textureEnvAddAvailable = qtrue;
 
     Q_strncpyz(glConfig.vendor_string, "Sony", sizeof(glConfig.vendor_string));
     Q_strncpyz(glConfig.renderer_string, "RSX Reality Synthesizer",
@@ -352,23 +339,25 @@ void GLimp_Init(qboolean fixedFunction)
 void GLimp_Shutdown(qboolean unloadDLL)
 {
     (void)unloadDLL;
+    Cmd_RemoveCommand("ps3gl_stats");
+    Cmd_RemoveCommand("ps3_perf");
 }
 
 void GLimp_EndFrame(void)
 {
     PS3_RSX_EndFrame();
+
+    if (ps3_stats_auto > 0 &&
+        (ps3gl_stats_frames % (uint32_t)ps3_stats_auto) == 0)
+        PS3GL_PrintStats(&ps3gl_stats_cur);
 }
 
-void GLimp_Minimize(void)
-{
-    /* No minimize on PS3 */
-}
+void GLimp_Minimize(void) { }
 
 void GLimp_SetGamma(unsigned char red[256], unsigned char green[256],
                      unsigned char blue[256])
 {
     (void)red; (void)green; (void)blue;
-    /* PS3 gamma could be set via RSX but we skip it for now */
 }
 
 void GLimp_LogComment(char *comment)
