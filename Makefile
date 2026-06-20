@@ -431,15 +431,15 @@ $(BUILD)/%.o: %.c
 	@$(CC) $(CFLAGS) -c $< -o $@
 
 # Bundled pk3 headers (generated per build flavor into $(BUILD)/)
-$(BUILD)/pak9_ps3_embedded.h: fixes/baseq3/pak9-ps3.pk3 tools/bin2c.py
+$(BUILD)/pak9_ps3_embedded.h: fixes/baseq3/pak9-ps3.pk3
 	@mkdir -p $(dir $@)
 	@echo "GEN $@"
-	@python3 tools/bin2c.py fixes/baseq3/pak9-ps3.pk3 pak9_ps3_data > $@
+	@python3 -c "import sys; d=open(sys.argv[1],'rb').read(); n=sys.argv[2]; print('static const unsigned char '+n+'[] = {'+','.join(str(b) for b in d)+'};'); print('static const unsigned int '+n+'_len = '+str(len(d))+';'); print('static const unsigned int '+n+'_csum = '+str(sum(d))+'u;')" fixes/baseq3/pak9-ps3.pk3 pak9_ps3_data > $@
 
-$(BUILD)/pak4_ps3_embedded.h: fixes/missionpack/pak4-ps3.pk3 tools/bin2c.py
+$(BUILD)/pak4_ps3_embedded.h: fixes/missionpack/pak4-ps3.pk3
 	@mkdir -p $(dir $@)
 	@echo "GEN $@"
-	@python3 tools/bin2c.py fixes/missionpack/pak4-ps3.pk3 pak4_ps3_data > $@
+	@python3 -c "import sys; d=open(sys.argv[1],'rb').read(); n=sys.argv[2]; print('static const unsigned char '+n+'[] = {'+','.join(str(b) for b in d)+'};'); print('static const unsigned int '+n+'_len = '+str(len(d))+';'); print('static const unsigned int '+n+'_csum = '+str(sum(d))+'u;')" fixes/missionpack/pak4-ps3.pk3 pak4_ps3_data > $@
 
 # Port-specific files need network shim
 ifeq ($(TA),1)
