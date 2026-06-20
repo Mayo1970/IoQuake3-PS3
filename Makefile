@@ -360,7 +360,6 @@ CXXFLAGS := $(CFLAGS)
 LDFLAGS := \
   -L$(PSL1GHT_LIB) \
   -L$(PORTLIBS_LIB) \
-  -Wl,-Map=$(BUILD)/$(TARGET).map \
   -Wl,--wrap,CL_GenerateQKey \
   -Wl,--wrap,Com_Printf
 
@@ -431,11 +430,28 @@ $(BUILD)/%.o: %.c
 	@echo "CC $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
+# Bundled pk3 headers (generated per build flavor into $(BUILD)/)
+$(BUILD)/pak9_ps3_embedded.h: fixes/baseq3/pak9-ps3.pk3 tools/bin2c.py
+	@mkdir -p $(dir $@)
+	@echo "GEN $@"
+	@python3 tools/bin2c.py fixes/baseq3/pak9-ps3.pk3 pak9_ps3_data > $@
+
+$(BUILD)/pak4_ps3_embedded.h: fixes/missionpack/pak4-ps3.pk3 tools/bin2c.py
+	@mkdir -p $(dir $@)
+	@echo "GEN $@"
+	@python3 tools/bin2c.py fixes/missionpack/pak4-ps3.pk3 pak4_ps3_data > $@
+
 # Port-specific files need network shim
-$(BUILD)/code/sys/ps3_main.o: code/sys/ps3_main.c
+ifeq ($(TA),1)
+PS3_MAIN_EMBEDDED_DEPS := $(BUILD)/pak9_ps3_embedded.h $(BUILD)/pak4_ps3_embedded.h
+else
+PS3_MAIN_EMBEDDED_DEPS := $(BUILD)/pak9_ps3_embedded.h
+endif
+
+$(BUILD)/code/sys/ps3_main.o: code/sys/ps3_main.c $(PS3_MAIN_EMBEDDED_DEPS)
 	@mkdir -p $(dir $@)
 	@echo "CC $<"
-	@$(CC) $(CFLAGS) -DPS3_INCLUDE_NET -c $< -o $@
+	@$(CC) $(CFLAGS) -DPS3_INCLUDE_NET -I$(BUILD) -c $< -o $@
 
 $(BUILD)/code/qcommon/net_ip.o: code/qcommon/net_ip.c
 	@mkdir -p $(dir $@)

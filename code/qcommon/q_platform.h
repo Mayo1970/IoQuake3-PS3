@@ -327,9 +327,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #define IOAPI_NO_64BIT
 
-/* Do NOT define HAVE_VM_COMPILED: lv2 enforces NX on heap pages (no executable protection in user API).
- * JIT cannot run; vm.c safely downgrades to bytecode interpreter. */
-
 #endif
 
 //============================================================ EMSCRIPTEN ===

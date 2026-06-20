@@ -18,7 +18,8 @@ Three separate builds are produced from the same source tree:
 - All textures render correctly (map, icons, models, particles)
 - Networking: LAN discovery, internet server browser, master server, hosting
 - DualShock 3 dual-stick analog input + **rumble (DS3 motor support)**
-- On-screen keyboard for text input (console, chat, server address, name)
+- **USB keyboard + mouse support** (type in console/chat/menus, mouse aim & menu cursor)
+- On-screen keyboard for text input (console, chat, server address, name, menu fields)
 - Cinematic (intro video) playback with audio
 - OGG Vorbis background music
 - **Mod support** via `+set fs_game <mod>` (also how TA loads `missionpack`)
@@ -271,7 +272,7 @@ Cvars (both `CVAR_ARCHIVE`):
 | `ps3_rumbleEnable` | `1` | 0 = off |
 | `ps3_rumbleScale`  | `1.0` | clamps to `[0, 1]` |
 
-### Text input (console, chat)
+### Text input (console, chat, menu fields)
 
 | Input | Action |
 |---|---|
@@ -280,10 +281,38 @@ Cvars (both `CVAR_ARCHIVE`):
 | **Select + Cross** | Open chat message editor |
 | **Triangle** (chat open) | Open on-screen keyboard; auto-submits as message |
 | **Cross** (chat open) | Confirm typed message and send |
+| **Cross** (menu, on a focused text field) | Open on-screen keyboard; result is written into the field. On buttons/sliders it falls through to the normal confirm. |
 
 The OSK is the PS3 system on-screen keyboard. When opened from the console
 context, typed text is auto-submitted as a command (prepended with `/` to
 prevent accidental chat broadcast). From chat context, text is the message body.
+Menu text fields (player name, server address, etc.) accept OSK input directly
+in all three variants (Q3, OA, TA).
+
+---
+
+## USB keyboard & mouse
+
+A USB keyboard and/or mouse can be plugged into the PS3 and used alongside (or
+instead of) the DualShock 3 — no configuration needed, they are detected and
+polled automatically at boot, and hot-plugging is handled.
+
+**Keyboard:**
+
+- Full text entry in the console, chat, and menu text fields — no OSK needed.
+- Standard key bindings work (the keyboard emits normal Quake3 key events), so
+  any action can be bound to a key.
+- Modifier keys (Ctrl / Shift / Alt) and key auto-repeat are supported.
+
+**Mouse:**
+
+- Mouse look in-game (free aim, same as the right stick).
+- Left / right / middle buttons fire `MOUSE1` / `MOUSE2` / `MOUSE3` — bindable.
+- Scroll wheel emits `MWHEELUP` / `MWHEELDOWN` (e.g. weapon cycling).
+- Drives the menu cursor.
+
+While the on-screen keyboard is open, both devices are held in sync-only mode so
+their input does not bleed through into the game underneath.
 
 ### Menus
 
@@ -373,18 +402,6 @@ Don't raise `DEF_COMHUNKMEGS` above 112 without re-measuring.
 - If switching variants seems to misbehave (wrong gamename, missing intro
   cinematic), delete the on-PS3 `*config.cfg` for that variant — stale
   cvar values can override defaults.
-
-### Known renderer limitations
-
-- `glCopyTexSubImage2D` is a no-op stub. The RSX layer never reads back
-  from the framebuffer, so effects that depend on it would silently render
-  without the copied texture data. Nothing in stock Q3A/TA/OA hits it in
-  practice.
-- `glDrawArrays` / `glArrayElement` are stubs; the Q3 renderer only uses
-  indexed `glDrawElements`.
-- Mirrors/portals are clipped by software triangle culling instead of a
-  hardware clip plane (no fixed-function `GL_CLIP_PLANE` on RSX);
-  straddling triangles produce a thin sliver of over-draw at worst.
 
 ## License
 

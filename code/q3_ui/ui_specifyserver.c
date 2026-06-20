@@ -22,6 +22,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 //
 #include "ui_local.h"
 
+//set custom colour - bright orange
+vec4_t custom = {1.00f, 0.50f, 0.00f, 1.00f};
+
 /*********************************************************************************
 	SPECIFY SERVER
 *********************************************************************************/
@@ -63,6 +66,182 @@ static specifyserver_t	s_specifyserver;
 
 /*
 =================
+SpecifyServer_DrawDomain
+=================
+*/
+static void SpecifyServer_DrawDomain( void *self ) {
+	menufield_s		*f;
+	qboolean		focus;
+	int				style;
+	char			*txt;
+	char			c;
+	float			*color;
+	int				n;
+	int				x, y;
+	int				textX;
+
+	f = (menufield_s*)self;
+	focus = (f->generic.parent->cursor == f->generic.menuPosition);
+
+	style = UI_LEFT|UI_SMALLFONT;
+	color = text_color_normal;
+	if( focus ) {
+		style |= UI_PULSE;
+		color = text_color_highlight;
+	}
+
+	/* Draw label at same Y as text will be */
+	y = f->generic.y;
+	UI_DrawString( f->generic.x, y, f->generic.name, style, color );
+
+	/* Text starts after label with some padding */
+	textX = f->generic.x + 80;
+
+	/* Draw the actual text on the SAME baseline as the label */
+	txt = f->field.buffer;
+	//color = g_color_table[ColorIndex(COLOR_WHITE)];
+	color = custom;
+	x = textX;
+	while ( (c = *txt) != 0 ) {
+		if ( !focus && Q_IsColorString( txt ) ) {
+			n = ColorIndex( *(txt+1) );
+			if( n == 0 ) {
+				n = 7;
+			}
+			color = g_color_table[n];
+			txt += 2;
+			continue;
+		}
+		UI_DrawChar( x, y, c, style, color );
+		txt++;
+		x += SMALLCHAR_WIDTH;
+	}
+
+	/* Draw cursor if we have focus, on same baseline */
+	if( focus ) {
+		if ( trap_Key_GetOverstrikeMode() ) {
+			c = 11;
+		} else {
+			c = 10;
+		}
+
+		style &= ~UI_PULSE;
+		style |= UI_BLINK;
+
+		UI_DrawChar( textX + f->field.cursor * SMALLCHAR_WIDTH, y, c, style, color_white );
+		
+		/* Signal to PS4 input layer that domain field wants IME */
+		trap_Cvar_Set("ui_ime_target", "domain");
+	} else {
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "domain") == 0) {
+			trap_Cvar_Set("ui_ime_target", "");
+		}
+	}
+
+	/* Check for PS4 IME result every frame */
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "domain") == 0) {
+
+	    const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+	    Q_strncpyz(s_specifyserver.domain.field.buffer, imeText,
+	               sizeof(s_specifyserver.domain.field.buffer));
+	    s_specifyserver.domain.field.cursor = strlen(imeText);
+
+	    trap_Cvar_Set("ui_ime_field", "");
+	    trap_Cvar_SetValue("ui_ime_done", 0);
+	}
+}
+
+/*
+=================
+SpecifyServer_DrawPort
+=================
+*/
+static void SpecifyServer_DrawPort( void *self ) {
+	menufield_s		*f;
+	qboolean		focus;
+	int				style;
+	char			*txt;
+	char			c;
+	float			*color;
+	int				n;
+	int				x, y;
+	int				textX;
+
+	f = (menufield_s*)self;
+	focus = (f->generic.parent->cursor == f->generic.menuPosition);
+
+	style = UI_LEFT|UI_SMALLFONT;
+	color = text_color_normal;
+	if( focus ) {
+		style |= UI_PULSE;
+		color = text_color_highlight;
+	}
+
+	/* Draw label at same Y as text will be */
+	y = f->generic.y;
+	UI_DrawString( f->generic.x, y, f->generic.name, style, color );
+
+	/* Text starts after label with some padding */
+	textX = f->generic.x + 80;
+
+	/* Draw the actual text on the SAME baseline as the label */
+	txt = f->field.buffer;
+	//color = g_color_table[ColorIndex(COLOR_WHITE)];
+	color = custom;
+	x = textX;
+	while ( (c = *txt) != 0 ) {
+		if ( !focus && Q_IsColorString( txt ) ) {
+			n = ColorIndex( *(txt+1) );
+			if( n == 0 ) {
+				n = 7;
+			}
+			color = g_color_table[n];
+			txt += 2;
+			continue;
+		}
+		UI_DrawChar( x, y, c, style, color );
+		txt++;
+		x += SMALLCHAR_WIDTH;
+	}
+
+	/* Draw cursor if we have focus, on same baseline */
+	if( focus ) {
+		if ( trap_Key_GetOverstrikeMode() ) {
+			c = 11;
+		} else {
+			c = 10;
+		}
+
+		style &= ~UI_PULSE;
+		style |= UI_BLINK;
+
+		UI_DrawChar( textX + f->field.cursor * SMALLCHAR_WIDTH, y, c, style, color_white );
+		
+		/* Signal to PS4 input layer that port field wants IME */
+		trap_Cvar_Set("ui_ime_target", "port");
+	} else {
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "port") == 0) {
+			trap_Cvar_Set("ui_ime_target", "");
+		}
+	}
+
+	/* Check for PS4 IME result every frame */
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "port") == 0) {
+
+	    const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+	    Q_strncpyz(s_specifyserver.port.field.buffer, imeText,
+	               sizeof(s_specifyserver.port.field.buffer));
+	    s_specifyserver.port.field.cursor = strlen(imeText);
+
+	    trap_Cvar_Set("ui_ime_field", "");
+	    trap_Cvar_SetValue("ui_ime_done", 0);
+	}
+}
+
+/*
+=================
 SpecifyServer_Event
 =================
 */
@@ -76,8 +255,13 @@ static void SpecifyServer_Event( void* ptr, int event )
 			if (event != QM_ACTIVATED)
 				break;
 
+			trap_Cvar_Set("ui_ime_target", "");
 			if (s_specifyserver.domain.field.buffer[0])
 			{
+				/* Save to cvars before connecting */
+				trap_Cvar_Set("ui_lastServerAddress", s_specifyserver.domain.field.buffer);
+				trap_Cvar_Set("ui_lastServerPort",    s_specifyserver.port.field.buffer);
+
 				strcpy(buff,s_specifyserver.domain.field.buffer);
 				if (s_specifyserver.port.field.buffer[0])
 					Com_sprintf( buff+strlen(buff), 128, ":%s", s_specifyserver.port.field.buffer );
@@ -90,6 +274,7 @@ static void SpecifyServer_Event( void* ptr, int event )
 			if (event != QM_ACTIVATED)
 				break;
 
+			trap_Cvar_Set("ui_ime_target", "");
 			UI_PopMenu();
 			break;
 	}
@@ -138,6 +323,7 @@ void SpecifyServer_MenuInit( void )
 	s_specifyserver.domain.generic.flags      = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_specifyserver.domain.generic.x	      = 206;
 	s_specifyserver.domain.generic.y	      = 220;
+	s_specifyserver.domain.generic.ownerdraw  = SpecifyServer_DrawDomain;
 	s_specifyserver.domain.field.widthInChars = 38;
 	s_specifyserver.domain.field.maxchars     = 80;
 
@@ -146,6 +332,7 @@ void SpecifyServer_MenuInit( void )
 	s_specifyserver.port.generic.flags	    = QMF_PULSEIFFOCUS|QMF_SMALLFONT|QMF_NUMBERSONLY;
 	s_specifyserver.port.generic.x	        = 206;
 	s_specifyserver.port.generic.y	        = 250;
+	s_specifyserver.port.generic.ownerdraw  = SpecifyServer_DrawPort;
 	s_specifyserver.port.field.widthInChars = 6;
 	s_specifyserver.port.field.maxchars     = 5;
 
@@ -178,8 +365,22 @@ void SpecifyServer_MenuInit( void )
 	Menu_AddItem( &s_specifyserver.menu, &s_specifyserver.port );
 	Menu_AddItem( &s_specifyserver.menu, &s_specifyserver.go );
 	Menu_AddItem( &s_specifyserver.menu, &s_specifyserver.back );
+	
+	{
+		char addrBuf[81];
+		char portBuf[6];
+		trap_Cvar_VariableStringBuffer("ui_lastServerAddress", addrBuf, sizeof(addrBuf));
+		trap_Cvar_VariableStringBuffer("ui_lastServerPort",    portBuf, sizeof(portBuf));
 
-	Com_sprintf( s_specifyserver.port.field.buffer, 6, "%i", 27960 );
+		Q_strncpyz(s_specifyserver.domain.field.buffer, addrBuf,
+		           sizeof(s_specifyserver.domain.field.buffer));
+		Q_strncpyz(s_specifyserver.port.field.buffer, portBuf,
+		           sizeof(s_specifyserver.port.field.buffer));
+	}
+
+	if (!s_specifyserver.port.field.buffer[0]) {
+		Com_sprintf(s_specifyserver.port.field.buffer, 6, "%i", 27960);
+	}
 }
 
 /*

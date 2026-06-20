@@ -73,6 +73,7 @@ typedef struct {
 	menulist_s		team;
 	menubitmap_s	go;
 	menubitmap_s	back;
+	menutext_s      status;
 
 	int				numBots;
 	int				delay;
@@ -80,6 +81,8 @@ typedef struct {
 	int				selectedBotNum;
 	int				sortedBotNums[MAX_BOTS];
 	char			botnames[7][32];
+	char            statusText[64];
+	int             statusTime;
 } addBotsMenuInfo_t;
 
 static addBotsMenuInfo_t	addBotsMenuInfo;
@@ -91,20 +94,36 @@ UI_AddBotsMenu_FightEvent
 =================
 */
 static void UI_AddBotsMenu_FightEvent( void* ptr, int event ) {
-	const char	*team;
-	int			skill;
+    const char  *team;
+    int         skill;
+    const char  *botName;
+    char        buf[128];
 
-	if (event != QM_ACTIVATED) {
-		return;
-	}
+    if (event != QM_ACTIVATED) {
+        return;
+    }
 
-	team = addBotsMenuInfo.team.itemnames[addBotsMenuInfo.team.curvalue];
-	skill = addBotsMenuInfo.skill.curvalue + 1;
+    team = addBotsMenuInfo.team.itemnames[addBotsMenuInfo.team.curvalue];
+    skill = addBotsMenuInfo.skill.curvalue + 1;
+    botName = addBotsMenuInfo.botnames[addBotsMenuInfo.selectedBotNum];
 
-	trap_Cmd_ExecuteText( EXEC_APPEND, va("addbot %s %i %s %i\n",
-		addBotsMenuInfo.botnames[addBotsMenuInfo.selectedBotNum], skill, team, addBotsMenuInfo.delay) );
+    // Queue the addbot command. Note: the server processes commands immediately
+    // but the bot won't fully join (ClientBegin) until we exit the UI menus
+    // and the game loop resumes. This is standard Q3 behavior.
+    trap_Cmd_ExecuteText( EXEC_APPEND, va("addbot %s %i %s %i\n",
+        botName, skill, team, addBotsMenuInfo.delay) );
 
-	addBotsMenuInfo.delay += 1500;
+    // Immediate console print via UI trap (shows in console even while in menus)
+    Com_sprintf(buf, sizeof(buf), "^2Adding bot:^7 %s (skill: %i, team: %s)\n", botName, skill, team);
+    trap_Print(buf);
+    
+    // Status message in menu. Bot will fully join when we resume gameplay.
+    Com_sprintf(addBotsMenuInfo.statusText, sizeof(addBotsMenuInfo.statusText), 
+        "Adding: %s", botName);
+    addBotsMenuInfo.status.generic.flags &= ~QMF_HIDDEN;
+    addBotsMenuInfo.statusTime = uis.realtime + 2000;
+
+    addBotsMenuInfo.delay += 1500;
 }
 
 
@@ -167,6 +186,7 @@ static void UI_AddBotsMenu_UpEvent( void* ptr, int event ) {
 	if( addBotsMenuInfo.baseBotNum > 0 ) {
 		addBotsMenuInfo.baseBotNum--;
 		UI_AddBotsMenu_SetBotNames();
+		addBotsMenuInfo.status.generic.flags |= QMF_HIDDEN;
 	}
 }
 
@@ -184,6 +204,7 @@ static void UI_AddBotsMenu_DownEvent( void* ptr, int event ) {
 	if( addBotsMenuInfo.baseBotNum + 7 < addBotsMenuInfo.numBots ) {
 		addBotsMenuInfo.baseBotNum++;
 		UI_AddBotsMenu_SetBotNames();
+		addBotsMenuInfo.status.generic.flags |= QMF_HIDDEN;
 	}
 }
 
@@ -387,6 +408,19 @@ static void UI_AddBotsMenu_Init( void ) {
 	Menu_AddItem( &addBotsMenuInfo.menu, &addBotsMenuInfo.team );
 	Menu_AddItem( &addBotsMenuInfo.menu, &addBotsMenuInfo.go );
 	Menu_AddItem( &addBotsMenuInfo.menu, &addBotsMenuInfo.back );
+	
+	// Status line at top of menu
+	addBotsMenuInfo.status.generic.type     = MTYPE_PTEXT;
+	addBotsMenuInfo.status.generic.flags    = QMF_INACTIVE | QMF_HIDDEN;
+	addBotsMenuInfo.status.generic.x        = -104;
+	addBotsMenuInfo.status.generic.y        = 0;
+	addBotsMenuInfo.status.string           = addBotsMenuInfo.statusText;
+	addBotsMenuInfo.status.color            = color_yellow;
+	addBotsMenuInfo.status.style            = UI_LEFT|UI_SMALLFONT;
+	addBotsMenuInfo.statusText[0] = '\0';
+	addBotsMenuInfo.statusTime = 0;
+
+	Menu_AddItem( &addBotsMenuInfo.menu, &addBotsMenuInfo.status );
 }
 
 

@@ -32,7 +32,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <inttypes.h>
 
 #ifndef MAP_ANONYMOUS
@@ -1147,11 +1146,6 @@ static clock_t time_total_vm = 0;
  */
 
 //#define VM_SYSTEM_MALLOC
-#ifdef __PS3__
-/* Keep compile-time transients (several MB for ui.qvm) off the 24 MB zone;
- * the system heap frees them right back after VM_Compile. */
-#define VM_SYSTEM_MALLOC
-#endif
 #ifdef VM_SYSTEM_MALLOC
 static inline void *
 PPC_Malloc( size_t size )
@@ -2912,21 +2906,11 @@ PPC_ComputeCode( vm_t *vm )
 
 	// get the memory for the generated code, smarter ppcs need the
 	// mem to be marked as executable (whill change later)
-#ifdef __PS3__
-	/* PSL1GHT has no mmap; lv2 user pages are RWX, so plain heap works.
-	 * i-cache coherency is handled explicitly at the end of VM_Compile. */
-	unsigned char *dataAndCode = malloc( codeLength );
-
-	if (dataAndCode == NULL)
-		DIE( "Not enough memory" );
-	memset( dataAndCode, 0, codeLength );
-#else
 	unsigned char *dataAndCode = mmap( NULL, codeLength,
 		PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0 );
 
 	if (dataAndCode == MAP_FAILED)
 		DIE( "Not enough memory" );
-#endif
 
 	ppc_instruction_t *codeNow, *codeBegin;
 	codeNow = codeBegin = (ppc_instruction_t *)( dataAndCode + VM_Data_Offset( data[ data_acc ] ) );
@@ -3076,12 +3060,8 @@ static void
 VM_Destroy_Compiled( vm_t *self )
 {
 	if ( self->codeBase ) {
-#ifdef __PS3__
-		free( self->codeBase );
-#else
 		if ( munmap( self->codeBase, self->codeLength ) )
 			Com_Printf( S_COLOR_RED "Memory unmap failed, possible memory leak\n" );
-#endif
 	}
 	self->codeBase = NULL;
 }
@@ -3104,11 +3084,12 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
 	i_first = PPC_Malloc( sizeof( source_instruction_t ) );
 	i_first->next = NULL;
 
-	/* Upstream "realloc instructionPointers with correct size" block removed:
-	 * it Z_Free'd a pointer that vm.c:VM_Create allocates with Hunk_Alloc
-	 * (instant ERR_FATAL "freed a pointer without ZONEID" on the first
-	 * compile), a relic from an old vm.c that allocated 4 bytes per entry.
-	 * This vm.c already allocates instructionCount * sizeof(intptr_t). */
+	// realloc instructionPointers with correct size
+	// use Z_Malloc so vm.c will be able to free the memory
+	if ( sizeof( void * ) != sizeof( int ) ) {
+		Z_Free( vm->instructionPointers );
+		vm->instructionPointers = Z_Malloc( header->instructionCount * sizeof( void * ) );
+	}
 	di_pointers = (void *)vm->instructionPointers;
 	memset( di_pointers, 0, header->instructionCount * sizeof( void * ) );
 
@@ -3171,25 +3152,6 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
 			Com_Printf( S_COLOR_RED "Pointer %ld not initialized !\n", i );
 #endif
 
-#ifdef __PS3__
-	/* No page protection on PS3 (heap is already RWX). PowerPC requires an
-	 * explicit d-cache flush + i-cache invalidate before executing freshly
-	 * written instructions. The Cell PPU cache line is 128 bytes; a 32-byte
-	 * stride is over-conservative but safe (redundant ops on the same line
-	 * are no-ops) and covers any smaller-line assumption. */
-	{
-		unsigned char *base = vm->codeBase;
-		unsigned char *end = vm->codeBase + vm->codeLength;
-		unsigned char *p;
-
-		for ( p = base; p < end; p += 32 )
-			__asm__ volatile( "dcbst 0,%0" : : "r"(p) : "memory" );
-		__asm__ volatile( "sync" : : : "memory" );
-		for ( p = base; p < end; p += 32 )
-			__asm__ volatile( "icbi 0,%0" : : "r"(p) : "memory" );
-		__asm__ volatile( "isync" : : : "memory" );
-	}
-#else
 	/* mark memory as executable and not writeable */
 	if ( mprotect( vm->codeBase, vm->codeLength, PROT_READ|PROT_EXEC ) ) {
 
@@ -3197,7 +3159,6 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
 		VM_Destroy_Compiled( vm );
 		DIE( "mprotect failed" );
 	}
-#endif
 
 	vm->destroy = VM_Destroy_Compiled;
 	vm->compiled = qtrue;
@@ -3209,18 +3170,6 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
 			vm->name, vm->codeLength, vm->codeBase, vm->codeBase+vm->codeLength );
 
 		gettimeofday(&tvdone, NULL);
-#ifndef timersub
-		/* PSL1GHT newlib doesn't provide the BSD timersub macro */
-#define timersub(a, b, result)						\
-	do {								\
-		(result)->tv_sec = (a)->tv_sec - (b)->tv_sec;		\
-		(result)->tv_usec = (a)->tv_usec - (b)->tv_usec;	\
-		if ((result)->tv_usec < 0) {				\
-			--(result)->tv_sec;				\
-			(result)->tv_usec += 1000000;			\
-		}							\
-	} while (0)
-#endif
 		timersub(&tvdone, &tvstart, &dur);
 		Com_Printf( "compilation took %lu.%06lu seconds\n",
 			(long unsigned int)dur.tv_sec, (long unsigned int)dur.tv_usec );

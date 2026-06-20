@@ -27,6 +27,12 @@
 #include "renderercommon/tr_types.h"
 #include "renderercommon/tr_public.h"
 extern refexport_t *GetRefAPI(int apiVersion, refimport_t *rimp);
+extern void Com_WriteConfiguration(void);
+
+#include "pak9_ps3_embedded.h"
+#ifdef STANDALONETA
+#include "pak4_ps3_embedded.h"
+#endif
 
 SYS_PROCESS_PARAM(1001, 0x100000);
 
@@ -68,7 +74,6 @@ static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
 #  define PS3_TITLE         "ioquake3-PS3"
 #endif
 
-/* ps3_log() must stay defined in release too -- other TUs link it via extern. */
 #ifdef PS3_DEBUG
 static const char *ps3_log_path = "/dev_hdd0/data/ioq3/" PS3_LOG_SUFFIX;
 #endif
@@ -93,7 +98,7 @@ void ps3_log(const char *msg)
 #define PS3LOG(fmt, ...) ((void)0)
 #endif
 
-/* Try HDD, fall back to USB. Each variant probes its own pak0.pk3. */
+/* Try HDD, fall back to USB. */
 static const char *ps3_base_path  = "/dev_hdd0/data/ioq3";
 static const char *ps3_usb_path   = "/dev_usb000/quake3";
 
@@ -124,6 +129,70 @@ static qboolean PS3_SetupFilesystem(void)
     return qfalse;
 }
 
+static unsigned int PS3_FileChecksum(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0xFFFFFFFFu;
+    unsigned int csum = 0;
+    unsigned char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (size_t i = 0; i < n; i++) csum += buf[i];
+    }
+    fclose(f);
+    return csum;
+}
+
+static void PS3_ExtractBundledPak9(void)
+{
+    char destpath[256];
+    snprintf(destpath, sizeof(destpath), "%s/baseq3/pak9-ps3.pk3", ps3_base_path);
+
+    if (PS3_FileChecksum(destpath) == pak9_ps3_data_csum) {
+        PS3LOG("pak9-ps3.pk3 up to date, skipping");
+        return;
+    }
+
+    FILE *f = fopen(destpath, "wb");
+    if (!f) {
+        printf("[ps3] WARNING: could not write %s\n", destpath);
+        return;
+    }
+    size_t written = fwrite(pak9_ps3_data, 1, pak9_ps3_data_len, f);
+    fclose(f);
+    if (written == pak9_ps3_data_len)
+        printf("[ps3] Extracted pak9-ps3.pk3 -> baseq3\n");
+    else
+        printf("[ps3] WARNING: pak9-ps3.pk3 write incomplete (%u/%u)\n",
+               (unsigned)written, pak9_ps3_data_len);
+}
+
+#ifdef STANDALONETA
+static void PS3_ExtractBundledPak4(void)
+{
+    char destpath[256];
+    snprintf(destpath, sizeof(destpath), "%s/missionpack/pak4-ps3.pk3", ps3_base_path);
+
+    if (PS3_FileChecksum(destpath) == pak4_ps3_data_csum) {
+        PS3LOG("pak4-ps3.pk3 up to date, skipping");
+        return;
+    }
+
+    FILE *f = fopen(destpath, "wb");
+    if (!f) {
+        printf("[ps3] WARNING: could not write %s\n", destpath);
+        return;
+    }
+    size_t written = fwrite(pak4_ps3_data, 1, pak4_ps3_data_len, f);
+    fclose(f);
+    if (written == pak4_ps3_data_len)
+        printf("[ps3] Extracted pak4-ps3.pk3 -> missionpack\n");
+    else
+        printf("[ps3] WARNING: pak4-ps3.pk3 write incomplete (%u/%u)\n",
+               (unsigned)written, pak4_ps3_data_len);
+}
+#endif
+
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -146,6 +215,13 @@ int main(int argc, char *argv[])
         return 1;
     }
     PS3LOG("Filesystem ready");
+
+#ifndef STANDALONEOA
+    PS3_ExtractBundledPak9();
+#endif
+#ifdef STANDALONETA
+    PS3_ExtractBundledPak4();
+#endif
 
     PS3_Input_Init();
     printf("[ps3] Input OK\n");
@@ -193,20 +269,18 @@ int main(int argc, char *argv[])
         "+set fs_steampath \"\" "
         "+set fs_gogpath \"\" "
         "+set fs_game " PS3_GAMEDIR " "
-        "+set name \"%s\" "
         "+set com_hunkMegs 96 "
         "+set com_zoneMegs 24 "
         "+set max_routingcache 6144 "
         "+set r_mode -1 "
-        "+set r_customwidth 640 "
-        "+set r_customheight 480 "
+        "+set r_customwidth 1280 "
+        "+set r_customheight 720 "
         "+set r_picmip 1 "
         "+set r_dynamic 1 "
         "+set r_flares 0 "
         "+set r_fastsky 0 "
-        "+set r_lodbias 2 "
-        "+set r_subdivisions 12 "
-        "+set r_simpleMipMaps 1 "
+        "+set r_lodbias 0 "
+        "+set r_subdivisions 4 "
         "+set r_drawSun 0 "
         "+set r_primitives 2 "
         "+set com_maxfps 60 "         /* cap at 60; 0 can overfill GCM buffer and stall */
@@ -230,7 +304,7 @@ int main(int argc, char *argv[])
 #else
         "+set com_logfile 0",
 #endif
-        ps3_base_path, ps3_base_path, ps3_nick
+        ps3_base_path, ps3_base_path
     );
 
     /* Hashed by CL_UpdateGUID into cl_guid; OA QVM rejects empty guid. */
@@ -256,6 +330,16 @@ int main(int argc, char *argv[])
     Com_Init(cmdline);
     printf("[ps3] Com_Init done\n");
 
+    /* If name is still the hardcoded default, no saved config set it —
+       apply the XMB nick. If the user changed it in-game it won't be
+       "UnnamedPlayer", so we leave it alone. */
+    {
+        cvar_t *cv = Cvar_Get("name", "UnnamedPlayer", CVAR_USERINFO | CVAR_ARCHIVE);
+        if (Q_stricmp(cv->string, "UnnamedPlayer") == 0) {
+            Cvar_Set("name", ps3_nick);
+        }
+    }
+
     /* PSL1GHT net module must load before ioq3's NET_Init. */
     {
         sysModuleLoad(SYSMODULE_NET);
@@ -275,6 +359,16 @@ int main(int argc, char *argv[])
         }
 
         Com_Frame();
+    }
+
+    /* XMB exit: ps3_running was set to 0 by sysutil callback.
+       Com_Quit_f was not called, so flush config and shut down cleanly. */
+    if (!ps3_running) {
+        Com_WriteConfiguration();
+        SV_Shutdown("Server quit");
+        CL_Shutdown("Client quit", qtrue, qtrue);
+        Com_Shutdown();
+        FS_Shutdown(qtrue);
     }
 
     PS3_OSK_Shutdown();

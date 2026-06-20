@@ -50,6 +50,8 @@ baseq3/
 baseoa/
 missionpack/
 *.pk3
+!fixes/baseq3/pak9-ps3.pk3
+!fixes/missionpack/pak4-ps3.pk3
 qkey
 q3key
 
@@ -61,8 +63,8 @@ legacy_patches/
 .cursor/
 .aider*
 CLAUDE.md
-AGENTS.md
 ONBOARDING.md
+ps3-port-optimization-plan.md
 
 # OS / editor noise
 .DS_Store

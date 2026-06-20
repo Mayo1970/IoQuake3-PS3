@@ -1232,6 +1232,304 @@ static void PlayerName_Draw( void *item ) {
 	UI_DrawString( x + SMALLCHAR_WIDTH, y, s->string, style|UI_LEFT, color );
 }
 
+/*
+=================
+ServerOptions_DrawHostname
+=================
+*/
+static void ServerOptions_DrawHostname( void *self ) {
+	menufield_s		*f;
+	qboolean		focus;
+	int				style;
+	char			*txt;
+	char			c;
+	float			*color;
+	int				n;
+	int				x, y;
+	int				textX;
+
+	f = (menufield_s*)self;
+	focus = (f->generic.parent->cursor == f->generic.menuPosition);
+
+	style = UI_LEFT|UI_SMALLFONT;
+	color = text_color_normal;
+	if( focus ) {
+		style |= UI_PULSE;
+		color = text_color_highlight;
+	}
+
+	/* Draw label at same Y as text will be */
+	y = f->generic.y;
+	//UI_DrawString( f->generic.x, y, f->generic.name, style, color );
+	UI_DrawString( f->generic.x - SMALLCHAR_WIDTH, y, f->generic.name, style | UI_RIGHT, color );
+
+	/* Text starts after label with some padding */
+	textX = f->generic.x + 8;
+
+	/* Draw the actual text on the SAME baseline as the label */
+	txt = f->field.buffer;
+	//color = g_color_table[ColorIndex(COLOR_CYAN)];
+	color = color_orange;
+	x = textX;
+	while ( (c = *txt) != 0 ) {
+		if ( !focus && Q_IsColorString( txt ) ) {
+			n = ColorIndex( *(txt+1) );
+			if( n == 0 ) {
+				n = 7;
+			}
+			color = g_color_table[n];
+			txt += 2;
+			continue;
+		}
+		UI_DrawChar( x, y, c, style, color );
+		txt++;
+		x += SMALLCHAR_WIDTH;
+	}
+
+	/* Draw cursor if we have focus, on same baseline */
+	if( focus ) {
+		if ( trap_Key_GetOverstrikeMode() ) {
+			c = 11;
+		} else {
+			c = 10;
+		}
+
+		style &= ~UI_PULSE;
+		style |= UI_BLINK;
+
+		UI_DrawChar( textX + f->field.cursor * SMALLCHAR_WIDTH, y, c, style, color_white );
+		
+		/* Signal to PS4 input layer that hostname field wants IME */
+		trap_Cvar_Set("ui_ime_target", "hostname");
+	} else {
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "hostname") == 0) {
+			trap_Cvar_Set("ui_ime_target", "");
+		}
+	}
+
+	/* Check for PS4 IME result every frame */
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "hostname") == 0) {
+	    const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+	    Q_strncpyz(s_serveroptions.hostname.field.buffer, imeText,
+	               sizeof(s_serveroptions.hostname.field.buffer));
+	    s_serveroptions.hostname.field.cursor = strlen(imeText);
+	    trap_Cvar_Set("ui_ime_field", "");
+	    trap_Cvar_SetValue("ui_ime_done", 0);
+	}
+}
+
+/*
+=================
+ServerOptions_DrawFraglimit
+=================
+*/
+static void ServerOptions_DrawFraglimit( void *self ) {
+	menufield_s		*f;
+	qboolean		focus;
+	int				style;
+	char			*txt;
+	char			c;
+	float			*color;
+	int				n;
+	int				x, y;
+	int				textX;
+
+	f = (menufield_s*)self;
+	focus = (f->generic.parent->cursor == f->generic.menuPosition);
+
+	style = UI_LEFT|UI_SMALLFONT;
+	color = text_color_normal;
+	if( focus ) {
+		style |= UI_PULSE;
+		color = text_color_highlight;
+	}
+
+	y = f->generic.y;
+	UI_DrawString( f->generic.x - SMALLCHAR_WIDTH, y, f->generic.name, style | UI_RIGHT, color );
+
+	textX = f->generic.x + 8;
+	txt = f->field.buffer;
+	//color = g_color_table[ColorIndex(COLOR_CYAN)];
+	color = color_orange;
+	x = textX;
+	while ( (c = *txt) != 0 ) {
+		if ( !focus && Q_IsColorString( txt ) ) {
+			n = ColorIndex( *(txt+1) );
+			if( n == 0 ) n = 7;
+			color = g_color_table[n];
+			txt += 2;
+			continue;
+		}
+		UI_DrawChar( x, y, c, style, color );
+		txt++;
+		x += SMALLCHAR_WIDTH;
+	}
+
+	if( focus ) {
+		c = trap_Key_GetOverstrikeMode() ? 11 : 10;
+		style &= ~UI_PULSE;
+		style |= UI_BLINK;
+		UI_DrawChar( textX + f->field.cursor * SMALLCHAR_WIDTH, y, c, style, color_white );
+		
+		trap_Cvar_Set("ui_ime_target", "fraglimit");
+	} else {
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "fraglimit") == 0) {
+			trap_Cvar_Set("ui_ime_target", "");
+		}
+	}
+
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "fraglimit") == 0) {
+	    const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+	    Q_strncpyz(s_serveroptions.fraglimit.field.buffer, imeText,
+	               sizeof(s_serveroptions.fraglimit.field.buffer));
+	    s_serveroptions.fraglimit.field.cursor = strlen(imeText);
+	    trap_Cvar_Set("ui_ime_field", "");
+	    trap_Cvar_SetValue("ui_ime_done", 0);
+	}
+}
+
+/*
+=================
+ServerOptions_DrawTimelimit
+=================
+*/
+static void ServerOptions_DrawTimelimit( void *self ) {
+	menufield_s		*f;
+	qboolean		focus;
+	int				style;
+	char			*txt;
+	char			c;
+	float			*color;
+	int				n;
+	int				x, y;
+	int				textX;
+
+	f = (menufield_s*)self;
+	focus = (f->generic.parent->cursor == f->generic.menuPosition);
+
+	style = UI_LEFT|UI_SMALLFONT;
+	color = text_color_normal;
+	if( focus ) {
+		style |= UI_PULSE;
+		color = text_color_highlight;
+	}
+
+	y = f->generic.y;
+	UI_DrawString( f->generic.x - SMALLCHAR_WIDTH, y, f->generic.name, style | UI_RIGHT, color );
+
+	textX = f->generic.x + 8;
+	txt = f->field.buffer;
+	//color = g_color_table[ColorIndex(COLOR_CYAN)];
+	color = color_orange;
+	x = textX;
+	while ( (c = *txt) != 0 ) {
+		if ( !focus && Q_IsColorString( txt ) ) {
+			n = ColorIndex( *(txt+1) );
+			if( n == 0 ) n = 7;
+			color = g_color_table[n];
+			txt += 2;
+			continue;
+		}
+		UI_DrawChar( x, y, c, style, color );
+		txt++;
+		x += SMALLCHAR_WIDTH;
+	}
+
+	if( focus ) {
+		c = trap_Key_GetOverstrikeMode() ? 11 : 10;
+		style &= ~UI_PULSE;
+		style |= UI_BLINK;
+		UI_DrawChar( textX + f->field.cursor * SMALLCHAR_WIDTH, y, c, style, color_white );
+		
+		trap_Cvar_Set("ui_ime_target", "timelimit");
+	} else {
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "timelimit") == 0) {
+			trap_Cvar_Set("ui_ime_target", "");
+		}
+	}
+
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "timelimit") == 0) {
+	    const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+	    Q_strncpyz(s_serveroptions.timelimit.field.buffer, imeText,
+	               sizeof(s_serveroptions.timelimit.field.buffer));
+	    s_serveroptions.timelimit.field.cursor = strlen(imeText);
+	    trap_Cvar_Set("ui_ime_field", "");
+	    trap_Cvar_SetValue("ui_ime_done", 0);
+	}
+}
+
+/*
+=================
+ServerOptions_DrawCapturelimit
+=================
+*/
+static void ServerOptions_DrawCapturelimit( void *self ) {
+	menufield_s		*f;
+	qboolean		focus;
+	int				style;
+	char			*txt;
+	char			c;
+	float			*color;
+	int				n;
+	int				x, y;
+	int				textX;
+
+	f = (menufield_s*)self;
+	focus = (f->generic.parent->cursor == f->generic.menuPosition);
+
+	style = UI_LEFT|UI_SMALLFONT;
+	color = text_color_normal;
+	if( focus ) {
+		style |= UI_PULSE;
+		color = text_color_highlight;
+	}
+
+	y = f->generic.y;
+	UI_DrawString( f->generic.x - SMALLCHAR_WIDTH, y, f->generic.name, style | UI_RIGHT, color );
+
+	textX = f->generic.x + 8;
+	txt = f->field.buffer;
+	color = color_orange;
+	x = textX;
+	while ( (c = *txt) != 0 ) {
+		if ( !focus && Q_IsColorString( txt ) ) {
+			n = ColorIndex( *(txt+1) );
+			if( n == 0 ) n = 7;
+			color = g_color_table[n];
+			txt += 2;
+			continue;
+		}
+		UI_DrawChar( x, y, c, style, color );
+		txt++;
+		x += SMALLCHAR_WIDTH;
+	}
+
+	if( focus ) {
+		c = trap_Key_GetOverstrikeMode() ? 11 : 10;
+		style &= ~UI_PULSE;
+		style |= UI_BLINK;
+		UI_DrawChar( textX + f->field.cursor * SMALLCHAR_WIDTH, y, c, style, color_white );
+
+		trap_Cvar_Set("ui_ime_target", "capturelimit");
+	} else {
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "capturelimit") == 0) {
+			trap_Cvar_Set("ui_ime_target", "");
+		}
+	}
+
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "capturelimit") == 0) {
+	    const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+	    Q_strncpyz(s_serveroptions.flaglimit.field.buffer, imeText,
+	               sizeof(s_serveroptions.flaglimit.field.buffer));
+	    s_serveroptions.flaglimit.field.cursor = strlen(imeText);
+	    trap_Cvar_Set("ui_ime_field", "");
+	    trap_Cvar_SetValue("ui_ime_done", 0);
+	}
+}
 
 /*
 =================
@@ -1287,6 +1585,7 @@ static void ServerOptions_MenuInit( qboolean multiplayer ) {
 		s_serveroptions.fraglimit.generic.x	         = OPTIONS_X;
 		s_serveroptions.fraglimit.generic.y	         = y;
 		s_serveroptions.fraglimit.generic.statusbar  = ServerOptions_StatusBar;
+		s_serveroptions.fraglimit.generic.ownerdraw  = ServerOptions_DrawFraglimit;
 		s_serveroptions.fraglimit.field.widthInChars = 3;
 		s_serveroptions.fraglimit.field.maxchars     = 3;
 	}
@@ -1297,6 +1596,7 @@ static void ServerOptions_MenuInit( qboolean multiplayer ) {
 		s_serveroptions.flaglimit.generic.x	         = OPTIONS_X;
 		s_serveroptions.flaglimit.generic.y	         = y;
 		s_serveroptions.flaglimit.generic.statusbar  = ServerOptions_StatusBar;
+		s_serveroptions.flaglimit.generic.ownerdraw  = ServerOptions_DrawCapturelimit;
 		s_serveroptions.flaglimit.field.widthInChars = 3;
 		s_serveroptions.flaglimit.field.maxchars     = 3;
 	}
@@ -1308,6 +1608,7 @@ static void ServerOptions_MenuInit( qboolean multiplayer ) {
 	s_serveroptions.timelimit.generic.x	         = OPTIONS_X;
 	s_serveroptions.timelimit.generic.y	         = y;
 	s_serveroptions.timelimit.generic.statusbar  = ServerOptions_StatusBar;
+	s_serveroptions.timelimit.generic.ownerdraw  = ServerOptions_DrawTimelimit;
 	s_serveroptions.timelimit.field.widthInChars = 3;
 	s_serveroptions.timelimit.field.maxchars     = 3;
 
@@ -1346,6 +1647,7 @@ static void ServerOptions_MenuInit( qboolean multiplayer ) {
 		s_serveroptions.hostname.generic.flags      = QMF_SMALLFONT;
 		s_serveroptions.hostname.generic.x          = OPTIONS_X;
 		s_serveroptions.hostname.generic.y	        = y;
+		s_serveroptions.hostname.generic.ownerdraw  = ServerOptions_DrawHostname;  /* NEW */
 		s_serveroptions.hostname.field.widthInChars = 18;
 		s_serveroptions.hostname.field.maxchars     = 64;
 	}
@@ -1482,7 +1784,7 @@ static void ServerOptions_MenuInit( qboolean multiplayer ) {
 	Menu_AddItem( &s_serveroptions.menu, &s_serveroptions.next );
 	Menu_AddItem( &s_serveroptions.menu, &s_serveroptions.go );
 
-	Menu_AddItem( &s_serveroptions.menu, (void*) &s_serveroptions.punkbuster );
+	//Menu_AddItem( &s_serveroptions.menu, (void*) &s_serveroptions.punkbuster );
 	
 	ServerOptions_SetMenuItems();
 }

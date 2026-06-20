@@ -6,39 +6,78 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-extern void ps3_log(const char *msg);
+/* Non-zero init forces .data placement; overwritten in ps3gl_init(). */
+ps3gl_state_t *ps3gl_ptr = (ps3gl_state_t *)0x1;
 
-ps3gl_state_t *ps3gl_ptr = NULL;
+/* .data backup survives BSS corruption (separate ELF section). */
+static ps3gl_state_t *s_ps3gl_ptr_backup = (ps3gl_state_t *)0xDEAD;
 
-/* Per-frame renderer counters (Session 0 instrumentation). */
-ps3gl_stats_t ps3gl_stats_cur;
-ps3gl_stats_t ps3gl_stats_last;
-uint32_t      ps3gl_stats_frames = 0;
+/* Backup context pointer. */
+static gcmContextData *s_gcm_ctx_backup = (gcmContextData *)0xDEAD;
+
+void ps3gl_restore_if_needed(void)
+{
+    if ((uintptr_t)ps3gl_ptr <= 0x1000) {
+        extern void ps3_log(const char *msg);
+        char dbg[128];
+        snprintf(dbg, sizeof(dbg), "ps3gl_restore: ptr=%p backup=%p",
+                 (void*)ps3gl_ptr, (void*)s_ps3gl_ptr_backup);
+        ps3_log(dbg);
+
+        if (s_ps3gl_ptr_backup && (uintptr_t)s_ps3gl_ptr_backup > 0x1000) {
+            ps3gl_ptr = s_ps3gl_ptr_backup;
+            ps3_log("ps3gl_restore: RESTORED from .data backup");
+        } else {
+            ps3_log("ps3gl_restore: backup invalid, cannot restore!");
+        }
+    }
+}
 
 gcmContextData *ps3gl_get_ctx(void)
 {
-    return ps3gl_ptr ? ps3gl.ctx : NULL;
+    ps3gl_restore_if_needed();
+    if ((uintptr_t)ps3gl_ptr > 0x1000 && ps3gl_ptr->ctx) return ps3gl_ptr->ctx;
+    if ((uintptr_t)s_gcm_ctx_backup > 0x1000)
+        return s_gcm_ctx_backup;
+    return NULL;
 }
 
 void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
 {
-    if (!ps3gl_ptr) {
+    extern void ps3_log(const char *msg);
+    char dbg[256];
+
+    snprintf(dbg, sizeof(dbg), "ps3gl_init: entry ps3gl_ptr=%p &ps3gl_ptr=%p",
+             (void*)ps3gl_ptr, (void*)&ps3gl_ptr);
+    ps3_log(dbg);
+
+    /* Start as sentinel 0x1 or real pointer from previous init; malloc if needed. */
+    if ((uintptr_t)ps3gl_ptr <= 0x1000) {
         ps3gl_ptr = (ps3gl_state_t *)malloc(sizeof(ps3gl_state_t));
+        snprintf(dbg, sizeof(dbg), "ps3gl_init: malloc returned %p", (void*)ps3gl_ptr);
+        ps3_log(dbg);
         if (!ps3gl_ptr) {
             ps3_log("ps3gl_init: FATAL malloc failed!");
             return;
         }
     }
     memset(ps3gl_ptr, 0, sizeof(ps3gl_state_t));
+    snprintf(dbg, sizeof(dbg), "ps3gl_init: after memset ps3gl_ptr=%p", (void*)ps3gl_ptr);
+    ps3_log(dbg);
 
-    ps3gl.ctx      = ctx;
+    ps3gl.ctx        = ctx;
+    s_ps3gl_ptr_backup = ps3gl_ptr;
+    s_gcm_ctx_backup   = ctx;
+
+    snprintf(dbg, sizeof(dbg), "ps3gl_init: backup=%p ctx=%p",
+             (void*)s_ps3gl_ptr_backup, (void*)s_gcm_ctx_backup);
+    ps3_log(dbg);
     ps3gl.screen_w = w;
     ps3gl.screen_h = h;
     ps3gl.dirty    = PS3GL_DIRTY_ALL;
 
     ps3gl.imm.color = ps3gl_pack_color(1.0f, 1.0f, 1.0f, 1.0f);
 
-    /* Default render state */
     ps3gl.rs.blend_enable       = 0;
     ps3gl.rs.blend_src          = GCM_ONE;
     ps3gl.rs.blend_dst          = GCM_ZERO;
@@ -91,13 +130,15 @@ void ps3gl_init(gcmContextData *ctx, uint32_t w, uint32_t h)
 
     ps3gl.matrix_mode = GL_MODELVIEW;
 
-    /* Initialize subsystems */
     ps3gl_vring_init();
     ps3gl_matrices_init();
     ps3gl_textures_init();
     ps3gl_shaders_init();
     ps3gl_states_init();
 
+    snprintf(dbg, sizeof(dbg), "ps3gl_init: done ps3gl_ptr=%p backup=%p",
+             (void*)ps3gl_ptr, (void*)s_ps3gl_ptr_backup);
+    ps3_log(dbg);
     printf("[ps3gl] Initialized (%ux%u)\n", w, h);
 }
 
@@ -109,23 +150,34 @@ void ps3gl_shutdown(void)
 
     free(ps3gl_ptr);
     ps3gl_ptr = NULL;
+    s_ps3gl_ptr_backup = NULL;
+    s_gcm_ctx_backup = NULL;
 
     printf("[ps3gl] Shutdown\n");
 }
 
 void ps3gl_begin_frame(void)
 {
-    if (!ps3gl_ptr) return;
+    ps3gl_restore_if_needed();
+    if ((uintptr_t)ps3gl_ptr <= 0x1000) return;
 
-    /* Snapshot last frame's counters, reset for this frame */
-    ps3gl_stats_last = ps3gl_stats_cur;
-    memset(&ps3gl_stats_cur, 0, sizeof(ps3gl_stats_cur));
-    ps3gl_stats_frames++;
+    if (!ps3gl.ctx && (uintptr_t)s_gcm_ctx_backup > 0x1000)
+        ps3gl.ctx = s_gcm_ctx_backup;
 
-    /* Rewind ring buffer to segment 0 for this frame (fence-checked) */
-    ps3gl_vring_frame_reset();
+    /* Wait for GPU to finish ring data before resetting (fence label from end_frame). */
+    if (ps3gl.vring.fence_label) {
+        int waited = 0;
+        while (*ps3gl.vring.fence_label != ps3gl.vring.fence_val && waited < 20000) {
+            usleep(10);
+            waited++;
+        }
+        if (*ps3gl.vring.fence_label != ps3gl.vring.fence_val)
+            printf("[ps3gl] WARNING: vring fence timed out (val=%u label=%u)\n",
+                   ps3gl.vring.fence_val, *ps3gl.vring.fence_label);
+    }
 
-    /* Mark all state dirty so it gets pushed at first draw */
+    ps3gl.vring.head = 0;
+
     ps3gl.dirty     = PS3GL_DIRTY_ALL;
     ps3gl.mv.dirty  = 1;
     ps3gl.proj.dirty = 1;
@@ -136,9 +188,12 @@ void ps3gl_begin_frame(void)
 
 void ps3gl_end_frame(void)
 {
-    if (!ps3gl_ptr) return;
-
-    /* Fence the vertex ring segment this frame finished in; the flip in
-     * ps3_glimp.c flushes the command buffer right after. */
-    ps3gl_vring_frame_end();
+    /* Write a backend label after all this frame's draw commands.
+     * The RSX pipeline writes fence_val to fence_label only after it has
+     * drained all preceding vertex fetches — safe to reuse the ring after. */
+    gcmContextData *ctx = ps3gl_get_ctx();
+    if (ctx && ps3gl.vring.fence_label) {
+        ps3gl.vring.fence_val++;
+        rsxSetWriteBackendLabel(ctx, PS3GL_LABEL_VRING, ps3gl.vring.fence_val);
+    }
 }

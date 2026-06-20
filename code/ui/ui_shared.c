@@ -3134,13 +3134,33 @@ void Item_TextField_Paint(itemDef_t *item) {
 
 	if (item->cvar) {
 		DC->getCVarString(item->cvar, buff, sizeof(buff));
-	} 
+	}
 
 	if (item->window.flags & WINDOW_HASFOCUS) {
-		lowLight[0] = 0.8 * parent->focusColor[0]; 
-		lowLight[1] = 0.8 * parent->focusColor[1]; 
-		lowLight[2] = 0.8 * parent->focusColor[2]; 
-		lowLight[3] = 0.8 * parent->focusColor[3]; 
+		if (item->cvar) {
+			DC->setCVar("ui_ime_target", item->cvar);
+
+			/* OSK result delivery: write directly to the cvar so g_editingField
+			 * is not needed. SE_CHAR injection won't work for TA because
+			 * Menu_HandleKey only routes chars to Item_TextField_HandleKey when
+			 * g_editingField is true, which requires a prior K_ENTER -- but we
+			 * intercept CROSS to open the OSK instead of sending K_ENTER. */
+			if (DC->getCVarValue("ui_ime_done")) {
+				char imeField[256];
+				DC->getCVarString("ui_ime_field", imeField, sizeof(imeField));
+				if (strcmp(imeField, item->cvar) == 0) {
+					char imeText[256];
+					DC->getCVarString("ui_ime_text", imeText, sizeof(imeText));
+					DC->setCVar(item->cvar, imeText);
+					DC->setCVar("ui_ime_field", "");
+					DC->setCVar("ui_ime_done", "0");
+				}
+			}
+		}
+		lowLight[0] = 0.8 * parent->focusColor[0];
+		lowLight[1] = 0.8 * parent->focusColor[1];
+		lowLight[2] = 0.8 * parent->focusColor[2];
+		lowLight[3] = 0.8 * parent->focusColor[3];
 		LerpColor(parent->focusColor,lowLight,newColor,0.5+0.5*sin(DC->realTime / PULSE_DIVISOR));
 	} else {
 		memcpy(&newColor, &item->window.foreColor, sizeof(vec4_t));
@@ -5905,6 +5925,12 @@ void Menu_PaintAll(void) {
 	if (captureFunc) {
 		captureFunc(captureData);
 	}
+
+	/* Clear ui_ime_target each frame so it's only set when a text field
+	 * actually has focus this frame. Item_TextField_Paint re-sets it below
+	 * if a field is focused; if focus is on a button/slider nothing re-sets
+	 * it and CROSS correctly falls through to K_ENTER. */
+	DC->setCVar("ui_ime_target", "");
 
 	for (i = 0; i < Menu_Count(); i++) {
 		Menu_Paint(&Menus[i], qfalse);

@@ -209,104 +209,6 @@ shaderCommands_t	tess;
 static qboolean	setArraysOnce;
 
 /*
-================
-PS3 tess vertex arena (Session 4 Stage B)
-
-The GPU-visible tess arrays are carved per surface / per stage from the
-RSX-mapped XDR arena (code/gl/ps3gl_vertices.c) so DrawElements binds
-them directly with GCM_LOCATION_CELL — zero per-draw copying. Rotation
-is mandatory: the previous carve may still be in flight on the GPU, and
-the arena's fenced segments only protect data that is never rewritten
-after its draw is emitted.
-
-If the arena is unavailable the static fallback arrays below are used
-and the GL layer transparently falls back to copying through the VRAM
-vertex ring (the Stage A path).
-================
-*/
-extern int   ps3gl_tess_ensure( unsigned int bytes );
-extern void *ps3gl_tess_alloc( unsigned int bytes );
-extern void *ps3gl_tess_static_alloc( unsigned int bytes );
-extern void  ps3gl_tess_trim( void *new_head );
-
-static qboolean tess_arena_active = qfalse;
-
-static vec4_t		tess_xyz_fallback[SHADER_MAX_VERTEXES] Q_ALIGN(16);
-static vec2_t		tess_texCoords_fallback[SHADER_MAX_VERTEXES][2] Q_ALIGN(16);
-static color4ub_t	tess_svars_colors_fallback[SHADER_MAX_VERTEXES] Q_ALIGN(16);
-static vec2_t		tess_svars_texcoords_fallback[NUM_TEXTURE_BUNDLES][SHADER_MAX_VERTEXES] Q_ALIGN(16);
-static color4ub_t	tess_constantColor255_fallback[SHADER_MAX_VERTEXES] Q_ALIGN(16);
-
-#define TESS_XYZ_BYTES		( SHADER_MAX_VERTEXES * sizeof( vec4_t ) )
-#define TESS_TC_BYTES		( SHADER_MAX_VERTEXES * 2 * sizeof( vec2_t ) )
-#define TESS_GEOM_BYTES		( TESS_XYZ_BYTES + TESS_TC_BYTES )
-#define TESS_SVARS_MAX		( SHADER_MAX_VERTEXES * ( sizeof( color4ub_t ) + 2 * sizeof( vec2_t ) ) )
-
-/* Worst case one surface can carve: the geometry block plus one svars
-   block per shader stage and one for the fog pass (+ alignment pads).
-   Pre-reserving this in RB_BeginSurface guarantees the arena's fenced
-   segment switch can only happen between surfaces, never between a
-   surface's carves and the draws that read them. */
-#define TESS_SURF_RESERVE	( TESS_GEOM_BYTES + 16 + \
-				  ( MAX_SHADER_STAGES + 1 ) * ( TESS_SVARS_MAX + 64 ) )
-
-/*
-==============
-RB_PS3_TessInitPointers
-
-Called from R_Init right after tess is zeroed: points the tess arrays at
-their fallbacks and (once) carves the constantColor255 block from the
-arena's static area. Real arena carves happen per surface in
-RB_BeginSurface.
-==============
-*/
-void RB_PS3_TessInitPointers( void ) {
-	static color4ub_t *ccArena = NULL;
-
-	if ( !ccArena ) {
-		ccArena = ps3gl_tess_static_alloc( SHADER_MAX_VERTEXES * sizeof( color4ub_t ) );
-	}
-	tess.constantColor255 = ccArena ? ccArena : tess_constantColor255_fallback;
-
-	tess.xyz = tess_xyz_fallback;
-	tess.texCoords = tess_texCoords_fallback;
-	tess.svars.colors = tess_svars_colors_fallback;
-	tess.svars.texcoords[0] = tess_svars_texcoords_fallback[0];
-	tess.svars.texcoords[1] = tess_svars_texcoords_fallback[1];
-	tess_arena_active = qfalse;
-}
-
-/*
-==============
-RB_PS3_RotateStageVars
-
-Carve a fresh svars block (colors + both texcoord sets) sized for the
-current vertex count. Must be called before each "fill svars then draw"
-sequence: a stage that rewrote the previous stage's svars in place would
-corrupt a draw the GPU hasn't fetched yet. The blocks are 16-aligned and
-each sub-array starts on a 16-byte boundary.
-==============
-*/
-static void RB_PS3_RotateStageVars( void ) {
-	if ( tess_arena_active ) {
-		unsigned int n = (unsigned int)tess.numVertexes;
-		unsigned int c_bytes = ( n * sizeof( color4ub_t ) + 15 ) & ~15u;
-		unsigned int t_bytes = ( n * sizeof( vec2_t ) + 15 ) & ~15u;
-		byte *p = ps3gl_tess_alloc( c_bytes + 2 * t_bytes );
-
-		if ( p ) {
-			tess.svars.colors = (color4ub_t *)p;
-			tess.svars.texcoords[0] = (vec2_t *)( p + c_bytes );
-			tess.svars.texcoords[1] = (vec2_t *)( p + c_bytes + t_bytes );
-			return;
-		}
-	}
-	tess.svars.colors = tess_svars_colors_fallback;
-	tess.svars.texcoords[0] = tess_svars_texcoords_fallback[0];
-	tess.svars.texcoords[1] = tess_svars_texcoords_fallback[1];
-}
-
-/*
 =================
 R_BindAnimatedImage
 
@@ -432,30 +334,7 @@ void RB_BeginSurface( shader_t *shader, int fogNum ) {
 		tess.shaderTime = tess.shader->clampTime;
 	}
 
-	/* PS3: rotate the GPU-visible geometry arrays into a fresh arena
-	   carve — the previous surface's draws may still be in flight. The
-	   carve is max-sized (vertex count unknown until RB_EndSurface,
-	   which trims the tail back). See TESS_SURF_RESERVE for why the
-	   reserve must cover the whole surface. */
-	{
-		byte *geom = NULL;
 
-		if ( ps3gl_tess_ensure( TESS_SURF_RESERVE ) ) {
-			geom = ps3gl_tess_alloc( TESS_GEOM_BYTES );
-		}
-		if ( geom ) {
-			tess.xyz = (vec4_t *)geom;
-			tess.texCoords = (vec2_t (*)[2])( geom + TESS_XYZ_BYTES );
-			/* recycled ring memory: re-arm RB_EndSurface's vertex
-			   overflow canary, which upstream got from .bss zero-init */
-			tess.xyz[SHADER_MAX_VERTEXES-1][0] = 0;
-			tess_arena_active = qtrue;
-		} else {
-			tess.xyz = tess_xyz_fallback;
-			tess.texCoords = tess_texCoords_fallback;
-			tess_arena_active = qfalse;
-		}
-	}
 }
 
 /*
@@ -699,10 +578,6 @@ Blends a fog texture on top of everything else
 static void RB_FogPass( void ) {
 	fog_t		*fog;
 	int			i;
-
-	/* PS3: the fog pass rewrites svars after the stage draws — carve a
-	   fresh block so those draws keep their data. */
-	RB_PS3_RotateStageVars();
 
 	qglEnableClientState( GL_COLOR_ARRAY );
 	qglColorPointer( 4, GL_UNSIGNED_BYTE, 0, tess.svars.colors );
@@ -1063,12 +938,6 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 			break;
 		}
 
-		/* PS3: fresh svars carve before this stage overwrites the
-		   previous stage's (possibly still in flight) data. The GL
-		   array pointers are re-set below every stage (setArraysOnce
-		   is forced off on PS3). */
-		RB_PS3_RotateStageVars();
-
 		ComputeColors( pStage );
 		ComputeTexCoords( pStage );
 
@@ -1149,15 +1018,27 @@ void RB_StageIteratorGeneric( void )
 	}
 
 	//
-	// PS3: svars rotates to a fresh arena carve every stage, so the GL
-	// array pointers must be (re-)set after each rotation — the upstream
-	// single-pass shortcut would capture a pointer the first rotate
-	// invalidates. Setting a pointer is just a state store in the
-	// GL-to-RSX layer, so this costs nothing.
+	// if there is only a single pass then we can enable color
+	// and texture arrays before we compile, otherwise we need
+	// to avoid compiling those arrays since they will change
+	// during multipass rendering
 	//
-	setArraysOnce = qfalse;
-	qglDisableClientState (GL_COLOR_ARRAY);
-	qglDisableClientState (GL_TEXTURE_COORD_ARRAY);
+	if ( tess.numPasses > 1 || shader->multitextureEnv )
+	{
+		setArraysOnce = qfalse;
+		qglDisableClientState (GL_COLOR_ARRAY);
+		qglDisableClientState (GL_TEXTURE_COORD_ARRAY);
+	}
+	else
+	{
+		setArraysOnce = qtrue;
+
+		qglEnableClientState( GL_COLOR_ARRAY);
+		qglColorPointer( 4, GL_UNSIGNED_BYTE, 0, tess.svars.colors );
+
+		qglEnableClientState( GL_TEXTURE_COORD_ARRAY);
+		qglTexCoordPointer( 2, GL_FLOAT, 0, tess.svars.texcoords[0] );
+	}
 
 	//
 	// lock XYZ
@@ -1231,7 +1112,6 @@ void RB_StageIteratorVertexLitTexture( void )
 	//
 	// compute colors
 	//
-	RB_PS3_RotateStageVars();	/* PS3: fresh svars carve for this draw */
 	RB_CalcDiffuseColor( ( unsigned char * ) tess.svars.colors );
 
 	//
@@ -1419,20 +1299,6 @@ void RB_EndSurface( void ) {
 	}	
 	if (input->xyz[SHADER_MAX_VERTEXES-1][0] != 0) {
 		ri.Error (ERR_DROP, "RB_EndSurface() - SHADER_MAX_VERTEXES hit");
-	}
-
-	/* PS3: the geometry carve was sized for SHADER_MAX_VERTEXES; the
-	   vertex count is final now, so give the unused tail of the texcoord
-	   block back to the arena before the stage iterators carve their
-	   svars blocks. Nothing has been carved since RB_BeginSurface, so
-	   the geometry block is still the top of the ring.
-	   Sky is the exception: RB_StageIteratorSky REFILLS tess with the
-	   cloud dome (R_BuildCloudData), which can have more vertexes than
-	   the surface had -- it must keep the full-size carve. */
-	if ( tess_arena_active &&
-	     input->currentStageIteratorFunc != RB_StageIteratorSky ) {
-		ps3gl_tess_trim( (byte *)tess.texCoords +
-		                 input->numVertexes * 2 * sizeof( vec2_t ) );
 	}
 
 	if ( tess.shader == tr.shadowShader ) {

@@ -1,16 +1,9 @@
-/*
- * ps3gl_states.c -- GL-to-RSX layer: render state management.
- *
- * Tracks GL state changes with dirty flags, applies them to RSX
- * in a single batch before each draw call (ps3gl_apply_states).
- */
+/* ps3gl_states.c -- GL-to-RSX: render state + batch apply to RSX. */
 
 #include "ps3gl.h"
 #include <stdio.h>
 
-/* ----------------------------------------------------------------
- * GL-to-GCM conversion helpers
- * ---------------------------------------------------------------- */
+/* GL-to-GCM conversion helpers */
 
 /* GL comparison func values match GCM exactly (0x200..0x207) */
 static inline uint32_t gl_to_gcm_cmpfunc(GLenum func)
@@ -59,9 +52,7 @@ static inline uint32_t gl_to_gcm_stencilop(GLenum op)
     }
 }
 
-/* ----------------------------------------------------------------
- * GL state setters -- record state + mark dirty
- * ---------------------------------------------------------------- */
+/* GL state setters -- record state + mark dirty */
 
 static void enable_disable(GLenum cap, int val)
 {
@@ -260,9 +251,7 @@ void ps3gl_SetWorldClipPlane(float nx, float ny, float nz, float dist)
     ps3gl.clip_plane[3] = dist;
 }
 
-/* ----------------------------------------------------------------
- * Clear
- * ---------------------------------------------------------------- */
+/* Clear */
 
 void ps3gl_ClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a)
 {
@@ -306,9 +295,7 @@ void ps3gl_Clear(GLbitfield mask)
         rsxClearSurface(ctx, gcm_mask);
 }
 
-/* ----------------------------------------------------------------
- * Query
- * ---------------------------------------------------------------- */
+/* Query */
 
 void ps3gl_GetIntegerv(GLenum pname, GLint *params)
 {
@@ -355,9 +342,7 @@ void ps3gl_GetBooleanv(GLenum pname, GLboolean *params)
     }
 }
 
-/* ----------------------------------------------------------------
- * Apply states to RSX before draw
- * ---------------------------------------------------------------- */
+/* Apply states to RSX before draw */
 
 void ps3gl_states_init(void)
 {

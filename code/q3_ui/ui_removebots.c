@@ -53,6 +53,8 @@ REMOVE BOTS MENU
 #define ID_BOTNAME5			25
 #define ID_BOTNAME6			26
 
+#define MAX_RECENT_REMOVALS	16
+#define REMOVAL_TRACK_MS	8000	// track removals for 8 seconds
 
 typedef struct {
 	menuframework_s	menu;
@@ -68,15 +70,91 @@ typedef struct {
 
 	menubitmap_s	delete;
 	menubitmap_s	back;
+	menutext_s      status;
 
 	int				numBots;
 	int				baseBotNum;
 	int				selectedBotNum;
 	char			botnames[7][32];
 	int				botClientNums[MAX_BOTS];
+	char            statusText[64];
 } removeBotsMenuInfo_t;
 
 static removeBotsMenuInfo_t	removeBotsMenuInfo;
+
+typedef struct {
+	int clientNum;
+	int removalTime;
+} recentRemoval_t;
+
+static recentRemoval_t	recentRemovals[MAX_RECENT_REMOVALS];
+static int				numRecentRemovals = 0;
+
+
+/*
+=================
+UI_RemoveBotsMenu_TrackRemoval
+=================
+*/
+static void UI_RemoveBotsMenu_TrackRemoval( int clientNum ) {
+	int i;
+
+	// Update existing entry if present
+	for( i = 0; i < numRecentRemovals; i++ ) {
+		if( recentRemovals[i].clientNum == clientNum ) {
+			recentRemovals[i].removalTime = uis.realtime;
+			return;
+		}
+	}
+
+	// Add new entry
+	if( numRecentRemovals < MAX_RECENT_REMOVALS ) {
+		recentRemovals[numRecentRemovals].clientNum = clientNum;
+		recentRemovals[numRecentRemovals].removalTime = uis.realtime;
+		numRecentRemovals++;
+	}
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_IsRecentlyRemoved
+=================
+*/
+static qboolean UI_RemoveBotsMenu_IsRecentlyRemoved( int clientNum ) {
+	int i;
+
+	for( i = 0; i < numRecentRemovals; i++ ) {
+		if( recentRemovals[i].clientNum == clientNum ) {
+			if( uis.realtime - recentRemovals[i].removalTime < REMOVAL_TRACK_MS ) {
+				return qtrue;
+			}
+		}
+	}
+	return qfalse;
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_CleanupRemovals
+=================
+*/
+static void UI_RemoveBotsMenu_CleanupRemovals( void ) {
+	int i, j;
+
+	for( i = 0; i < numRecentRemovals; ) {
+		if( uis.realtime - recentRemovals[i].removalTime >= REMOVAL_TRACK_MS ) {
+			// Shift down to fill gap
+			for( j = i; j < numRecentRemovals - 1; j++ ) {
+				recentRemovals[j] = recentRemovals[j + 1];
+			}
+			numRecentRemovals--;
+		} else {
+			i++;
+		}
+	}
+}
 
 
 /*
@@ -88,88 +166,15 @@ static void UI_RemoveBotsMenu_SetBotNames( void ) {
 	int		n;
 	char	info[MAX_INFO_STRING];
 
+	// Clear all slots first to prevent ghost entries
+	for ( n = 0; n < 7; n++ ) {
+		removeBotsMenuInfo.botnames[n][0] = '\0';
+	}
+
 	for ( n = 0; (n < 7) && (removeBotsMenuInfo.baseBotNum + n < removeBotsMenuInfo.numBots); n++ ) {
 		trap_GetConfigString( CS_PLAYERS + removeBotsMenuInfo.botClientNums[removeBotsMenuInfo.baseBotNum + n], info, MAX_INFO_STRING );
 		Q_strncpyz( removeBotsMenuInfo.botnames[n], Info_ValueForKey( info, "n" ), sizeof(removeBotsMenuInfo.botnames[n]) );
 		Q_CleanStr( removeBotsMenuInfo.botnames[n] );
-	}
-
-}
-
-
-/*
-=================
-UI_RemoveBotsMenu_DeleteEvent
-=================
-*/
-static void UI_RemoveBotsMenu_DeleteEvent( void* ptr, int event ) {
-	if (event != QM_ACTIVATED) {
-		return;
-	}
-
-	trap_Cmd_ExecuteText( EXEC_APPEND, va("clientkick %i\n", removeBotsMenuInfo.botClientNums[removeBotsMenuInfo.baseBotNum + removeBotsMenuInfo.selectedBotNum]) );
-}
-
-
-/*
-=================
-UI_RemoveBotsMenu_BotEvent
-=================
-*/
-static void UI_RemoveBotsMenu_BotEvent( void* ptr, int event ) {
-	if (event != QM_ACTIVATED) {
-		return;
-	}
-
-	removeBotsMenuInfo.bots[removeBotsMenuInfo.selectedBotNum].color = color_orange;
-	removeBotsMenuInfo.selectedBotNum = ((menucommon_s*)ptr)->id - ID_BOTNAME0;
-	removeBotsMenuInfo.bots[removeBotsMenuInfo.selectedBotNum].color = color_white;
-}
-
-
-/*
-=================
-UI_RemoveAddBotsMenu_BackEvent
-=================
-*/
-static void UI_RemoveBotsMenu_BackEvent( void* ptr, int event ) {
-	if (event != QM_ACTIVATED) {
-		return;
-	}
-	UI_PopMenu();
-}
-
-
-/*
-=================
-UI_RemoveBotsMenu_UpEvent
-=================
-*/
-static void UI_RemoveBotsMenu_UpEvent( void* ptr, int event ) {
-	if (event != QM_ACTIVATED) {
-		return;
-	}
-
-	if( removeBotsMenuInfo.baseBotNum > 0 ) {
-		removeBotsMenuInfo.baseBotNum--;
-		UI_RemoveBotsMenu_SetBotNames();
-	}
-}
-
-
-/*
-=================
-UI_RemoveBotsMenu_DownEvent
-=================
-*/
-static void UI_RemoveBotsMenu_DownEvent( void* ptr, int event ) {
-	if (event != QM_ACTIVATED) {
-		return;
-	}
-
-	if( removeBotsMenuInfo.baseBotNum + 7 < removeBotsMenuInfo.numBots ) {
-		removeBotsMenuInfo.baseBotNum++;
-		UI_RemoveBotsMenu_SetBotNames();
 	}
 }
 
@@ -197,8 +202,196 @@ static void UI_RemoveBotsMenu_GetBots( void ) {
 			continue;
 		}
 
+		// Skip bots we recently removed. In Q3, the UI menu blocks the game
+		// loop so clientkick commands are queued but not processed until we
+		// exit the menus. The CS_PLAYERS config strings remain stale until
+		// a snapshot updates them after we resume gameplay. We track our
+		// removals locally to hide this lag from the user.
+		if( UI_RemoveBotsMenu_IsRecentlyRemoved( n ) ) {
+			continue;
+		}
+
 		removeBotsMenuInfo.botClientNums[removeBotsMenuInfo.numBots] = n;
 		removeBotsMenuInfo.numBots++;
+	}
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_UpdateDisplay
+=================
+*/
+static void UI_RemoveBotsMenu_UpdateDisplay( void ) {
+	int     count;
+	int     n;
+
+	// Clamp baseBotNum if we removed the last page
+	if( removeBotsMenuInfo.baseBotNum >= removeBotsMenuInfo.numBots ) {
+		if( removeBotsMenuInfo.numBots > 0 ) {
+			removeBotsMenuInfo.baseBotNum = removeBotsMenuInfo.numBots - 1;
+			// Align to page boundary (7 items per page)
+			removeBotsMenuInfo.baseBotNum = (removeBotsMenuInfo.baseBotNum / 7) * 7;
+		} else {
+			removeBotsMenuInfo.baseBotNum = 0;
+		}
+	}
+
+	// Clamp selection
+	count = removeBotsMenuInfo.numBots - removeBotsMenuInfo.baseBotNum;
+	if( count > 7 ) {
+		count = 7;
+	}
+	if( removeBotsMenuInfo.selectedBotNum >= count ) {
+		removeBotsMenuInfo.selectedBotNum = 0;
+	}
+	if( removeBotsMenuInfo.numBots == 0 ) {
+		removeBotsMenuInfo.selectedBotNum = 0;
+	}
+
+	// Update displayed names
+	UI_RemoveBotsMenu_SetBotNames();
+
+	// Update selection highlight
+	if( count > 0 ) {
+		for( n = 0; n < 7; n++ ) {
+			removeBotsMenuInfo.bots[n].color = color_orange;
+		}
+		removeBotsMenuInfo.bots[removeBotsMenuInfo.selectedBotNum].color = color_white;
+	}
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_RefreshList
+=================
+*/
+static void UI_RemoveBotsMenu_RefreshList( void ) {
+	// Re-scan for current bots from server config strings
+	UI_RemoveBotsMenu_GetBots();
+	UI_RemoveBotsMenu_UpdateDisplay();
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_DeleteEvent
+=================
+*/
+static void UI_RemoveBotsMenu_DeleteEvent( void* ptr, int event ) {
+	int botIndex;
+	const char *botName;
+	char buf[128];
+	int i;
+
+	if (event != QM_ACTIVATED) {
+		return;
+	}
+
+	botIndex = removeBotsMenuInfo.baseBotNum + removeBotsMenuInfo.selectedBotNum;
+
+	// Bounds check
+	if( botIndex >= removeBotsMenuInfo.numBots ) {
+		return;
+	}
+
+	botName = removeBotsMenuInfo.botnames[removeBotsMenuInfo.selectedBotNum];
+
+	// Immediate console print via UI trap
+	Com_sprintf(buf, sizeof(buf), "^1Removing bot:^7 %s\n", botName);
+	trap_Print(buf);
+
+	// Status message in menu. The bot will actually be kicked when we exit
+	// the UI menus and the game loop resumes processing commands.
+	Com_sprintf(removeBotsMenuInfo.statusText, sizeof(removeBotsMenuInfo.statusText), 
+		"Removing: %s", botName);
+	removeBotsMenuInfo.status.generic.flags &= ~QMF_HIDDEN;
+
+	// Queue the clientkick command. Note: Q3 UI menus block the game loop,
+	// so this command won't be processed by the server until we exit the
+	// menus and return to gameplay.
+	trap_Cmd_ExecuteText( EXEC_APPEND, va("clientkick %i\n", 
+		removeBotsMenuInfo.botClientNums[botIndex]) );
+
+	// Track this removal so we filter stale config strings on re-entry.
+	// The CS_PLAYERS config string won't update until a snapshot arrives
+	// after we resume gameplay.
+	UI_RemoveBotsMenu_TrackRemoval( removeBotsMenuInfo.botClientNums[botIndex] );
+
+	// IMMEDIATELY remove from our local list so the UI updates right away.
+	// The server-side kick is deferred, but the user sees instant feedback.
+	for( i = botIndex; i < removeBotsMenuInfo.numBots - 1; i++ ) {
+		removeBotsMenuInfo.botClientNums[i] = removeBotsMenuInfo.botClientNums[i + 1];
+	}
+	removeBotsMenuInfo.numBots--;
+
+	// Refresh the display immediately using our updated local list
+	UI_RemoveBotsMenu_UpdateDisplay();
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_BotEvent
+=================
+*/
+static void UI_RemoveBotsMenu_BotEvent( void* ptr, int event ) {
+	if (event != QM_ACTIVATED) {
+		return;
+	}
+
+	removeBotsMenuInfo.bots[removeBotsMenuInfo.selectedBotNum].color = color_orange;
+	removeBotsMenuInfo.selectedBotNum = ((menucommon_s*)ptr)->id - ID_BOTNAME0;
+	removeBotsMenuInfo.bots[removeBotsMenuInfo.selectedBotNum].color = color_white;
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_BackEvent
+=================
+*/
+static void UI_RemoveBotsMenu_BackEvent( void* ptr, int event ) {
+	if (event != QM_ACTIVATED) {
+		return;
+	}
+	UI_PopMenu();
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_UpEvent
+=================
+*/
+static void UI_RemoveBotsMenu_UpEvent( void* ptr, int event ) {
+	if (event != QM_ACTIVATED) {
+		return;
+	}
+
+	if( removeBotsMenuInfo.baseBotNum > 0 ) {
+		removeBotsMenuInfo.baseBotNum--;
+		UI_RemoveBotsMenu_SetBotNames();
+		removeBotsMenuInfo.status.generic.flags |= QMF_HIDDEN;
+	}
+}
+
+
+/*
+=================
+UI_RemoveBotsMenu_DownEvent
+=================
+*/
+static void UI_RemoveBotsMenu_DownEvent( void* ptr, int event ) {
+	if (event != QM_ACTIVATED) {
+		return;
+	}
+
+	if( removeBotsMenuInfo.baseBotNum + 7 < removeBotsMenuInfo.numBots ) {
+		removeBotsMenuInfo.baseBotNum++;
+		UI_RemoveBotsMenu_SetBotNames();
+		removeBotsMenuInfo.status.generic.flags |= QMF_HIDDEN;
 	}
 }
 
@@ -233,6 +426,11 @@ static void UI_RemoveBotsMenu_Init( void ) {
 
 	UI_RemoveBots_Cache();
 
+	// Clean up old tracked removals before scanning. This is necessary
+	// because Q3 UI menus block the game loop, so clientkick commands
+	// are deferred until we exit menus. CS_PLAYERS config strings remain
+	// stale until snapshots update after gameplay resumes.
+	UI_RemoveBotsMenu_CleanupRemovals();
 	UI_RemoveBotsMenu_GetBots();
 	UI_RemoveBotsMenu_SetBotNames();
 	count = removeBotsMenuInfo.numBots < 7 ? removeBotsMenuInfo.numBots : 7;
@@ -314,6 +512,16 @@ static void UI_RemoveBotsMenu_Init( void ) {
 	removeBotsMenuInfo.back.height				= 64;
 	removeBotsMenuInfo.back.focuspic			= ART_BACK1;
 
+	// Status line at bottom of menu
+	removeBotsMenuInfo.status.generic.type     = MTYPE_PTEXT;
+	removeBotsMenuInfo.status.generic.flags    = QMF_INACTIVE | QMF_HIDDEN;
+	removeBotsMenuInfo.status.generic.x        = -104;
+	removeBotsMenuInfo.status.generic.y        = 0;
+	removeBotsMenuInfo.status.string           = removeBotsMenuInfo.statusText;
+	removeBotsMenuInfo.status.color            = color_yellow;
+	removeBotsMenuInfo.status.style            = UI_LEFT|UI_SMALLFONT;
+	removeBotsMenuInfo.statusText[0] = '\0';
+
 	Menu_AddItem( &removeBotsMenuInfo.menu, &removeBotsMenuInfo.background );
 	Menu_AddItem( &removeBotsMenuInfo.menu, &removeBotsMenuInfo.banner );
 	Menu_AddItem( &removeBotsMenuInfo.menu, &removeBotsMenuInfo.arrows );
@@ -324,6 +532,7 @@ static void UI_RemoveBotsMenu_Init( void ) {
 	}
 	Menu_AddItem( &removeBotsMenuInfo.menu, &removeBotsMenuInfo.delete );
 	Menu_AddItem( &removeBotsMenuInfo.menu, &removeBotsMenuInfo.back );
+	Menu_AddItem( &removeBotsMenuInfo.menu, &removeBotsMenuInfo.status );
 
 	removeBotsMenuInfo.baseBotNum = 0;
 	removeBotsMenuInfo.selectedBotNum = 0;

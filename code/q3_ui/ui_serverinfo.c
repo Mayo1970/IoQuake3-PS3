@@ -39,6 +39,8 @@ static char* serverinfo_artlist[] =
 #define ID_ADD	 100
 #define ID_BACK	 101
 
+#define POPUP_DISPLAY_TIME 3000
+
 typedef struct
 {
 	menuframework_s	menu;
@@ -47,6 +49,9 @@ typedef struct
 	menubitmap_s	framer;
 	menubitmap_s	back;
 	menutext_s		add;
+	qboolean		showPopup;
+	int				popupTime;
+	char			popupMsg[64];
 	char			info[MAX_INFO_STRING];
 	int				numlines;
 } serverinfo_t;
@@ -59,9 +64,10 @@ static serverinfo_t	s_serverinfo;
 Favorites_Add
 
 Add current server to favorites
+Returns qtrue if added, qfalse if already in list or error
 =================
 */
-void Favorites_Add( void )
+qboolean Favorites_Add( void )
 {
 	char	adrstr[128];
 	char	serverbuff[128];
@@ -70,7 +76,7 @@ void Favorites_Add( void )
 
 	trap_Cvar_VariableStringBuffer( "cl_currentServerAddress", serverbuff, sizeof(serverbuff) );
 	if (!serverbuff[0])
-		return;
+		return qfalse;
 
 	best = 0;
 	for (i=0; i<MAX_FAVORITESERVERS; i++)
@@ -78,17 +84,27 @@ void Favorites_Add( void )
 		trap_Cvar_VariableStringBuffer( va("server%d",i+1), adrstr, sizeof(adrstr) );
 		if (!Q_stricmp(serverbuff,adrstr))
 		{
-			// already in list
-			return;
+			Q_strncpyz( s_serverinfo.popupMsg, "Server is already in favorites!", sizeof(s_serverinfo.popupMsg) );
+			s_serverinfo.showPopup = qtrue;
+			s_serverinfo.popupTime = uis.realtime;
+			return qfalse;
 		}
-		
+
 		// use first empty available slot
 		if (!adrstr[0] && !best)
 			best = i+1;
 	}
 
 	if (best)
+	{
 		trap_Cvar_Set( va("server%d",best), serverbuff);
+		Q_strncpyz( s_serverinfo.popupMsg, "Server added to favorites!", sizeof(s_serverinfo.popupMsg) );
+		s_serverinfo.showPopup = qtrue;
+		s_serverinfo.popupTime = uis.realtime;
+		return qtrue;
+	}
+
+	return qfalse;
 }
 
 
@@ -104,9 +120,9 @@ static void ServerInfo_Event( void* ptr, int event )
 		case ID_ADD:
 			if (event != QM_ACTIVATED)
 				break;
-		
+
 			Favorites_Add();
-			UI_PopMenu();
+			/* Don't pop menu immediately — let user see the popup */
 			break;
 
 		case ID_BACK:
@@ -116,6 +132,41 @@ static void ServerInfo_Event( void* ptr, int event )
 			UI_PopMenu();
 			break;
 	}
+}
+
+static void ServerInfo_DrawPopup( void )
+{
+	float		alpha;
+	int			elapsed;
+	vec4_t		backColor;
+	vec4_t		textColor;
+	int			w, h, x, y;
+
+	if (!s_serverinfo.showPopup)
+		return;
+
+	elapsed = uis.realtime - s_serverinfo.popupTime;
+
+	if (elapsed > POPUP_DISPLAY_TIME)
+	{
+		s_serverinfo.showPopup = qfalse;
+		return;
+	}
+	else if (elapsed > POPUP_DISPLAY_TIME - 500)
+		alpha = 1.0f - ((float)(elapsed - (POPUP_DISPLAY_TIME - 500)) / 500.0f);
+	else
+		alpha = 1.0f;
+
+	backColor[0] = 0.0f; backColor[1] = 0.0f; backColor[2] = 0.0f; backColor[3] = 0.8f * alpha;
+	textColor[0] = 0.0f; textColor[1] = 1.0f; textColor[2] = 1.0f; textColor[3] = alpha;
+
+	w = 590; h = 64;
+	x = (SCREEN_WIDTH - w) / 2;
+	y = SCREEN_HEIGHT / 2 + 80;
+
+	UI_FillRect(x, y, w, h, backColor);
+	UI_DrawRect(x, y, w, h, textColor);
+	UI_DrawProportionalString(SCREEN_WIDTH / 2, y + 14, s_serverinfo.popupMsg, UI_CENTER|UI_BIGFONT, textColor);
 }
 
 /*
@@ -148,6 +199,7 @@ static void ServerInfo_MenuDraw( void )
 	}
 
 	Menu_Draw( &s_serverinfo.menu );
+	ServerInfo_DrawPopup();
 }
 
 /*

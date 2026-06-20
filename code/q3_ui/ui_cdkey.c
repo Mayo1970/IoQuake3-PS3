@@ -166,6 +166,20 @@ static void UI_CDKeyMenu_DrawKey( void *self ) {
 		style |= UI_BLINK;
 
 		UI_DrawChar( x + f->field.cursor * BIGCHAR_WIDTH, y, c, style, color_white );
+
+		trap_Cvar_Set("ui_ime_target", "cdkey");
+	} else {
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "cdkey") == 0)
+			trap_Cvar_Set("ui_ime_target", "");
+	}
+
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "cdkey") == 0) {
+		const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+		Q_strncpyz(f->field.buffer, imeText, sizeof(f->field.buffer));
+		f->field.cursor = strlen(imeText);
+		trap_Cvar_Set("ui_ime_field", "");
+		trap_Cvar_SetValue("ui_ime_done", 0);
 	}
 
 	val = UI_CDKeyMenu_PreValidateKey( f->field.buffer );

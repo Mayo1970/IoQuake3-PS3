@@ -103,6 +103,8 @@ void UI_PushMenu( menuframework_s *menu )
 
 	uis.activemenu = menu;
 
+	trap_Cvar_Set("ui_ime_target", "");
+
 	// default cursor position
 	menu->cursor      = 0;
 	menu->cursor_prev = 0;
@@ -134,6 +136,7 @@ UI_PopMenu
 void UI_PopMenu (void)
 {
 	trap_S_StartLocalSound( menu_out_sound, CHAN_LOCAL_SOUND );
+	trap_Cvar_Set("ui_ime_target", "");
 
 	uis.menusp--;
 
@@ -1048,6 +1051,12 @@ qboolean UI_ConsoleCommand( int realTime ) {
 
 	if ( Q_stricmp (cmd, "ui_cdkey") == 0 ) {
 		UI_CDKeyMenu_f();
+		return qtrue;
+	}
+	
+	if ( Q_stricmp (cmd, "cheat") == 0 ) {
+		UI_SPUnlock_f();
+		UI_SPUnlockMedals_f();
 		return qtrue;
 	}
 

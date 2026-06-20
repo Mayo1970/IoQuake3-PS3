@@ -49,6 +49,7 @@ SOUND OPTIONS MENU
 //#define ID_A3D				18
 #define ID_BACK				19
 #define ID_APPLY			20
+#define ID_CUSTOMMUSIC		21
 
 #define DEFAULT_SDL_SND_SPEED 22050
 
@@ -80,6 +81,7 @@ typedef struct {
 	menulist_s  		soundSystem;
 	menulist_s			quality;
 //	menuradiobutton_s	a3d;
+	menuradiobutton_s	custommusic;
 
 	menubitmap_s		back;
 	menubitmap_s		apply;
@@ -132,6 +134,11 @@ static void UI_SoundOptionsMenu_Event( void* ptr, int event ) {
 		soundOptionsInfo.a3d.curvalue = (int)trap_Cvar_VariableValue( "s_usingA3D" );
 		break;
 */
+	case ID_CUSTOMMUSIC:
+		trap_Cvar_SetValue("custom_audio", soundOptionsInfo.custommusic.curvalue);
+		trap_Cmd_ExecuteText(EXEC_APPEND, "writeconfig q3config.cfg\n");
+		break;
+
 	case ID_BACK:
 		UI_PopMenu();
 		break;
@@ -360,6 +367,15 @@ static void UI_SoundOptionsMenu_Init( void ) {
 	soundOptionsInfo.a3d.generic.x				= 400;
 	soundOptionsInfo.a3d.generic.y				= y;
 */
+	y += BIGCHAR_HEIGHT+2;
+	soundOptionsInfo.custommusic.generic.type		= MTYPE_RADIOBUTTON;
+	soundOptionsInfo.custommusic.generic.name		= "Enable Custom Music:";
+	soundOptionsInfo.custommusic.generic.flags		= QMF_PULSEIFFOCUS|QMF_SMALLFONT;
+	soundOptionsInfo.custommusic.generic.callback	= UI_SoundOptionsMenu_Event;
+	soundOptionsInfo.custommusic.generic.id			= ID_CUSTOMMUSIC;
+	soundOptionsInfo.custommusic.generic.x			= 400;
+	soundOptionsInfo.custommusic.generic.y			= y;
+
 	soundOptionsInfo.back.generic.type			= MTYPE_BITMAP;
 	soundOptionsInfo.back.generic.name			= ART_BACK0;
 	soundOptionsInfo.back.generic.flags			= QMF_LEFT_JUSTIFY|QMF_PULSEIFFOCUS;
@@ -394,6 +410,7 @@ static void UI_SoundOptionsMenu_Init( void ) {
 	Menu_AddItem( &soundOptionsInfo.menu, ( void * ) &soundOptionsInfo.soundSystem );
 	Menu_AddItem( &soundOptionsInfo.menu, ( void * ) &soundOptionsInfo.quality );
 //	Menu_AddItem( &soundOptionsInfo.menu, ( void * ) &soundOptionsInfo.a3d );
+	Menu_AddItem( &soundOptionsInfo.menu, ( void * ) &soundOptionsInfo.custommusic );
 	Menu_AddItem( &soundOptionsInfo.menu, ( void * ) &soundOptionsInfo.back );
 	Menu_AddItem( &soundOptionsInfo.menu, ( void * ) &soundOptionsInfo.apply );
 
@@ -420,6 +437,7 @@ static void UI_SoundOptionsMenu_Init( void ) {
 	soundOptionsInfo.quality.curvalue = soundOptionsInfo.quality_original;
 
 //	soundOptionsInfo.a3d.curvalue = (int)trap_Cvar_VariableValue( "s_usingA3D" );
+	soundOptionsInfo.custommusic.curvalue = (int)trap_Cvar_VariableValue( "custom_audio" );
 }
 
 

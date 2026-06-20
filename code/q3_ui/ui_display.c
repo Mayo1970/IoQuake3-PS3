@@ -198,9 +198,11 @@ static void UI_DisplayOptionsMenu_Init( void ) {
 	displayOptionsInfo.brightness.generic.y			= y;
 	displayOptionsInfo.brightness.minvalue			= 5;
 	displayOptionsInfo.brightness.maxvalue			= 20;
+	/*
 	if( !uis.glconfig.deviceSupportsGamma ) {
 		displayOptionsInfo.brightness.generic.flags |= QMF_GRAYED;
 	}
+	*/
 
 	y += BIGCHAR_HEIGHT+2;
 	displayOptionsInfo.screensize.generic.type		= MTYPE_SLIDER;
@@ -211,7 +213,8 @@ static void UI_DisplayOptionsMenu_Init( void ) {
 	displayOptionsInfo.screensize.generic.x			= 400;
 	displayOptionsInfo.screensize.generic.y			= y;
 	displayOptionsInfo.screensize.minvalue			= 3;
-    displayOptionsInfo.screensize.maxvalue			= 10;
+  displayOptionsInfo.screensize.maxvalue			= 10;
+  displayOptionsInfo.screensize.generic.flags |= QMF_GRAYED; //fixed PS4 size so disable this
 
 	displayOptionsInfo.back.generic.type		= MTYPE_BITMAP;
 	displayOptionsInfo.back.generic.name		= ART_BACK0;

@@ -90,7 +90,7 @@ static void ps3_audio_thread_func(void *arg)
 
         u32 ring_pos = (ps3_audio_blocks_written * (u32)block_samples) % (u32)total_interleaved;
 
-        /* VMX conversion: 8 samples/iter into staging first (DMA buffer can stall PPE). */
+        /* VMX int16→f32 conversion (8 samples/iter) to staging buffer, then memcpy. */
         {
             static f32 staging[PS3_AUDIO_BLOCK_SIZE * PS3_AUDIO_CHANNELS] __attribute__((aligned(16)));
             const s16 * __restrict__ vsrc = src + ring_pos;
@@ -319,8 +319,8 @@ cvar_t *s_doppler;
 
 static soundInterface_t s_snd_if;
 
-/* snd_main.c is not compiled on PS3, so register 'play' here to prevent it
- * from being forwarded to the server as an unknown client command. */
+/* snd_main.c is not compiled on PS3, so register its console commands here
+ * to prevent them from being forwarded to the server as unknown client commands. */
 static void S_Play_f(void)
 {
     int i, c;
@@ -337,6 +337,22 @@ static void S_Play_f(void)
     }
 }
 
+static void S_Music_f(void)
+{
+    int c = Cmd_Argc();
+    if (c == 2)
+        S_Base_StartBackgroundTrack(Cmd_Argv(1), NULL);
+    else if (c == 3)
+        S_Base_StartBackgroundTrack(Cmd_Argv(1), Cmd_Argv(2));
+    else
+        Com_Printf("Usage: music <musicfile> [loopfile]\n");
+}
+
+static void S_StopMusic_f(void)
+{
+    S_Base_StopBackgroundTrack();
+}
+
 void S_Init(void)
 {
     s_volume      = Cvar_Get("s_volume",      "0.8",  CVAR_ARCHIVE);
@@ -349,12 +365,16 @@ void S_Init(void)
     Com_Memset(&s_snd_if, 0, sizeof(s_snd_if));
     S_Base_Init(&s_snd_if);
 
-    Cmd_AddCommand("play", S_Play_f);
+    Cmd_AddCommand("play",      S_Play_f);
+    Cmd_AddCommand("music",     S_Music_f);
+    Cmd_AddCommand("stopmusic", S_StopMusic_f);
 }
 
 void S_Shutdown(void)
 {
     Cmd_RemoveCommand("play");
+    Cmd_RemoveCommand("music");
+    Cmd_RemoveCommand("stopmusic");
     if (s_snd_if.Shutdown)
         s_snd_if.Shutdown();
     SNDDMA_Shutdown();

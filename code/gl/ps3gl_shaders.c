@@ -21,9 +21,7 @@ extern const float *ps3gl_get_mvp(void);
 
 #if PS3GL_SHADERS_AVAILABLE
 
-/* ----------------------------------------------------------------
- * Shader loading helpers
- * ---------------------------------------------------------------- */
+/* Shader loading helpers */
 
 static void load_vp(ps3gl_shader_t *s, const void *data, uint32_t size)
 {
@@ -114,17 +112,12 @@ void ps3gl_apply_shader(void)
         }
 
         ps3gl.active_shader = key;
-        /* Program load rewrites the VP constant defaults */
-        ps3gl.mvp_uploaded = 0;
     }
 
-    /* Upload the MVP only when it changed since the last upload (17 FIFO
-     * words per draw saved -- the 2D/UI layer issues hundreds of draws
-     * under one unchanged ortho matrix). */
-    if (s->mvp_const && !ps3gl.mvp_uploaded) {
-        rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const,
-                                     ps3gl_get_mvp());
-        ps3gl.mvp_uploaded = 1;
+    /* MVP matrix must be uploaded every draw call (changes per-surface) */
+    const float *mvp = ps3gl_get_mvp();
+    if (s->mvp_const) {
+        rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const, mvp);
     }
 
     /* Upload world-space clip plane when the recompiled shader supports it.
@@ -138,9 +131,7 @@ void ps3gl_apply_shader(void)
 
 #else /* PS3GL_SHADERS_AVAILABLE == 0 */
 
-/* ----------------------------------------------------------------
- * Stub implementations when shaders are not compiled
- * ---------------------------------------------------------------- */
+/* Stub implementations when shaders are not compiled */
 
 void ps3gl_shaders_init(void)
 {

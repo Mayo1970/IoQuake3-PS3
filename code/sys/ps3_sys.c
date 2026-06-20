@@ -1,5 +1,4 @@
-/* ps3_sys.c -- Sys_* / CON_* / mmap / minizip / linker wraps for PS3.
- * Replaces upstream sys_main.c + sys_unix.c. */
+/* ps3_sys.c -- Sys_* / CON_* / mmap / minizip / linker wraps for PS3. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,7 +84,7 @@ qboolean Sys_Mkdir(const char *path)
     if (mkdir(path, 0777) == 0)
         return qtrue;
 
-    /* PSL1GHT's mkdir returns EACCES/EPERM for existing dirs; fall back to stat(). */
+    /* PSL1GHT mount points return EACCES instead of EEXIST; use stat fallback. */
     if (errno == EEXIST)
         return qtrue;
 
@@ -370,7 +369,9 @@ qboolean Sys_RandomBytes(byte *string, int len)
     return qtrue;
 }
 
-/* Local XMB user -> PSN nickname -> "player". Buffer sizes matter; wrong size returns INVALID_VALUE. */
+/* Local XMB user (works offline) -> PSN nickname -> "player".
+ * NICKNAME (0x113) needs sign-in; CURRENT_USERNAME (0x131) is always available.
+ * Each param requires its own buffer size or sysUtil returns INVALID_VALUE. */
 char *Sys_GetCurrentUser(void)
 {
     static char username[SYSUTIL_SYSTEMPARAM_NICKNAME_SIZE];
@@ -418,7 +419,7 @@ cpuFeatures_t Sys_GetProcessorFeatures(void)
     return (cpuFeatures_t)CF_ALTIVEC;
 }
 
-/* No free-memory syscall in PSL1GHT; binary search is the only probe. */
+/* PSL1GHT has no free-memory syscall; create+destroy is the only probe. */
 static unsigned ps3_probe_free_user_mem_mb(void)
 {
     unsigned lo = 1, hi = 200, best = 0;
@@ -440,14 +441,6 @@ static unsigned ps3_probe_free_user_mem_mb(void)
     return best;
 }
 
-/* QVM JIT exec-from-heap probe REMOVED (2026-06-13): a verified-correct
- * probe (instructions written + cache-flushed + called via a proper ELFv1
- * descriptor — disassembly-checked) hard-froze the console at the bctrl.
- * lv2 has no executable-page protection in its user API (sys/memory.h:
- * only PROT_READ_ONLY/READ_WRITE); instruction fetch from heap faults.
- * Because failure is a freeze, not an error, the probe cannot gate
- * anything at runtime — do not reinstate it. See CLAUDE.md "PPC JIT". */
-
 void Sys_PlatformInit(void)
 {
     char line[160];
@@ -455,7 +448,8 @@ void Sys_PlatformInit(void)
 
     Sys_SetFloatEnv();
 
-    /* Memory ceiling before hunk init. Keep free_mb > hunk+zone to avoid OOM. */
+    /* Real ceiling before Com_InitHunkMemory; raise DEF_COMHUNKMEGS only if
+     * this stays comfortably above hunk+zone. */
     free_mb = ps3_probe_free_user_mem_mb();
     snprintf(line, sizeof(line),
              "[mem] free user memory at Sys_PlatformInit: ~%u MB "
@@ -520,11 +514,6 @@ void Sys_Init(void)
 
     Cvar_Set("username", user);
     Cvar_Set("arch", ARCH_STRING);
-
-    /* Saved q3config.cfg still wins on next boot via CVAR_ARCHIVE. */
-    if (user && *user && Q_stricmp(user, "player") != 0) {
-        Cvar_Set("name", user);
-    }
 }
 
 char *Sys_ConsoleInput(void) { return NULL; }
@@ -592,7 +581,7 @@ void Sys_SigHandler(int signal)
 void Sys_GLimpInit(void) {}
 void Sys_GLimpSafeInit(void) {}
 
-/* No mmap on PS3; use memalign + memset for QVM/hunk. */
+/* PS3 homebrew has no mmap; back QVM/hunk allocations with memalign. */
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 {
     (void)addr; (void)prot; (void)flags; (void)fd; (void)offset;
@@ -686,9 +675,10 @@ void     CL_TakeVideoFrame(void)               { }
 void     CL_WriteAVIVideoFrame(const byte *d, int s) { (void)d; (void)s; }
 void     CL_WriteAVIAudioFrame(const byte *d, int s) { (void)d; (void)s; }
 
-/* qkey created in ps3_main.c; suppress CD key dialog. */
+/* qkey is created in ps3_main.c; suppress the CD key dialog. */
 void __wrap_CL_GenerateQKey(void) {}
 
+/* __real_Com_Printf -> Sys_Print -> ps3_log already. Wrap kept for interposition. */
 extern void QDECL __real_Com_Printf(const char *fmt, ...) __attribute__((format(printf,1,2)));
 void QDECL __wrap_Com_Printf(const char *fmt, ...)
 {

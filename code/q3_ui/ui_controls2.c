@@ -122,6 +122,9 @@ typedef struct
 #define ID_JOYENABLE	40
 #define ID_JOYTHRESHOLD	41
 #define ID_SMOOTHMOUSE	42
+#define ID_ENABLERUMBLE	43
+#define ID_ZOOMFOV      44
+
 
 #define ANIM_IDLE		0
 #define ANIM_RUN		1
@@ -209,6 +212,8 @@ typedef struct
 	menuaction_s		togglemenu;
 	menuradiobutton_s	joyenable;
 	menuslider_s		joythreshold;
+	menuradiobutton_s	rumbleenable;
+	menuslider_s    zoomfov;
 	int					section;
 	qboolean			waitingforkey;
 	char				playerModel[64];
@@ -277,66 +282,38 @@ static configcvar_t g_configcvars[] =
 	{"joy_threshold",	0,					0},
 	{"m_filter",		0,					0},
 	{"cl_freelook",		0,					0},
+	{"ps3_rumbleEnable",		0,					0},
+	{"cg_zoomfov",      0,          0},
 	{NULL,				0,					0}
 };
 
 static menucommon_s *g_movement_controls[] =
 {
-	(menucommon_s *)&s_controls.alwaysrun,     
-	(menucommon_s *)&s_controls.run,            
-	(menucommon_s *)&s_controls.walkforward,
-	(menucommon_s *)&s_controls.backpedal,
-	(menucommon_s *)&s_controls.stepleft,      
-	(menucommon_s *)&s_controls.stepright,     
-	(menucommon_s *)&s_controls.moveup,        
-	(menucommon_s *)&s_controls.movedown,      
-	(menucommon_s *)&s_controls.turnleft,      
-	(menucommon_s *)&s_controls.turnright,     
-	(menucommon_s *)&s_controls.sidestep,
+	(menucommon_s *)&s_controls.alwaysrun,
+	(menucommon_s *)&s_controls.moveup,
+	(menucommon_s *)&s_controls.movedown,
 	NULL
 };
 
 static menucommon_s *g_weapons_controls[] = {
-	(menucommon_s *)&s_controls.attack,           
+	(menucommon_s *)&s_controls.attack,
 	(menucommon_s *)&s_controls.nextweapon,
 	(menucommon_s *)&s_controls.prevweapon,
-	(menucommon_s *)&s_controls.autoswitch,    
-	(menucommon_s *)&s_controls.chainsaw,         
-	(menucommon_s *)&s_controls.machinegun,
-	(menucommon_s *)&s_controls.shotgun,          
-	(menucommon_s *)&s_controls.grenadelauncher,
-	(menucommon_s *)&s_controls.rocketlauncher,   
-	(menucommon_s *)&s_controls.lightning,   
-	(menucommon_s *)&s_controls.railgun,          
-	(menucommon_s *)&s_controls.plasma,           
-	(menucommon_s *)&s_controls.bfg,              
+	(menucommon_s *)&s_controls.autoswitch,
 	NULL,
 };
 
 static menucommon_s *g_looking_controls[] = {
-	(menucommon_s *)&s_controls.sensitivity,
-	(menucommon_s *)&s_controls.smoothmouse,
-	(menucommon_s *)&s_controls.invertmouse,
-	(menucommon_s *)&s_controls.lookup,
-	(menucommon_s *)&s_controls.lookdown,
-	(menucommon_s *)&s_controls.mouselook,
-	(menucommon_s *)&s_controls.freelook,
-	(menucommon_s *)&s_controls.centerview,
 	(menucommon_s *)&s_controls.zoomview,
-	(menucommon_s *)&s_controls.joyenable,
 	(menucommon_s *)&s_controls.joythreshold,
+	(menucommon_s *)&s_controls.rumbleenable,
+	(menucommon_s *)&s_controls.zoomfov,
 	NULL,
 };
 
 static menucommon_s *g_misc_controls[] = {
-	(menucommon_s *)&s_controls.showscores, 
+	(menucommon_s *)&s_controls.showscores,
 	(menucommon_s *)&s_controls.useitem,
-	(menucommon_s *)&s_controls.gesture,
-	(menucommon_s *)&s_controls.chat,
-	(menucommon_s *)&s_controls.chat2,
-	(menucommon_s *)&s_controls.chat3,
-	(menucommon_s *)&s_controls.chat4,
-	(menucommon_s *)&s_controls.togglemenu,
 	NULL,
 };
 
@@ -665,22 +642,23 @@ static void Controls_DrawKeyBinding( void *self )
 	c = (Menu_ItemAtCursor( a->generic.parent ) == a);
 
 	b1 = g_bindings[a->generic.id].bind1;
-	if (b1 == -1)
-		strcpy(name,"???");
-	else
-	{
+	b2 = g_bindings[a->generic.id].bind2;
+
+	/* Prefer button bindings over keyboard bindings */
+	if (b1 >= K_JOY1 && b1 <= K_JOY32) {
+		/* b1 is a button, use it alone */
 		trap_Key_KeynumToStringBuf( b1, name, 32 );
 		Q_strupr(name);
-
-		b2 = g_bindings[a->generic.id].bind2;
-		if (b2 != -1)
-		{
-			trap_Key_KeynumToStringBuf( b2, name2, 32 );
-			Q_strupr(name2);
-
-			strcat( name, " or " );
-			strcat( name, name2 );
-		}
+	} else if (b2 >= K_JOY1 && b2 <= K_JOY32) {
+		/* b1 is keyboard, b2 is button, use b2 alone */
+		trap_Key_KeynumToStringBuf( b2, name, 32 );
+		Q_strupr(name);
+	} else if (b1 == -1) {
+		strcpy(name,"???");
+	} else {
+		/* No buttons bound, show keyboard binding */
+		trap_Key_KeynumToStringBuf( b1, name, 32 );
+		Q_strupr(name);
 	}
 
 	if (c)
@@ -785,34 +763,68 @@ Controls_GetConfig
 */
 static void Controls_GetConfig( void )
 {
-	int		twokeys[2];
-	bind_t*	bindptr;
+    int     twokeys[2];
+    int     i;
+    bind_t* bindptr;
+    char    buf[32];
+    float   f, pitch, yaw;
 
-	// put the bindings into a local store
-	bindptr = g_bindings;
+    // put the bindings into a local store
+    bindptr = g_bindings;
 
-	// iterate each command, get its numeric binding
-	for (;;bindptr++)
-	{
-		if (!bindptr->label)
-			break;
+    // iterate each command, get its numeric binding
+    for (;;bindptr++)
+    {
+        if (!bindptr->label)
+            break;
 
-		Controls_GetKeyAssignment(bindptr->command, twokeys);
+        Controls_GetKeyAssignment(bindptr->command, twokeys);
 
-		bindptr->bind1 = twokeys[0];
-		bindptr->bind2 = twokeys[1];
-	}
+        bindptr->bind1 = twokeys[0];
+        bindptr->bind2 = twokeys[1];
+    }
 
-	s_controls.invertmouse.curvalue  = Controls_GetCvarValue( "m_pitch" ) < 0;
-	s_controls.smoothmouse.curvalue  = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "m_filter" ) );
-	s_controls.alwaysrun.curvalue    = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "cl_run" ) );
-	s_controls.autoswitch.curvalue   = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "cg_autoswitch" ) );
-	s_controls.sensitivity.curvalue  = UI_ClampCvar( 2, 30, Controls_GetCvarValue( "sensitivity" ) );
-	s_controls.joyenable.curvalue    = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "in_joystick" ) );
-	s_controls.joythreshold.curvalue = UI_ClampCvar( 0.05f, 0.75f, Controls_GetCvarValue( "joy_threshold" ) );
-	s_controls.freelook.curvalue     = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "cl_freelook" ) );
+    s_controls.invertmouse.curvalue  = Controls_GetCvarValue( "m_pitch" ) < 0;
+    s_controls.smoothmouse.curvalue  = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "m_filter" ) );
+    s_controls.alwaysrun.curvalue    = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "cl_run" ) );
+    s_controls.autoswitch.curvalue   = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "cg_autoswitch" ) );
+    s_controls.sensitivity.curvalue  = UI_ClampCvar( 2, 30, Controls_GetCvarValue( "sensitivity" ) );
+    s_controls.joyenable.curvalue    = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "in_joystick" ) );
+    s_controls.freelook.curvalue     = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "cl_freelook" ) );
+    s_controls.rumbleenable.curvalue = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "ps3_rumbleEnable" ) );
+
+    /* joy_threshold: read directly from cvar string */
+    trap_Cvar_VariableStringBuffer("joy_threshold", buf, sizeof(buf));
+    f = atof(buf);
+    if (f < 0.0045f) f = 0.0045f;
+    if (f > 0.0145f) f = 0.0145f;                    /* CHANGED: max 0.0145 */
+    s_controls.joythreshold.curvalue = (float)((int)((f - 0.0045f) / 0.01f * 20.0f + 0.5f));  /* CHANGED: divide by 0.01 */
+    
+    /* Sync j_pitch/j_yaw to match joy_threshold if they differ */
+    trap_Cvar_VariableStringBuffer("j_pitch", buf, sizeof(buf));
+    pitch = (float)atof(buf);
+    if (pitch < 0) pitch = -pitch;
+    if (pitch != f) {
+        Com_sprintf(buf, sizeof(buf), "%.4f", f);
+        trap_Cvar_Set("j_pitch", buf);
+    }
+    
+    trap_Cvar_VariableStringBuffer("j_yaw", buf, sizeof(buf));
+    yaw = (float)atof(buf);
+    if (yaw < 0) yaw = -yaw;
+    if (yaw != f) {
+        Com_sprintf(buf, sizeof(buf), "-%.4f", f);
+        trap_Cvar_Set("j_yaw", buf);
+    }
+    
+    /* cg_zoomfov: read directly from cvar string */
+    trap_Cvar_VariableStringBuffer("cg_zoomfov", buf, sizeof(buf));
+    f = atof(buf);
+    if (f < 40.0f) f = 40.0f;
+    if (f > 60.0f) f = 60.0f;
+    /* Slider 0-20 maps to FOV 60-40 (decreasing) */
+    s_controls.zoomfov.curvalue = (float)((int)((60.0f - f) / 20.0f * 20.0f + 0.5f));
 }
-
 /*
 =================
 Controls_SetConfig
@@ -820,39 +832,59 @@ Controls_SetConfig
 */
 static void Controls_SetConfig( void )
 {
-	bind_t*	bindptr;
+    bind_t* bindptr;
+    char    buf[32];
+    float   threshold;
 
-	// set the bindings from the local store
-	bindptr = g_bindings;
+    // set the bindings from the local store
+    bindptr = g_bindings;
 
-	// iterate each command, get its numeric binding
-	for (;;bindptr++)
-	{
-		if (!bindptr->label)
-			break;
+    // iterate each command, get its numeric binding
+    for (;;bindptr++)
+    {
+        if (!bindptr->label)
+            break;
 
-		if (bindptr->bind1 != -1)
-		{	
-			trap_Key_SetBinding( bindptr->bind1, bindptr->command );
+        if (bindptr->bind1 != -1)
+        {	
+            trap_Key_SetBinding( bindptr->bind1, bindptr->command );
 
-			if (bindptr->bind2 != -1)
-				trap_Key_SetBinding( bindptr->bind2, bindptr->command );
-		}
-	}
+            if (bindptr->bind2 != -1)
+                trap_Key_SetBinding( bindptr->bind2, bindptr->command );
+        }
+    }
 
-	if ( s_controls.invertmouse.curvalue )
-		trap_Cvar_SetValue( "m_pitch", -fabs( trap_Cvar_VariableValue( "m_pitch" ) ) );
-	else
-		trap_Cvar_SetValue( "m_pitch", fabs( trap_Cvar_VariableValue( "m_pitch" ) ) );
+    if ( s_controls.invertmouse.curvalue )
+        trap_Cvar_SetValue( "m_pitch", -fabs( trap_Cvar_VariableValue( "m_pitch" ) ) );
+    else
+        trap_Cvar_SetValue( "m_pitch", fabs( trap_Cvar_VariableValue( "m_pitch" ) ) );
 
-	trap_Cvar_SetValue( "m_filter", s_controls.smoothmouse.curvalue );
-	trap_Cvar_SetValue( "cl_run", s_controls.alwaysrun.curvalue );
-	trap_Cvar_SetValue( "cg_autoswitch", s_controls.autoswitch.curvalue );
-	trap_Cvar_SetValue( "sensitivity", s_controls.sensitivity.curvalue );
-	trap_Cvar_SetValue( "in_joystick", s_controls.joyenable.curvalue );
-	trap_Cvar_SetValue( "joy_threshold", s_controls.joythreshold.curvalue );
-	trap_Cvar_SetValue( "cl_freelook", s_controls.freelook.curvalue );
-	trap_Cmd_ExecuteText( EXEC_APPEND, "in_restart\n" );
+    trap_Cvar_SetValue( "m_filter", s_controls.smoothmouse.curvalue );
+    trap_Cvar_SetValue( "cl_run", s_controls.alwaysrun.curvalue );
+    trap_Cvar_SetValue( "cg_autoswitch", s_controls.autoswitch.curvalue );
+    trap_Cvar_SetValue( "sensitivity", s_controls.sensitivity.curvalue );
+    trap_Cvar_SetValue( "in_joystick", s_controls.joyenable.curvalue );
+    trap_Cvar_SetValue( "cl_freelook", s_controls.freelook.curvalue );
+    trap_Cvar_SetValue( "ps3_rumbleEnable", s_controls.rumbleenable.curvalue );
+
+    /* Joystick threshold slider (0-20 steps → 0.0045-0.0145) */
+    threshold = 0.0045f + (s_controls.joythreshold.curvalue / 20.0f) * 0.01f;  /* CHANGED: multiply by 0.01 */
+    Com_sprintf(buf, sizeof(buf), "%.4f", threshold);
+    trap_Cvar_Set("joy_threshold", buf);
+    
+    /* ALSO update j_pitch and j_yaw so right-stick sensitivity matches */
+    Com_sprintf(buf, sizeof(buf), "%.4f", threshold);
+    trap_Cvar_Set("j_pitch", buf);
+    Com_sprintf(buf, sizeof(buf), "-%.4f", threshold);
+    trap_Cvar_Set("j_yaw", buf);
+    
+    /* Zoom FOV slider (0-20 steps → 60-40, decreasing) */
+    {
+        float fov = 60.0f - (s_controls.zoomfov.curvalue / 20.0f) * 20.0f;
+        trap_Cvar_SetValue("cg_zoomfov", fov);
+    }
+
+    //trap_Cmd_ExecuteText( EXEC_APPEND, "in_restart\n" );
 }
 
 /*
@@ -883,8 +915,38 @@ static void Controls_SetDefaults( void )
 	s_controls.autoswitch.curvalue   = Controls_GetCvarDefault( "cg_autoswitch" );
 	s_controls.sensitivity.curvalue  = Controls_GetCvarDefault( "sensitivity" );
 	s_controls.joyenable.curvalue    = Controls_GetCvarDefault( "in_joystick" );
-	s_controls.joythreshold.curvalue = Controls_GetCvarDefault( "joy_threshold" );
+	{
+    char buf[32];
+    float f;
+    trap_Cvar_VariableStringBuffer("joy_threshold", buf, sizeof(buf));
+    f = atof(buf);
+    /* Reset to get default, then restore */
+    trap_Cvar_Reset("joy_threshold");
+    trap_Cvar_VariableStringBuffer("joy_threshold", buf, sizeof(buf));
+    f = atof(buf);
+    if (f < 0.0045f) f = 0.0045f;
+    if (f > 0.0145f) f = 0.0145f;                    /* CHANGED: max 0.0145 */
+    s_controls.joythreshold.curvalue = (float)((int)((f - 0.0045f) / 0.01f * 20.0f + 0.5f));  /* CHANGED: divide by 0.01 */
+    /* Restore user's current value */
+    trap_Cvar_SetValue("joy_threshold", Controls_GetCvarValue("joy_threshold"));
+    
+  }
+  {
+  	char buf[32];
+    float f;
+  	/* cg_zoomfov default */
+    trap_Cvar_VariableStringBuffer("cg_zoomfov", buf, sizeof(buf));
+    f = atof(buf);
+    trap_Cvar_Reset("cg_zoomfov");
+    trap_Cvar_VariableStringBuffer("cg_zoomfov", buf, sizeof(buf));
+    f = atof(buf);
+    if (f < 40.0f) f = 40.0f;
+    if (f > 60.0f) f = 60.0f;
+    s_controls.zoomfov.curvalue = (float)((int)((60.0f - f) / 20.0f * 20.0f + 0.5f));
+    trap_Cvar_SetValue("cg_zoomfov", Controls_GetCvarValue("cg_zoomfov"));
+  }
 	s_controls.freelook.curvalue     = Controls_GetCvarDefault( "cl_freelook" );
+	s_controls.rumbleenable.curvalue = Controls_GetCvarDefault( "ps3_rumbleEnable" );
 }
 
 /*
@@ -1114,11 +1176,19 @@ static void Controls_MenuEvent( void* ptr, int event )
 		case ID_AUTOSWITCH:
 		case ID_JOYENABLE:
 		case ID_JOYTHRESHOLD:
+		case ID_ENABLERUMBLE:
 			if (event == QM_ACTIVATED)
 			{
 				s_controls.changesmade = qtrue;
 			}
-			break;		
+			break;
+		
+		case ID_ZOOMFOV:
+			if (event == QM_ACTIVATED)
+				{
+					s_controls.changesmade = qtrue;
+				}
+				break;		
 	}
 }
 
@@ -1546,12 +1616,31 @@ static void Controls_MenuInit( void )
 	s_controls.joythreshold.generic.type	  = MTYPE_SLIDER;
 	s_controls.joythreshold.generic.x		  = SCREEN_WIDTH/2;
 	s_controls.joythreshold.generic.flags	  = QMF_SMALLFONT;
-	s_controls.joythreshold.generic.name	  = "joystick threshold";
+	//s_controls.joythreshold.generic.name	  = "joystick threshold";
+	s_controls.joythreshold.generic.name	  = "right thumb speed";
 	s_controls.joythreshold.generic.id 	      = ID_JOYTHRESHOLD;
 	s_controls.joythreshold.generic.callback  = Controls_MenuEvent;
-	s_controls.joythreshold.minvalue		  = 0.05f;
-	s_controls.joythreshold.maxvalue		  = 0.75f;
+	s_controls.joythreshold.minvalue		  = 0;      // 0 steps
+	s_controls.joythreshold.maxvalue		  = 20;     // 20 steps
 	s_controls.joythreshold.generic.statusbar = Controls_StatusBar;
+	
+	s_controls.rumbleenable.generic.type      = MTYPE_RADIOBUTTON;
+	s_controls.rumbleenable.generic.flags     = QMF_SMALLFONT;
+	s_controls.rumbleenable.generic.x         = SCREEN_WIDTH/2;
+	s_controls.rumbleenable.generic.name      = "controller rumble";
+	s_controls.rumbleenable.generic.id        = ID_ENABLERUMBLE;
+	s_controls.rumbleenable.generic.callback  = Controls_MenuEvent;
+	s_controls.rumbleenable.generic.statusbar = Controls_StatusBar;
+	
+	s_controls.zoomfov.generic.type       = MTYPE_SLIDER;
+	s_controls.zoomfov.generic.x          = SCREEN_WIDTH/2;
+	s_controls.zoomfov.generic.flags      = QMF_SMALLFONT;
+	s_controls.zoomfov.generic.name       = "zoom fov";
+	s_controls.zoomfov.generic.id         = ID_ZOOMFOV;
+	s_controls.zoomfov.generic.callback   = Controls_MenuEvent;
+	s_controls.zoomfov.minvalue           = 0;     /* 0 steps = 60 */
+	s_controls.zoomfov.maxvalue           = 20;    /* 20 steps = 40 */
+	s_controls.zoomfov.generic.statusbar  = Controls_StatusBar;
 
 	s_controls.name.generic.type	= MTYPE_PTEXT;
 	s_controls.name.generic.flags	= QMF_CENTER_JUSTIFY|QMF_INACTIVE;
@@ -1572,52 +1661,26 @@ static void Controls_MenuInit( void )
 	Menu_AddItem( &s_controls.menu, &s_controls.weapons );
 	Menu_AddItem( &s_controls.menu, &s_controls.misc );
 
-	Menu_AddItem( &s_controls.menu, &s_controls.sensitivity );
-	Menu_AddItem( &s_controls.menu, &s_controls.smoothmouse );
-	Menu_AddItem( &s_controls.menu, &s_controls.invertmouse );
-	Menu_AddItem( &s_controls.menu, &s_controls.lookup );
-	Menu_AddItem( &s_controls.menu, &s_controls.lookdown );
-	Menu_AddItem( &s_controls.menu, &s_controls.mouselook );
-	Menu_AddItem( &s_controls.menu, &s_controls.freelook );
-	Menu_AddItem( &s_controls.menu, &s_controls.centerview );
+	/* LOOK */
 	Menu_AddItem( &s_controls.menu, &s_controls.zoomview );
-	Menu_AddItem( &s_controls.menu, &s_controls.joyenable );
 	Menu_AddItem( &s_controls.menu, &s_controls.joythreshold );
+	Menu_AddItem( &s_controls.menu, &s_controls.rumbleenable );
+	Menu_AddItem( &s_controls.menu, &s_controls.zoomfov );
 
+	/* MOVE */
 	Menu_AddItem( &s_controls.menu, &s_controls.alwaysrun );
-	Menu_AddItem( &s_controls.menu, &s_controls.run );
-	Menu_AddItem( &s_controls.menu, &s_controls.walkforward );
-	Menu_AddItem( &s_controls.menu, &s_controls.backpedal );
-	Menu_AddItem( &s_controls.menu, &s_controls.stepleft );
-	Menu_AddItem( &s_controls.menu, &s_controls.stepright );
 	Menu_AddItem( &s_controls.menu, &s_controls.moveup );
 	Menu_AddItem( &s_controls.menu, &s_controls.movedown );
-	Menu_AddItem( &s_controls.menu, &s_controls.turnleft );
-	Menu_AddItem( &s_controls.menu, &s_controls.turnright );
-	Menu_AddItem( &s_controls.menu, &s_controls.sidestep );
 
+	/* SHOOT */
 	Menu_AddItem( &s_controls.menu, &s_controls.attack );
 	Menu_AddItem( &s_controls.menu, &s_controls.nextweapon );
 	Menu_AddItem( &s_controls.menu, &s_controls.prevweapon );
 	Menu_AddItem( &s_controls.menu, &s_controls.autoswitch );
-	Menu_AddItem( &s_controls.menu, &s_controls.chainsaw );
-	Menu_AddItem( &s_controls.menu, &s_controls.machinegun );
-	Menu_AddItem( &s_controls.menu, &s_controls.shotgun );
-	Menu_AddItem( &s_controls.menu, &s_controls.grenadelauncher );
-	Menu_AddItem( &s_controls.menu, &s_controls.rocketlauncher );
-	Menu_AddItem( &s_controls.menu, &s_controls.lightning );
-	Menu_AddItem( &s_controls.menu, &s_controls.railgun );
-	Menu_AddItem( &s_controls.menu, &s_controls.plasma );
-	Menu_AddItem( &s_controls.menu, &s_controls.bfg );
 
+	/* MISC */
 	Menu_AddItem( &s_controls.menu, &s_controls.showscores );
 	Menu_AddItem( &s_controls.menu, &s_controls.useitem );
-	Menu_AddItem( &s_controls.menu, &s_controls.gesture );
-	Menu_AddItem( &s_controls.menu, &s_controls.chat );
-	Menu_AddItem( &s_controls.menu, &s_controls.chat2 );
-	Menu_AddItem( &s_controls.menu, &s_controls.chat3 );
-	Menu_AddItem( &s_controls.menu, &s_controls.chat4 );
-	Menu_AddItem( &s_controls.menu, &s_controls.togglemenu );
 
 	Menu_AddItem( &s_controls.menu, &s_controls.back );
 

@@ -1219,34 +1219,25 @@ TESSELATOR/SHADER DECLARATIONS
 */
 typedef byte color4ub_t[4];
 
-/* PS3: the GPU-visible tess arrays (xyz, texCoords, svars,
-   constantColor255) are pointers into the RSX-mapped tess arena instead
-   of static arrays, so the RSX fetches vertex data straight from XDR
-   with no per-draw copy. xyz/texCoords rotate per surface
-   (RB_BeginSurface), svars rotates per stage (the GPU may still be
-   reading the previous stage's draw), constantColor255 is a carve-once
-   constant. Indexing is source-compatible with the upstream arrays.
-   CPU-only arrays (normal, vertexColors, indexes, vertexDlightBits)
-   stay in .bss. */
 typedef struct stageVars
 {
-	color4ub_t	*colors;
-	vec2_t		*texcoords[NUM_TEXTURE_BUNDLES];
+	color4ub_t	colors[SHADER_MAX_VERTEXES];
+	vec2_t		texcoords[NUM_TEXTURE_BUNDLES][SHADER_MAX_VERTEXES];
 } stageVars_t;
 
 
-typedef struct shaderCommands_s
+typedef struct shaderCommands_s 
 {
 	glIndex_t	indexes[SHADER_MAX_INDEXES] Q_ALIGN(16);
-	vec4_t		*xyz;
+	vec4_t		xyz[SHADER_MAX_VERTEXES] Q_ALIGN(16);
 	vec4_t		normal[SHADER_MAX_VERTEXES] Q_ALIGN(16);
-	vec2_t		(*texCoords)[2];
+	vec2_t		texCoords[SHADER_MAX_VERTEXES][2] Q_ALIGN(16);
 	color4ub_t	vertexColors[SHADER_MAX_VERTEXES] Q_ALIGN(16);
 	int			vertexDlightBits[SHADER_MAX_VERTEXES] Q_ALIGN(16);
 
-	stageVars_t	svars;
+	stageVars_t	svars Q_ALIGN(16);
 
-	color4ub_t	*constantColor255;
+	color4ub_t	constantColor255[SHADER_MAX_VERTEXES] Q_ALIGN(16);
 
 	shader_t	*shader;
 	double		shaderTime;
@@ -1267,7 +1258,6 @@ extern	shaderCommands_t	tess;
 
 void RB_BeginSurface(shader_t *shader, int fogNum );
 void RB_EndSurface(void);
-void RB_PS3_TessInitPointers( void );	/* PS3: reset tess arena pointers (tr_shade.c) */
 void RB_CheckOverflow( int verts, int indexes );
 #define RB_CHECKOVERFLOW(v,i) if (tess.numVertexes + (v) >= SHADER_MAX_VERTEXES || tess.numIndexes + (i) >= SHADER_MAX_INDEXES ) {RB_CheckOverflow(v,i);}
 

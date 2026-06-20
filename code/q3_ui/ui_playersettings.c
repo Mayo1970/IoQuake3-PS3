@@ -114,6 +114,20 @@ static void PlayerSettings_DrawName( void *self ) {
 	int				n;
 	int				basex, x, y;
 	char			name[32];
+	
+	/* Check for PS4 IME result every frame */
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "name") == 0) {
+
+	    const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+	    Q_strncpyz(s_playersettings.name.field.buffer, imeText,
+	               sizeof(s_playersettings.name.field.buffer));
+	    s_playersettings.name.field.cursor = strlen(imeText);
+
+	    trap_Cvar_Set("name", imeText);
+	    trap_Cvar_Set("ui_ime_field", "");
+	    trap_Cvar_SetValue("ui_ime_done", 0);
+	}
 
 	f = (menufield_s*)self;
 	basex = f->generic.x;
@@ -151,6 +165,7 @@ static void PlayerSettings_DrawName( void *self ) {
 	}
 
 	// draw cursor if we have focus
+		// draw cursor if we have focus
 	if( focus ) {
 		if ( trap_Key_GetOverstrikeMode() ) {
 			c = 11;
@@ -162,6 +177,14 @@ static void PlayerSettings_DrawName( void *self ) {
 		style |= UI_BLINK;
 
 		UI_DrawChar( basex + f->field.cursor * SMALLCHAR_WIDTH, y, c, style, color_white );
+		
+		/* NEW: Signal to PS4 input layer that name field wants IME */
+		trap_Cvar_Set("ui_ime_target", "name");
+	} else {
+		/* NEW: Clear IME target if we were the one who set it */
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "name") == 0) {
+			trap_Cvar_Set("ui_ime_target", "");
+		}
 	}
 
 	// draw at bottom also using proportional font
@@ -280,7 +303,6 @@ static sfxHandle_t PlayerSettings_MenuKey( int key ) {
 	return Menu_DefaultKey( &s_playersettings.menu, key );
 }
 
-
 /*
 =================
 PlayerSettings_SetMenuItems
@@ -334,11 +356,13 @@ static void PlayerSettings_MenuEvent( void* ptr, int event ) {
 
 	case ID_MODEL:
 		PlayerSettings_SaveChanges();
+		trap_Cvar_Set("ui_ime_target", "");
 		UI_PlayerModelMenu();
 		break;
 
 	case ID_BACK:
 		PlayerSettings_SaveChanges();
+		trap_Cvar_Set("ui_ime_target", "");
 		UI_PopMenu();
 		break;
 	}

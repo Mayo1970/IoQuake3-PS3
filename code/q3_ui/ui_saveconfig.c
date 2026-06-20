@@ -115,6 +115,22 @@ static void UI_SaveConfigMenu_SavenameDraw( void *self ) {
 	UI_DrawProportionalString( 320, 192, "Enter filename:", UI_CENTER|UI_SMALLFONT, color_orange );
 	UI_FillRect( f->generic.x, f->generic.y, f->field.widthInChars*SMALLCHAR_WIDTH, SMALLCHAR_HEIGHT, colorBlack );
 	MField_Draw( &f->field, f->generic.x, f->generic.y, style, color );
+
+	if ( f == Menu_ItemAtCursor( &saveConfig.menu ) ) {
+		trap_Cvar_Set("ui_ime_target", "savename");
+	} else {
+		if (strcmp(UI_Cvar_VariableString("ui_ime_target"), "savename") == 0)
+			trap_Cvar_Set("ui_ime_target", "");
+	}
+
+	if (trap_Cvar_VariableValue("ui_ime_done") &&
+	    strcmp(UI_Cvar_VariableString("ui_ime_field"), "savename") == 0) {
+		const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+		Q_strncpyz(f->field.buffer, imeText, sizeof(f->field.buffer));
+		f->field.cursor = strlen(imeText);
+		trap_Cvar_Set("ui_ime_field", "");
+		trap_Cvar_SetValue("ui_ime_done", 0);
+	}
 }
 
 

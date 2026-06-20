@@ -1,17 +1,4 @@
-/*
- * ioquake3-PS3: sys/ps3_net.h
- * Network socket compatibility shim for PSL1GHT.
- *
- * PSL1GHT provides a BSD-compatible socket API through
- * <net/net.h> and <netinet/in.h>. The API is close to POSIX
- * but requires initialization via netInitialize().
- *
- * This shim is much simpler than the Wii port's because PS3's
- * network stack is largely POSIX-compliant. The main differences:
- *   - Must call netInitialize() before any socket operations
- *   - Some error codes may differ
- *   - No IPv6 support in PSL1GHT (stub types provided below)
- */
+/* ps3_net.h -- PSL1GHT socket API shim (netInitialize, IPv6 stubs). */
 
 #ifndef PS3_NET_H
 #define PS3_NET_H
@@ -26,15 +13,7 @@
 #include <netinet/in.h>
 #include <sys/select.h>
 
-/* ----------------------------------------------------------------
- * IPv6 stubs
- *
- * PSL1GHT defines AF_INET6 but provides no IPv6 structures or
- * constants. ioq3's net_ip.c references them throughout.
- * We provide the types so the code compiles, but IPv6 socket
- * creation will always fail at runtime (PSL1GHT's socket()
- * returns error for AF_INET6).
- * ---------------------------------------------------------------- */
+/* IPv6 stubs (AF_INET6 defined but non-functional; socket() fails at runtime). */
 
 /* sockaddr_storage -- large enough to hold any sockaddr type.
  * PSL1GHT uses BSD-style sockaddr with sa_len at offset 0 and
@@ -129,9 +108,7 @@ static inline int gethostname(char *name, size_t len)
     return 0;
 }
 
-/* ----------------------------------------------------------------
- * End IPv6 stubs
- * ---------------------------------------------------------------- */
+/* End IPv6 stubs */
 
 /* Include PSL1GHT's netdb.h for struct addrinfo, AI_PASSIVE, etc. */
 #include <netdb.h>

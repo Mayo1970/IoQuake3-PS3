@@ -370,8 +370,30 @@ void MenuField_Draw( menufield_s *f )
 	if ( focus )
 	{
 		// draw cursor
-		UI_FillRect( f->generic.left, f->generic.top, f->generic.right-f->generic.left+1, f->generic.bottom-f->generic.top+1, listbar_color ); 
+		UI_FillRect( f->generic.left, f->generic.top, f->generic.right-f->generic.left+1, f->generic.bottom-f->generic.top+1, listbar_color );
 		UI_DrawChar( x, y, 13, UI_CENTER|UI_BLINK|style, color);
+
+		/* Signal PS4 input that this field is active. Use generic.name as the field ID. */
+		if ( f->generic.name ) {
+			trap_Cvar_Set( "ui_ime_target", f->generic.name );
+		}
+	} else {
+		/* Clear target if we were the one who set it. */
+		if ( f->generic.name &&
+		     strcmp( UI_Cvar_VariableString("ui_ime_target"), f->generic.name ) == 0 ) {
+			trap_Cvar_Set( "ui_ime_target", "" );
+		}
+	}
+
+	/* Write OSK result back into this field. */
+	if ( f->generic.name &&
+	     trap_Cvar_VariableValue("ui_ime_done") &&
+	     strcmp( UI_Cvar_VariableString("ui_ime_field"), f->generic.name ) == 0 ) {
+		const char *imeText = UI_Cvar_VariableString("ui_ime_text");
+		Q_strncpyz( f->field.buffer, imeText, MAX_EDIT_LINE );
+		f->field.cursor = strlen( imeText );
+		trap_Cvar_Set( "ui_ime_field", "" );
+		trap_Cvar_SetValue( "ui_ime_done", 0 );
 	}
 
 	if ( f->generic.name ) {
