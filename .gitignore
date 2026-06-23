@@ -46,13 +46,15 @@ __pycache__/
 *.pyc
 
 # Game data (user-provided; never commit)
-baseq3/
-baseoa/
-missionpack/
 *.pk3
-# Un-ignore bundled override paks (directory exceptions must come before file exceptions)
-!fixes/*.pk3
-!fixes/**/*.pk3
+# Un-ignore bundled override paks
+!fixes/baseq3/*.pk3
+!fixes/missionpack/*.pk3
+!fixes/baseoa/*.pk3
+# Ignore loose game data dirs (but not fixes/ subdirs)
+/baseq3/
+/baseoa/
+/missionpack/
 qkey
 q3key
 
