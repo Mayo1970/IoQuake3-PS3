@@ -51,10 +51,8 @@ baseoa/
 missionpack/
 *.pk3
 # Un-ignore bundled override paks (directory exceptions must come before file exceptions)
-!fixes/baseq3/
-!fixes/missionpack/
-!fixes/baseq3/pak9-ps3.pk3
-!fixes/missionpack/pak4-ps3.pk3
+!fixes/*.pk3
+!fixes/**/*.pk3
 qkey
 q3key
 

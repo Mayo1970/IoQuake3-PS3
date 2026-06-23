@@ -4,13 +4,14 @@ A port of [ioQuake3](https://github.com/ioquake/ioq3) to the PlayStation 3,
 using [PSL1GHT](https://github.com/ps3dev/PSL1GHT) and a custom GL-to-RSX
 translation layer (OpenGL 1.1 fixed-function to GCM/RSX).
 
-Three separate builds are produced from the same source tree:
+Four builds are produced from the same source tree:
 
 | Variant | XMB title | TITLE_ID | Game dir on HDD |
 |---|---|---|---|
 | ioQuake3       | **ioQuake3**   | `IOQ3PS300` | `baseq3/` |
 | Open Arena     | **Open Arena** | `IOOAPS300`  | `baseoa/` |
 | Team Arena     | **Team Arena** | `IOTAPS300`  | `baseq3/` + `missionpack/` |
+| Quake 3 Classic | **Quake 3 Classic** | `IOQCPS301` | `baseq3/` (pak0–pak2 only) |
 
 ## Status
 
@@ -24,6 +25,7 @@ Three separate builds are produced from the same source tree:
 - OGG Vorbis background music
 - **Mod support** via `+set fs_game <mod>` (also how TA loads `missionpack`)
 - **Standalone OA and TA** packages with their own EBOOT / SFO / icon
+- **Quake 3 Classic** package (protocol 43 — Dreamcast crossplay)
 - 60 fps vsync-locked at 720p
 
 ## Prerequisites (Windows)
@@ -61,6 +63,7 @@ You need to bring your own `.pk3` files — none are included in this repo:
 - **Q3**: `pak0.pk3`–`pak8.pk3` from Quake III Arena (Steam: `steamapps/common/Quake 3 Arena/baseq3/`)
 - **OA**: Open Arena 0.8.8 paks (https://openarena.ws/)
 - **TA**: Q3 baseq3 paks **plus** Team Arena `missionpack/pak0.pk3`–`pak3.pk3`
+- **Classic**: `pak0.pk3`–`pak2.pk3` from Quake III Arena (same `baseq3/` as Q3; plus `dc-mappack.pk3` for Dreamcast community servers)
 
 These get FTP'd to the PS3 (see *PS3 directory layout* below).
 
@@ -82,13 +85,13 @@ export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PS3DEV/spu/bin:$PATH
 cd /e/path/to/ioquake3-PS3
 ```
 
-### Build all three variants at once
+### Build all variants at once
 
 ```bash
 make clean && make all-flavors
 ```
 
-This builds Q3A, Open Arena, and Team Arena PKGs in sequence:
+This builds Q3A, Open Arena, and Team Arena PKGs in sequence (Classic is not included — build it separately with `CLASSIC=1`):
 - `build/ioquake3_ps3.pkg`
 - `build_oa/ioquake3_oa_ps3.pkg`
 - `build_ta/ioquake3_ta_ps3.pkg`
@@ -101,13 +104,15 @@ PKG (recommended):
 make clean && make pkg              # ioQuake3 (Q3A)
 make clean && make OA=1 pkg         # Open Arena
 make clean && make TA=1 pkg         # Team Arena
+make clean && make CLASSIC=1 pkg    # Quake 3 Classic (Dreamcast crossplay)
 ```
 
 Or use the shorthand targets:
 
 ```bash
-make clean && make oa && make OA=1 pkg    # Open Arena (two steps)
-make clean && make ta && make TA=1 pkg    # Team Arena (two steps)
+make clean && make oa && make OA=1 pkg          # Open Arena (two steps)
+make clean && make ta && make TA=1 pkg          # Team Arena (two steps)
+make clean && make classic && make CLASSIC=1 pkg # Classic (two steps)
 ```
 
 Other targets (all variants):
@@ -117,7 +122,7 @@ make              # ELF binary
 make self         # ELF + EBOOT.BIN (fake SELF)
 make install      # FTP-ready EBOOT + PARAM.SFO + ICON0.PNG layout
 make pkg          # full installable PKG
-make clean        # wipe all build dirs (build/, build_oa/, build_ta/)
+make clean        # wipe all build dirs (build/, build_oa/, build_ta/, build_qc/)
 ```
 
 ### Build flags
@@ -125,29 +130,33 @@ make clean        # wipe all build dirs (build/, build_oa/, build_ta/)
 | Flag | Effect |
 |---|---|
 | `DEBUG=1` | Adds `-DPS3_DEBUG -g`; writes `log[_oa\|_ta].txt` to `/dev_hdd0/data/ioq3/`. Release builds emit no log file. |
+| `CLASSIC=1` | Builds protocol-43 Dreamcast-crossplay variant. See the *Quake 3 Classic* section under Mods. |
 
 ### Outputs
 
 | Variant | PKG path |
 |---|---|
-| ioQuake3   | `build/ioquake3_ps3.pkg` |
-| Open Arena | `build_oa/ioquake3_oa_ps3.pkg` |
-| Team Arena | `build_ta/ioquake3_ta_ps3.pkg` |
+| ioQuake3        | `build/ioquake3_ps3.pkg` |
+| Open Arena      | `build_oa/ioquake3_oa_ps3.pkg` |
+| Team Arena      | `build_ta/ioquake3_ta_ps3.pkg` |
+| Quake 3 Classic | `build_classic/ioquake3_classic_ps3.pkg` |
 
 Always run `make clean` before rebuilding after a flag change.
 
 ### Compiler flags (under the hood)
 
-The Makefile detects `OA=1` / `TA=1` and sets the appropriate defines:
+The Makefile detects `OA=1` / `TA=1` / `CLASSIC=1` and sets the appropriate defines:
 
 - `OA=1` → `-DSTANDALONEOA`. OA uses `gamename = "Quake3Arena"`
   (real OA 0.8.8 keeps the legacy Q3 gamename for master/auth compat).
 - `TA=1` → `-DSTANDALONETA`. TA keeps `BASEGAME = "baseq3"` and
   forces `+set fs_game missionpack` on boot.
+- `CLASSIC=1` → `-DCLASSIC -DLEGACY_PROTOCOL`. Protocol 43, pak0–pak2 only,
+  master server at `dc.dreamcast-talk.com`.
 - Neither → Q3A (default, no standalone define).
 
 XMB titles and icons are set via `make_sfo.py --title` and picked from
-`icons/<q3|oa|ta>/ICON0.PNG` respectively.
+`icons/<q3|oa|ta|qc>/ICON0.PNG` respectively.
 
 ---
 
@@ -167,15 +176,15 @@ paks or settings.
     └── EBOOT.BIN
 ```
 
-TITLE_IDs: `IOQ3PS300` (Q3), `IOQ3OA00` (OA), `IOQ3TA00` (TA).
+TITLE_IDs: `IOQ3PS300` (Q3), `IOOAPS300` (OA), `IOTAPS300` (TA), `IOQCPS301` (Classic).
 
 ### Game data (you provide via FTP)
 
 ```
 /dev_hdd0/data/ioq3/
-├── log.txt        ← debug builds only (Q3), log_oa.txt / log_ta.txt for OA/TA
+├── log.txt        ← debug builds only (Q3/Classic), log_oa.txt / log_ta.txt for OA/TA
 ├── qkey           ← auto-created on first boot
-├── q3config.cfg   ← per-variant cfg (Q3); oaconfig.cfg (OA); teamarenaconfig.cfg (TA)
+├── q3config.cfg   ← per-variant cfg (Q3/Classic); oaconfig.cfg (OA); teamarenaconfig.cfg (TA)
 ├── baseq3/
 │   ├── pak0.pk3 … pak8.pk3        ← required for Q3 and TA
 ├── missionpack/
@@ -189,10 +198,21 @@ Variant requirements:
 - **ioQuake3** needs `baseq3/`.
 - **Team Arena** needs `baseq3/` **and** `missionpack/`.
 - **Open Arena** needs `baseoa/` only (no `baseq3/` required).
+- **Quake 3 Classic** needs `baseq3/` (`pak0`–`pak2` only; higher paks are ignored).
 
 Create `/dev_hdd0/data/ioq3/` via FTP before first boot. USB fallback
 `/dev_usb000/quake3/<gamedir>/pak0.pk3` is also probed if the HDD path
 is missing.
+
+### Quake 3 Classic (Dreamcast crossplay)
+
+`make CLASSIC=1` builds a fourth pkg that speaks **Quake III Arena protocol 43** — the protocol used by the original 1999 Dreamcast release. Modern ioQuake3 uses protocol 68 and is not compatible with Dreamcast servers, so this variant exists purely to enable crossplay between PS3 and the small community still running Dreamcast-era servers. The Internet server browser points at `dc.dreamcast-talk.com` out of the box.
+
+Only `pak0`–`pak2` are loaded (byte-identical to the Dreamcast data files); higher paks and PS3-specific paks are excluded so their checksums do not interfere with the server authentication handshake.
+
+To play on Dreamcast community servers you also need `dc-mappack.pk3`, which contains the maps in rotation on those servers. Download it from [lvlworld.com](https://lvlworld.com/download/id:999) and place it in `/dev_hdd0/data/ioq3/baseq3/`.
+
+---
 
 ### Installing custom mods
 
@@ -287,7 +307,7 @@ The OSK is the PS3 system on-screen keyboard. When opened from the console
 context, typed text is auto-submitted as a command (prepended with `/` to
 prevent accidental chat broadcast). From chat context, text is the message body.
 Menu text fields (player name, server address, etc.) accept OSK input directly
-in all three variants (Q3, OA, TA).
+in all four variants (Q3, OA, TA, Classic).
 
 ---
 
@@ -402,6 +422,20 @@ Don't raise `DEF_COMHUNKMEGS` above 112 without re-measuring.
 - If switching variants seems to misbehave (wrong gamename, missing intro
   cinematic), delete the on-PS3 `*config.cfg` for that variant — stale
   cvar values can override defaults.
+
+## Credits
+
+- **[ioQuake3](https://github.com/ioquake/ioq3)** — the upstream engine this port is based on.
+- **[PSL1GHT](https://github.com/ps3dev/PSL1GHT)** / **[ps3toolchain](https://github.com/ps3dev/ps3toolchain)** — PS3 homebrew toolchain, GCM/RSX headers, and runtime library.
+- **[Lilium Arena Classic](https://github.com/clover-moe/lilium-arena-classic)** (clover-moe / clover-leaf) — reverse-engineered Quake III Arena protocol-43 / Dreamcast compatibility layer. The CLASSIC build's pure-checksum exchange, `cl_paks` format, server-message parse fixes, and `FS_ReferencedPakPureChecksums` compat mode are derived from this work.
+
+---
+
+## AI disclosure
+
+Parts of this port were developed with the assistance of **Claude** (Anthropic). AI was used for code generation, debugging, porting guidance, and documentation. All AI-generated code was reviewed and tested on hardware before inclusion.
+
+---
 
 ## License
 
