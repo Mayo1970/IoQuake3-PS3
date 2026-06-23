@@ -97,9 +97,18 @@ void MSG_Copy(msg_t *buf, byte *data, int length, msg_t *src)
 =============================================================================
 
 bit functions
-  
+
 =============================================================================
 */
+
+#ifdef CLASSIC
+// Old protocol (43) sends strings and bulk data on byte boundaries.
+static void MSG_RoundBits(msg_t *msg)
+{
+	if(msg->bit & 0x07)
+		msg->bit = ++msg->readcount << 3;
+}
+#endif
 
 // negative bit values include signs
 void MSG_WriteBits( msg_t *msg, int value, int bits ) {
@@ -120,6 +129,30 @@ void MSG_WriteBits( msg_t *msg, int value, int bits ) {
 	}
 
 	if ( msg->oob ) {
+#ifdef CLASSIC
+		if(msg->compat)
+		{
+			int write, leftover, nbits = bits, location;
+			if(bits < 32)
+				value &= ((1 << bits) - 1);
+			while(nbits)
+			{
+				leftover = msg->bit & 0x07;
+				write = 8 - leftover;
+				location = msg->bit >> 3;
+				if(write > nbits)
+					write = nbits;
+				msg->data[location] &= (1 << leftover) - 1;
+				msg->data[location] |= (value & ((1 << write) - 1)) << (leftover);
+				nbits -= write;
+				value >>= write;
+				msg->bit += write;
+			}
+			msg->cursize = (msg->bit >> 3) + ((msg->bit & 0x07) ? 1 : 0);
+		}
+		else
+#endif
+		{
 		if ( msg->cursize + ( bits >> 3 ) > msg->maxsize ) {
 			msg->overflowed = qtrue;
 			return;
@@ -141,6 +174,7 @@ void MSG_WriteBits( msg_t *msg, int value, int bits ) {
 			msg->bit += 32;
 		} else {
 			Com_Error( ERR_DROP, "can't write %d bits", bits );
+		}
 		}
 	} else {
 		value &= (0xffffffff >> (32 - bits));
@@ -193,6 +227,25 @@ int MSG_ReadBits( msg_t *msg, int bits ) {
 	}
 
 	if (msg->oob) {
+#ifdef CLASSIC
+		if(msg->compat)
+		{
+			int nbits2 = 0;
+			while(nbits2 < bits)
+			{
+				i = msg->bit & 0x07;
+				get = 8 - i;
+				if(get > bits - nbits2)
+					get = bits - nbits2;
+				value |= ((msg->data[msg->bit >> 3] >> i) & ((1 << get) - 1)) << nbits2;
+				msg->bit += get;
+				nbits2 += get;
+			}
+			msg->readcount = (msg->bit >> 3) + ((msg->bit & 0x07) ? 1 : 0);
+		}
+		else
+#endif
+		{
 		if (msg->readcount + (bits>>3) > msg->cursize) {
 			msg->readcount = msg->cursize + 1;
 			return 0;
@@ -207,7 +260,7 @@ int MSG_ReadBits( msg_t *msg, int bits ) {
 		else if(bits==16)
 		{
 			short temp;
-			
+
 			CopyLittleShort(&temp, &msg->data[msg->readcount]);
 			value = temp;
 			msg->readcount += 2;
@@ -221,6 +274,7 @@ int MSG_ReadBits( msg_t *msg, int bits ) {
 		}
 		else
 			Com_Error(ERR_DROP, "can't read %d bits", bits);
+		}
 	} else {
 		nbits = 0;
 		if (bits&7) {
@@ -287,6 +341,13 @@ void MSG_WriteByte( msg_t *sb, int c ) {
 
 void MSG_WriteData( msg_t *buf, const void *data, int length ) {
 	int i;
+#ifdef CLASSIC
+	if(buf->compat)
+	{
+		if(buf->bit & 0x07)
+			buf->bit = ++buf->cursize << 3;
+	}
+#endif
 	for(i=0;i<length;i++) {
 		MSG_WriteByte(buf, ((byte *)data)[i]);
 	}
@@ -447,7 +508,10 @@ float MSG_ReadFloat( msg_t *msg ) {
 char *MSG_ReadString( msg_t *msg ) {
 	static char	string[MAX_STRING_CHARS];
 	int		l,c;
-	
+#ifdef CLASSIC
+	if(msg->compat)
+		MSG_RoundBits(msg);
+#endif
 	l = 0;
 	do {
 		c = MSG_ReadByte(msg);		// use ReadByte so -1 is out of bounds
@@ -477,7 +541,10 @@ char *MSG_ReadString( msg_t *msg ) {
 char *MSG_ReadBigString( msg_t *msg ) {
 	static char	string[BIG_INFO_STRING];
 	int		l,c;
-	
+#ifdef CLASSIC
+	if(msg->compat)
+		MSG_RoundBits(msg);
+#endif
 	l = 0;
 	do {
 		c = MSG_ReadByte(msg);		// use ReadByte so -1 is out of bounds
@@ -507,7 +574,10 @@ char *MSG_ReadBigString( msg_t *msg ) {
 char *MSG_ReadStringLine( msg_t *msg ) {
 	static char	string[MAX_STRING_CHARS];
 	int		l,c;
-
+#ifdef CLASSIC
+	if(msg->compat)
+		MSG_RoundBits(msg);
+#endif
 	l = 0;
 	do {
 		c = MSG_ReadByte(msg);		// use ReadByte so -1 is out of bounds
@@ -540,7 +610,10 @@ float MSG_ReadAngle16( msg_t *msg ) {
 
 void MSG_ReadData( msg_t *msg, void *data, int len ) {
 	int		i;
-
+#ifdef CLASSIC
+	if(msg->compat)
+		MSG_RoundBits(msg);
+#endif
 	for (i=0 ; i<len ; i++) {
 		((byte *)data)[i] = MSG_ReadByte (msg);
 	}
@@ -566,11 +639,57 @@ extern cvar_t *cl_shownet;
 
 #define	LOG(x) if( cl_shownet && cl_shownet->integer == 4 ) { Com_Printf("%s ", x ); };
 
+#ifdef CLASSIC
+/*
+=============================================================================
+
+delta functions (classic protocol 43, no XOR key)
+
+=============================================================================
+*/
+
+void MSG_WriteDelta( msg_t *msg, int oldV, int newV, int bits ) {
+	if ( oldV == newV ) {
+		MSG_WriteBits( msg, 0, 1 );
+		return;
+	}
+	MSG_WriteBits( msg, 1, 1 );
+	MSG_WriteBits( msg, newV, bits );
+}
+
+int MSG_ReadDelta( msg_t *msg, int oldV, int bits ) {
+	if ( MSG_ReadBits( msg, 1 ) ) {
+		return MSG_ReadBits( msg, bits );
+	}
+	return oldV;
+}
+
+void MSG_WriteDeltaFloat( msg_t *msg, float oldV, float newV ) {
+	floatint_t fi;
+	if ( oldV == newV ) {
+		MSG_WriteBits( msg, 0, 1 );
+		return;
+	}
+	fi.f = newV;
+	MSG_WriteBits( msg, 1, 1 );
+	MSG_WriteBits( msg, fi.i, 32 );
+}
+
+float MSG_ReadDeltaFloat( msg_t *msg, float oldV ) {
+	if ( MSG_ReadBits( msg, 1 ) ) {
+		floatint_t fi;
+		fi.i = MSG_ReadBits( msg, 32 );
+		return fi.f;
+	}
+	return oldV;
+}
+#endif
+
 /*
 =============================================================================
 
 delta functions with keys
-  
+
 =============================================================================
 */
 
@@ -630,6 +749,55 @@ usercmd_t communication
 
 ============================================================================
 */
+
+#ifdef CLASSIC
+/*
+=====================
+MSG_WriteDeltaUsercmd (classic protocol 43)
+=====================
+*/
+void MSG_WriteDeltaUsercmd( msg_t *msg, usercmd_t *from, usercmd_t *to ) {
+	if ( to->serverTime - from->serverTime < 256 ) {
+		MSG_WriteBits( msg, 1, 1 );
+		MSG_WriteBits( msg, to->serverTime - from->serverTime, 8 );
+	} else {
+		MSG_WriteBits( msg, 0, 1 );
+		MSG_WriteBits( msg, to->serverTime, 32 );
+	}
+	MSG_WriteDelta( msg, from->angles[0], to->angles[0], 16 );
+	MSG_WriteDelta( msg, from->angles[1], to->angles[1], 16 );
+	MSG_WriteDelta( msg, from->angles[2], to->angles[2], 16 );
+	MSG_WriteDelta( msg, from->forwardmove, to->forwardmove, 8 );
+	MSG_WriteDelta( msg, from->rightmove, to->rightmove, 8 );
+	MSG_WriteDelta( msg, from->upmove, to->upmove, 8 );
+	MSG_WriteDelta( msg, from->buttons, to->buttons, 8 );   // proto 43: 8-bit buttons
+	MSG_WriteDelta( msg, from->weapon, to->weapon, 8 );
+}
+
+/*
+=====================
+MSG_ReadDeltaUsercmd (classic protocol 43)
+=====================
+*/
+void MSG_ReadDeltaUsercmd( msg_t *msg, usercmd_t *from, usercmd_t *to ) {
+	if ( MSG_ReadBits( msg, 1 ) ) {
+		to->serverTime = from->serverTime + MSG_ReadBits( msg, 8 );
+	} else {
+		to->serverTime = MSG_ReadBits( msg, 32 );
+	}
+	to->angles[0] = MSG_ReadDelta( msg, from->angles[0], 16);
+	to->angles[1] = MSG_ReadDelta( msg, from->angles[1], 16);
+	to->angles[2] = MSG_ReadDelta( msg, from->angles[2], 16);
+	to->forwardmove = MSG_ReadDelta( msg, from->forwardmove, 8);
+	if( to->forwardmove == -128 ) to->forwardmove = -127;
+	to->rightmove = MSG_ReadDelta( msg, from->rightmove, 8);
+	if( to->rightmove == -128 ) to->rightmove = -127;
+	to->upmove = MSG_ReadDelta( msg, from->upmove, 8);
+	if( to->upmove == -128 ) to->upmove = -127;
+	to->buttons = MSG_ReadDelta( msg, from->buttons, 8);    // proto 43: 8-bit buttons
+	to->weapon = MSG_ReadDelta( msg, from->weapon, 8);
+}
+#endif
 
 /*
 =====================
@@ -741,7 +909,157 @@ typedef struct {
 // using the stringizing operator to save typing...
 #define	NETF(x) #x,(size_t)&((entityState_t*)0)->x
 
-netField_t	entityStateFields[] = 
+#ifdef CLASSIC
+// Predefined change-bit-vectors extracted from quake3.exe 1.16n (protocol 43).
+// Each vector is 8 bytes covering up to 64 entity fields.
+#define PVECTOR_BITS  5
+#define PVECTOR_BYTES 8
+#define PVECTOR_NUM   ((1 << PVECTOR_BITS) - 1)
+
+static byte pVectors[PVECTOR_NUM][PVECTOR_BYTES] =
+{
+	{0x60, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x60, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0xe1, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00},
+	{0x60, 0x80, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00},
+	{0xe0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0xe0, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00},
+	{0x40, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x20, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x60, 0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00},
+	{0xed, 0x07, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00},
+	{0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0xed, 0x07, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00},
+	{0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0xe0, 0xc0, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00},
+	{0x60, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00},
+	{0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0xe1, 0x00, 0x00, 0x00, 0x04, 0x20, 0x00, 0x00},
+	{0xe1, 0x00, 0xc0, 0x01, 0x20, 0x20, 0x00, 0x00},
+	{0xe0, 0xc0, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00},
+	{0x60, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x40, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x60, 0xc0, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00},
+	{0x60, 0xc0, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00},
+	{0x60, 0x80, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00},
+	{0x60, 0x80, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00},
+	{0xe0, 0x80, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00},
+	{0x20, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	{0x60, 0x80, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00},
+};
+
+// Classic (proto 43) entity state fields -- in protocol 43 order.
+netField_t classicEntityStateFields[] =
+{
+{ NETF(eType), 8 },
+{ NETF(eFlags), 16 },
+{ NETF(pos.trType), 8 },
+{ NETF(pos.trTime), 32 },
+{ NETF(pos.trDuration), 32 },
+{ NETF(pos.trBase[0]), 0 },
+{ NETF(pos.trBase[1]), 0 },
+{ NETF(pos.trBase[2]), 0 },
+{ NETF(pos.trDelta[0]), 0 },
+{ NETF(pos.trDelta[1]), 0 },
+{ NETF(pos.trDelta[2]), 0 },
+{ NETF(apos.trType), 8 },
+{ NETF(apos.trTime), 32 },
+{ NETF(apos.trDuration), 32 },
+{ NETF(apos.trBase[0]), 0 },
+{ NETF(apos.trBase[1]), 0 },
+{ NETF(apos.trBase[2]), 0 },
+{ NETF(apos.trDelta[0]), 0 },
+{ NETF(apos.trDelta[1]), 0 },
+{ NETF(apos.trDelta[2]), 0 },
+{ NETF(time), 32 },
+{ NETF(time2), 32 },
+{ NETF(origin[0]), 0 },
+{ NETF(origin[1]), 0 },
+{ NETF(origin[2]), 0 },
+{ NETF(origin2[0]), 0 },
+{ NETF(origin2[1]), 0 },
+{ NETF(origin2[2]), 0 },
+{ NETF(angles[0]), 0 },
+{ NETF(angles[1]), 0 },
+{ NETF(angles[2]), 0 },
+{ NETF(angles2[0]), 0 },
+{ NETF(angles2[1]), 0 },
+{ NETF(angles2[2]), 0 },
+{ NETF(otherEntityNum), GENTITYNUM_BITS },
+{ NETF(otherEntityNum2), GENTITYNUM_BITS },
+{ NETF(groundEntityNum), GENTITYNUM_BITS },
+{ NETF(loopSound), 8 },
+{ NETF(constantLight), 32 },
+{ NETF(modelindex), 8 },
+{ NETF(modelindex2), 8 },
+{ NETF(frame), 16 },
+{ NETF(clientNum), 8 },
+{ NETF(solid), 24 },
+{ NETF(event), 10 },
+{ NETF(eventParm), 8 },
+{ NETF(powerups), 16 },
+{ NETF(weapon), 8 },
+{ NETF(legsAnim), 8 },
+{ NETF(torsoAnim), 8 },
+};
+
+// Classic (proto 43) player state fields.
+#define PSF(x) #x,(size_t)&((playerState_t*)0)->x
+netField_t classicPlayerStateFields[] =
+{
+{ PSF(commandTime), 32 },
+{ PSF(pm_type), 8 },
+{ PSF(bobCycle), 8 },
+{ PSF(pm_flags), 16 },
+{ PSF(pm_time), -16 },
+{ PSF(origin[0]), 0 },
+{ PSF(origin[1]), 0 },
+{ PSF(origin[2]), 0 },
+{ PSF(velocity[0]), 0 },
+{ PSF(velocity[1]), 0 },
+{ PSF(velocity[2]), 0 },
+{ PSF(weaponTime), -16 },
+{ PSF(gravity), 16 },
+{ PSF(speed), 16 },
+{ PSF(delta_angles[0]), 16 },
+{ PSF(delta_angles[1]), 16 },
+{ PSF(delta_angles[2]), 16 },
+{ PSF(groundEntityNum), GENTITYNUM_BITS },
+{ PSF(legsTimer), 8 },
+{ PSF(torsoTimer), 12 },
+{ PSF(legsAnim), 8 },
+{ PSF(torsoAnim), 8 },
+{ PSF(movementDir), 4 },
+{ PSF(eFlags), 16 },
+{ PSF(eventSequence), 16 },
+{ PSF(events[0]), 8 },
+{ PSF(events[1]), 8 },
+{ PSF(eventParms[0]), 8 },
+{ PSF(eventParms[1]), 8 },
+{ PSF(externalEvent), 8 },
+{ PSF(externalEventParm), 8 },
+{ PSF(clientNum), 8 },
+{ PSF(weapon), 5 },
+{ PSF(weaponstate), 4 },
+{ PSF(viewangles[0]), 0 },
+{ PSF(viewangles[1]), 0 },
+{ PSF(viewangles[2]), 0 },
+{ PSF(viewheight), -8 },
+{ PSF(damageEvent), 8 },
+{ PSF(damageYaw), 8 },
+{ PSF(damagePitch), 8 },
+{ PSF(damageCount), 8 },
+{ PSF(grapplePoint[0]), 0 },
+{ PSF(grapplePoint[1]), 0 },
+{ PSF(grapplePoint[2]), 0 },
+};
+#undef PSF
+#endif // CLASSIC
+
+netField_t	entityStateFields[] =
 {
 { NETF(pos.trTime), 32 },
 { NETF(pos.trBase[0]), 0 },
@@ -813,22 +1131,38 @@ If force is not set, then nothing at all will be generated if the entity is
 identical, under the assumption that the in-order delta code will catch it.
 ==================
 */
-void MSG_WriteDeltaEntity( msg_t *msg, struct entityState_s *from, struct entityState_s *to, 
+void MSG_WriteDeltaEntity( msg_t *msg, struct entityState_s *from, struct entityState_s *to,
 						   qboolean force ) {
 	int			i, lc;
 	int			numFields;
 	netField_t	*field;
+	netField_t	*fields;
 	int			trunc;
 	float		fullFloat;
 	int			*fromF, *toF;
+#ifdef CLASSIC
+	byte		vector[PVECTOR_BYTES];
+	int			vectorIndex = -1;
 
+	if(msg->compat) {
+		fields = classicEntityStateFields;
+		numFields = ARRAY_LEN( classicEntityStateFields );
+	} else {
+		fields = entityStateFields;
+		numFields = ARRAY_LEN( entityStateFields );
+	}
+	field = fields;
+#else
 	numFields = ARRAY_LEN( entityStateFields );
+	fields = entityStateFields;
+	field = entityStateFields;
+#endif
 
 	// all fields should be 32 bits to avoid any compiler packing issues
 	// the "number" field is not part of the field list
-	// if this assert fails, someone added a field to the entityState_t
-	// struct without updating the message fields
+#ifndef CLASSIC
 	assert( numFields + 1 == sizeof( *from )/4 );
+#endif
 
 	// a NULL to is a delta remove message
 	if ( to == NULL ) {
@@ -844,17 +1178,32 @@ void MSG_WriteDeltaEntity( msg_t *msg, struct entityState_s *from, struct entity
 		Com_Error (ERR_FATAL, "MSG_WriteDeltaEntity: Bad entity number: %i", to->number );
 	}
 
+#ifdef CLASSIC
+	if(msg->compat)
+		Com_Memset(vector, 0, sizeof(vector));
+#endif
+
 	lc = 0;
-	// build the change vector as bytes so it is endien independent
-	for ( i = 0, field = entityStateFields ; i < numFields ; i++, field++ ) {
-		fromF = (int *)( (byte *)from + field->offset );
-		toF = (int *)( (byte *)to + field->offset );
+	// build the change vector as bytes so it is endian independent
+	for ( i = 0 ; i < numFields ; i++ ) {
+		fromF = (int *)( (byte *)from + fields[i].offset );
+		toF   = (int *)( (byte *)to   + fields[i].offset );
 		if ( *fromF != *toF ) {
-			lc = i+1;
+#ifdef CLASSIC
+			if(msg->compat)
+				vector[i >> 3] |= 1 << (i & 0x07);
+			else
+#endif
+				lc = i+1;
 		}
 	}
 
-	if ( lc == 0 ) {
+#ifdef CLASSIC
+	if( (msg->compat && !((int*)vector)[0] && !((int*)vector)[1]) || (!msg->compat && !lc) )
+#else
+	if ( lc == 0 )
+#endif
+	{
 		// nothing at all changed
 		if ( !force ) {
 			return;		// nothing at all
@@ -870,49 +1219,99 @@ void MSG_WriteDeltaEntity( msg_t *msg, struct entityState_s *from, struct entity
 	MSG_WriteBits( msg, 0, 1 );			// not removed
 	MSG_WriteBits( msg, 1, 1 );			// we have a delta
 
-	MSG_WriteByte( msg, lc );	// # of changes
+#ifdef CLASSIC
+	if(msg->compat)
+	{
+		for (i = 0; i < PVECTOR_NUM; i++)
+		{
+			if( ((int*)vector)[0] == ((int*)pVectors[i])[0] &&
+			    ((int*)vector)[1] == ((int*)pVectors[i])[1] )
+			{
+				vectorIndex = i;
+				break;
+			}
+		}
+		MSG_WriteBits(msg, vectorIndex, PVECTOR_BITS);
+		if (vectorIndex < 0)
+		{
+			for ( i = 0 ; i + 8 <= numFields ; i += 8 )
+				MSG_WriteByte( msg, vector[i >> 3] );
+			if ( numFields & 7 )
+				MSG_WriteBits( msg, vector[i >> 3], numFields & 7 );
+		}
+	}
+	else
+#endif
+		MSG_WriteByte( msg, lc );	// # of changes
 
 	oldsize += numFields;
 
-	for ( i = 0, field = entityStateFields ; i < lc ; i++, field++ ) {
-		fromF = (int *)( (byte *)from + field->offset );
-		toF = (int *)( (byte *)to + field->offset );
-
-		if ( *fromF == *toF ) {
-			MSG_WriteBits( msg, 0, 1 );	// no change
-			continue;
-		}
-
-		MSG_WriteBits( msg, 1, 1 );	// changed
-
-		if ( field->bits == 0 ) {
-			// float
-			fullFloat = *(float *)toF;
-			trunc = (int)fullFloat;
-
-			if (fullFloat == 0.0f) {
-					MSG_WriteBits( msg, 0, 1 );
-					oldsize += FLOAT_INT_BITS;
-			} else {
-				MSG_WriteBits( msg, 1, 1 );
-				if ( trunc == fullFloat && trunc + FLOAT_INT_BIAS >= 0 && 
+#ifdef CLASSIC
+	if(msg->compat)
+	{
+		// Classic (proto 43): bit vector already encodes which fields changed.
+		// No per-field changed/unchanged bit. Write raw values for changed fields.
+		for ( i = 0 ; i < numFields ; i++ ) {
+			fromF = (int *)( (byte *)from + fields[i].offset );
+			toF   = (int *)( (byte *)to   + fields[i].offset );
+			if ( *fromF == *toF )
+				continue;	// not flagged in vector; no bits written
+			if ( fields[i].bits == 0 ) {
+				fullFloat = *(float *)toF;
+				trunc = (int)fullFloat;
+				if ( trunc == fullFloat && trunc + FLOAT_INT_BIAS >= 0 &&
 					trunc + FLOAT_INT_BIAS < ( 1 << FLOAT_INT_BITS ) ) {
-					// send as small integer
 					MSG_WriteBits( msg, 0, 1 );
 					MSG_WriteBits( msg, trunc + FLOAT_INT_BIAS, FLOAT_INT_BITS );
 				} else {
-					// send as full floating point value
 					MSG_WriteBits( msg, 1, 1 );
 					MSG_WriteBits( msg, *toF, 32 );
 				}
-			}
-		} else {
-			if (*toF == 0) {
-				MSG_WriteBits( msg, 0, 1 );
 			} else {
-				MSG_WriteBits( msg, 1, 1 );
-				// integer
-				MSG_WriteBits( msg, *toF, field->bits );
+				MSG_WriteBits( msg, *toF, fields[i].bits );
+			}
+		}
+	}
+	else
+#endif
+	{
+		// Modern path: per-field changed bit, then value.
+		for ( i = 0 ; i < lc ; i++ ) {
+			fromF = (int *)( (byte *)from + fields[i].offset );
+			toF   = (int *)( (byte *)to   + fields[i].offset );
+
+			if ( *fromF == *toF ) {
+				MSG_WriteBits( msg, 0, 1 );	// no change
+				continue;
+			}
+
+			MSG_WriteBits( msg, 1, 1 );	// changed
+
+			if ( fields[i].bits == 0 ) {
+				fullFloat = *(float *)toF;
+				trunc = (int)fullFloat;
+
+				if (fullFloat == 0.0f) {
+					MSG_WriteBits( msg, 0, 1 );
+					oldsize += FLOAT_INT_BITS;
+				} else {
+					MSG_WriteBits( msg, 1, 1 );
+					if ( trunc == fullFloat && trunc + FLOAT_INT_BIAS >= 0 &&
+						trunc + FLOAT_INT_BIAS < ( 1 << FLOAT_INT_BITS ) ) {
+						MSG_WriteBits( msg, 0, 1 );
+						MSG_WriteBits( msg, trunc + FLOAT_INT_BIAS, FLOAT_INT_BITS );
+					} else {
+						MSG_WriteBits( msg, 1, 1 );
+						MSG_WriteBits( msg, *toF, 32 );
+					}
+				}
+			} else {
+				if (*toF == 0) {
+					MSG_WriteBits( msg, 0, 1 );
+				} else {
+					MSG_WriteBits( msg, 1, 1 );
+					MSG_WriteBits( msg, *toF, fields[i].bits );
+				}
 			}
 		}
 	}
@@ -930,15 +1329,20 @@ If the delta removes the entity, entityState_t->number will be set to MAX_GENTIT
 Can go from either a baseline or a previous packet_entity
 ==================
 */
-void MSG_ReadDeltaEntity( msg_t *msg, entityState_t *from, entityState_t *to, 
+void MSG_ReadDeltaEntity( msg_t *msg, entityState_t *from, entityState_t *to,
 						 int number) {
 	int			i, lc;
 	int			numFields;
-	netField_t	*field;
+	netField_t	*fields;
 	int			*fromF, *toF;
 	int			print;
 	int			trunc;
 	int			startBit, endBit;
+#ifdef CLASSIC
+	int			vectorIndex = 0;
+	byte		vector_space[PVECTOR_BYTES];
+	byte		*vector = vector_space;
+#endif
 
 	if ( number < 0 || number >= MAX_GENTITIES) {
 		Com_Error( ERR_DROP, "Bad delta entity number: %i", number );
@@ -952,7 +1356,7 @@ void MSG_ReadDeltaEntity( msg_t *msg, entityState_t *from, entityState_t *to,
 
 	// check for a remove
 	if ( MSG_ReadBits( msg, 1 ) == 1 ) {
-		Com_Memset( to, 0, sizeof( *to ) );	
+		Com_Memset( to, 0, sizeof( *to ) );
 		to->number = MAX_GENTITIES - 1;
 		if ( cl_shownet && ( cl_shownet->integer >= 2 || cl_shownet->integer == -1 ) ) {
 			Com_Printf( "%3i: #%-3i remove\n", msg->readcount, number );
@@ -967,15 +1371,31 @@ void MSG_ReadDeltaEntity( msg_t *msg, entityState_t *from, entityState_t *to,
 		return;
 	}
 
+#ifdef CLASSIC
+	if(msg->compat) {
+		fields = classicEntityStateFields;
+		numFields = ARRAY_LEN( classicEntityStateFields );
+	} else {
+		fields = entityStateFields;
+		numFields = ARRAY_LEN( entityStateFields );
+	}
+#else
+	fields = entityStateFields;
 	numFields = ARRAY_LEN( entityStateFields );
-	lc = MSG_ReadByte(msg);
+#endif
 
-	if ( lc > numFields || lc < 0 ) {
-		Com_Error( ERR_DROP, "invalid entityState field count" );
+#ifdef CLASSIC
+	if(!msg->compat)
+#endif
+	{
+		lc = MSG_ReadByte(msg);
+		if ( lc > numFields || lc < 0 ) {
+			Com_Error( ERR_DROP, "invalid entityState field count" );
+		}
 	}
 
 	// shownet 2/3 will interleave with other printed info, -1 will
-	// just print the delta records`
+	// just print the delta records
 	if ( cl_shownet && ( cl_shownet->integer >= 2 || cl_shownet->integer == -1 ) ) {
 		print = 1;
 		Com_Printf( "%3i: #%-3i ", msg->readcount, to->number );
@@ -985,55 +1405,90 @@ void MSG_ReadDeltaEntity( msg_t *msg, entityState_t *from, entityState_t *to,
 
 	to->number = number;
 
-	for ( i = 0, field = entityStateFields ; i < lc ; i++, field++ ) {
-		fromF = (int *)( (byte *)from + field->offset );
-		toF = (int *)( (byte *)to + field->offset );
-
-		if ( ! MSG_ReadBits( msg, 1 ) ) {
-			// no change
-			*toF = *fromF;
+#ifdef CLASSIC
+	if(msg->compat)
+	{
+		// Classic (proto 43): read predefined vector index, then per-field bits.
+		vectorIndex = MSG_ReadBits( msg, PVECTOR_BITS );
+		if (print) {
+			if (vectorIndex == PVECTOR_NUM)
+				Com_Printf( "<uc> " );
+			else
+				Com_Printf( "<%2d> ", vectorIndex );
+		}
+		if (vectorIndex == PVECTOR_NUM) {
+			for (i = 0; i + 8 < numFields; i += 8)
+				vector[i >> 3] = MSG_ReadByte(msg);
+			if (numFields & 7)
+				vector[i>>3] = MSG_ReadBits( msg, numFields & 7 );
 		} else {
-			if ( field->bits == 0 ) {
-				// float
+			vector = pVectors[vectorIndex];
+		}
+
+		for ( i = 0 ; i < numFields ; i++ ) {
+			fromF = (int *)( (byte *)from + fields[i].offset );
+			toF   = (int *)( (byte *)to   + fields[i].offset );
+			if ( !(vector[i >> 3] & (1 << (i & 7))) ) {
+				*toF = *fromF;	// unchanged
+				continue;
+			}
+			if ( fields[i].bits == 0 ) {
+				// float: compact int or full float
 				if ( MSG_ReadBits( msg, 1 ) == 0 ) {
-						*(float *)toF = 0.0f; 
+					trunc = MSG_ReadBits( msg, FLOAT_INT_BITS );
+					trunc -= FLOAT_INT_BIAS;
+					*(float *)toF = trunc;
+					if ( print ) Com_Printf( "%s:%i ", fields[i].name, trunc );
 				} else {
-					if ( MSG_ReadBits( msg, 1 ) == 0 ) {
-						// integral float
-						trunc = MSG_ReadBits( msg, FLOAT_INT_BITS );
-						// bias to allow equal parts positive and negative
-						trunc -= FLOAT_INT_BIAS;
-						*(float *)toF = trunc; 
-						if ( print ) {
-							Com_Printf( "%s:%i ", field->name, trunc );
-						}
-					} else {
-						// full floating point value
-						*toF = MSG_ReadBits( msg, 32 );
-						if ( print ) {
-							Com_Printf( "%s:%f ", field->name, *(float *)toF );
-						}
-					}
+					*toF = MSG_ReadBits( msg, 32 );
+					if ( print ) Com_Printf( "%s:%f ", fields[i].name, *(float *)toF );
 				}
 			} else {
-				if ( MSG_ReadBits( msg, 1 ) == 0 ) {
-					*toF = 0;
+				*toF = MSG_ReadBits( msg, fields[i].bits );
+				if ( print ) Com_Printf( "%s:%i ", fields[i].name, *toF );
+			}
+		}
+	}
+	else
+#endif
+	{
+		// Modern path: per-field changed bit.
+		for ( i = 0 ; i < lc ; i++ ) {
+			fromF = (int *)( (byte *)from + fields[i].offset );
+			toF   = (int *)( (byte *)to   + fields[i].offset );
+
+			if ( ! MSG_ReadBits( msg, 1 ) ) {
+				*toF = *fromF;
+			} else {
+				if ( fields[i].bits == 0 ) {
+					if ( MSG_ReadBits( msg, 1 ) == 0 ) {
+						*(float *)toF = 0.0f;
+					} else {
+						if ( MSG_ReadBits( msg, 1 ) == 0 ) {
+							trunc = MSG_ReadBits( msg, FLOAT_INT_BITS );
+							trunc -= FLOAT_INT_BIAS;
+							*(float *)toF = trunc;
+							if ( print ) Com_Printf( "%s:%i ", fields[i].name, trunc );
+						} else {
+							*toF = MSG_ReadBits( msg, 32 );
+							if ( print ) Com_Printf( "%s:%f ", fields[i].name, *(float *)toF );
+						}
+					}
 				} else {
-					// integer
-					*toF = MSG_ReadBits( msg, field->bits );
-					if ( print ) {
-						Com_Printf( "%s:%i ", field->name, *toF );
+					if ( MSG_ReadBits( msg, 1 ) == 0 ) {
+						*toF = 0;
+					} else {
+						*toF = MSG_ReadBits( msg, fields[i].bits );
+						if ( print ) Com_Printf( "%s:%i ", fields[i].name, *toF );
 					}
 				}
 			}
-//			pcount[i]++;
 		}
-	}
-	for ( i = lc, field = &entityStateFields[lc] ; i < numFields ; i++, field++ ) {
-		fromF = (int *)( (byte *)from + field->offset );
-		toF = (int *)( (byte *)to + field->offset );
-		// no change
-		*toF = *fromF;
+		for ( i = lc ; i < numFields ; i++ ) {
+			fromF = (int *)( (byte *)from + fields[i].offset );
+			toF   = (int *)( (byte *)to   + fields[i].offset );
+			*toF = *fromF;
+		}
 	}
 
 	if ( print ) {
@@ -1042,7 +1497,7 @@ void MSG_ReadDeltaEntity( msg_t *msg, entityState_t *from, entityState_t *to,
 		} else {
 			endBit = ( msg->readcount - 1 ) * 8 + msg->bit - GENTITYNUM_BITS;
 		}
-		Com_Printf( " (%i bits)\n", endBit - startBit  );
+		Com_Printf( " (%i bits)\n", endBit - startBit );
 	}
 }
 
@@ -1124,7 +1579,7 @@ void MSG_WriteDeltaPlayerstate( msg_t *msg, struct playerState_s *from, struct p
 	int				ammobits;
 	int				powerupbits;
 	int				numFields;
-	netField_t		*field;
+	netField_t		*fields;
 	int				*fromF, *toF;
 	float			fullFloat;
 	int				trunc, lc;
@@ -1134,51 +1589,71 @@ void MSG_WriteDeltaPlayerstate( msg_t *msg, struct playerState_s *from, struct p
 		Com_Memset (&dummy, 0, sizeof(dummy));
 	}
 
+#ifdef CLASSIC
+	if(msg->compat) {
+		fields = classicPlayerStateFields;
+		numFields = ARRAY_LEN( classicPlayerStateFields );
+	} else {
+		fields = playerStateFields;
+		numFields = ARRAY_LEN( playerStateFields );
+	}
+#else
+	fields = playerStateFields;
 	numFields = ARRAY_LEN( playerStateFields );
+#endif
 
 	lc = 0;
-	for ( i = 0, field = playerStateFields ; i < numFields ; i++, field++ ) {
-		fromF = (int *)( (byte *)from + field->offset );
-		toF = (int *)( (byte *)to + field->offset );
-		if ( *fromF != *toF ) {
-			lc = i+1;
+#ifdef CLASSIC
+	if(!msg->compat)
+#endif
+	{
+		for ( i = 0 ; i < numFields ; i++ ) {
+			fromF = (int *)( (byte *)from + fields[i].offset );
+			toF   = (int *)( (byte *)to   + fields[i].offset );
+			if ( *fromF != *toF ) {
+				lc = i+1;
+			}
 		}
+		MSG_WriteByte( msg, lc );	// # of changes
 	}
-
-	MSG_WriteByte( msg, lc );	// # of changes
 
 	oldsize += numFields - lc;
 
-	for ( i = 0, field = playerStateFields ; i < lc ; i++, field++ ) {
-		fromF = (int *)( (byte *)from + field->offset );
-		toF = (int *)( (byte *)to + field->offset );
+	for ( i = 0 ; i < numFields ; i++ ) {
+		fromF = (int *)( (byte *)from + fields[i].offset );
+		toF   = (int *)( (byte *)to   + fields[i].offset );
 
-		if ( *fromF == *toF ) {
-			MSG_WriteBits( msg, 0, 1 );	// no change
-			continue;
+#ifdef CLASSIC
+		if(msg->compat) {
+			if ( *fromF == *toF ) {
+				MSG_WriteBits( msg, 0, 1 );	// no change
+				continue;
+			}
+			MSG_WriteBits( msg, 1, 1 );	// changed
+		} else
+#endif
+		{
+			if ( i >= lc ) break;
+			if ( *fromF == *toF ) {
+				MSG_WriteBits( msg, 0, 1 );	// no change
+				continue;
+			}
+			MSG_WriteBits( msg, 1, 1 );	// changed
 		}
 
-		MSG_WriteBits( msg, 1, 1 );	// changed
-//		pcount[i]++;
-
-		if ( field->bits == 0 ) {
-			// float
+		if ( fields[i].bits == 0 ) {
 			fullFloat = *(float *)toF;
 			trunc = (int)fullFloat;
-
-			if ( trunc == fullFloat && trunc + FLOAT_INT_BIAS >= 0 && 
+			if ( trunc == fullFloat && trunc + FLOAT_INT_BIAS >= 0 &&
 				trunc + FLOAT_INT_BIAS < ( 1 << FLOAT_INT_BITS ) ) {
-				// send as small integer
 				MSG_WriteBits( msg, 0, 1 );
 				MSG_WriteBits( msg, trunc + FLOAT_INT_BIAS, FLOAT_INT_BITS );
 			} else {
-				// send as full floating point value
 				MSG_WriteBits( msg, 1, 1 );
 				MSG_WriteBits( msg, *toF, 32 );
 			}
 		} else {
-			// integer
-			MSG_WriteBits( msg, *toF, field->bits );
+			MSG_WriteBits( msg, *toF, fields[i].bits );
 		}
 	}
 
@@ -1211,11 +1686,19 @@ void MSG_WriteDeltaPlayerstate( msg_t *msg, struct playerState_s *from, struct p
 		}
 	}
 
-	if (!statsbits && !persistantbits && !ammobits && !powerupbits) {
+#ifdef CLASSIC
+	if(!msg->compat && !statsbits && !persistantbits && !ammobits && !powerupbits)
+#else
+	if (!statsbits && !persistantbits && !ammobits && !powerupbits)
+#endif
+	{
 		MSG_WriteBits( msg, 0, 1 );	// no change
 		oldsize += 4;
 		return;
 	}
+#ifdef CLASSIC
+	if(!msg->compat)
+#endif
 	MSG_WriteBits( msg, 1, 1 );	// changed
 
 	if ( statsbits ) {
@@ -1271,7 +1754,7 @@ MSG_ReadDeltaPlayerstate
 void MSG_ReadDeltaPlayerstate (msg_t *msg, playerState_t *from, playerState_t *to ) {
 	int			i, lc;
 	int			bits;
-	netField_t	*field;
+	netField_t	*fields;
 	int			numFields;
 	int			startBit, endBit;
 	int			print;
@@ -1300,58 +1783,66 @@ void MSG_ReadDeltaPlayerstate (msg_t *msg, playerState_t *from, playerState_t *t
 		print = 0;
 	}
 
+#ifdef CLASSIC
+	if(msg->compat) {
+		fields = classicPlayerStateFields;
+		numFields = ARRAY_LEN( classicPlayerStateFields );
+		lc = numFields;	// compat: all fields present
+	} else {
+		fields = playerStateFields;
+		numFields = ARRAY_LEN( playerStateFields );
+		lc = MSG_ReadByte(msg);
+		if ( lc > numFields || lc < 0 )
+			Com_Error( ERR_DROP, "invalid playerState field count" );
+	}
+#else
+	fields = playerStateFields;
 	numFields = ARRAY_LEN( playerStateFields );
 	lc = MSG_ReadByte(msg);
-
 	if ( lc > numFields || lc < 0 ) {
 		Com_Error( ERR_DROP, "invalid playerState field count" );
 	}
+#endif
 
-	for ( i = 0, field = playerStateFields ; i < lc ; i++, field++ ) {
-		fromF = (int *)( (byte *)from + field->offset );
-		toF = (int *)( (byte *)to + field->offset );
+	for ( i = 0 ; i < lc ; i++ ) {
+		fromF = (int *)( (byte *)from + fields[i].offset );
+		toF   = (int *)( (byte *)to   + fields[i].offset );
 
 		if ( ! MSG_ReadBits( msg, 1 ) ) {
-			// no change
 			*toF = *fromF;
 		} else {
-			if ( field->bits == 0 ) {
-				// float
+			if ( fields[i].bits == 0 ) {
 				if ( MSG_ReadBits( msg, 1 ) == 0 ) {
-					// integral float
 					trunc = MSG_ReadBits( msg, FLOAT_INT_BITS );
-					// bias to allow equal parts positive and negative
 					trunc -= FLOAT_INT_BIAS;
-					*(float *)toF = trunc; 
-					if ( print ) {
-						Com_Printf( "%s:%i ", field->name, trunc );
-					}
+					*(float *)toF = trunc;
+					if ( print ) Com_Printf( "%s:%i ", fields[i].name, trunc );
 				} else {
-					// full floating point value
 					*toF = MSG_ReadBits( msg, 32 );
-					if ( print ) {
-						Com_Printf( "%s:%f ", field->name, *(float *)toF );
-					}
+					if ( print ) Com_Printf( "%s:%f ", fields[i].name, *(float *)toF );
 				}
 			} else {
-				// integer
-				*toF = MSG_ReadBits( msg, field->bits );
-				if ( print ) {
-					Com_Printf( "%s:%i ", field->name, *toF );
-				}
+				*toF = MSG_ReadBits( msg, fields[i].bits );
+				if ( print ) Com_Printf( "%s:%i ", fields[i].name, *toF );
 			}
 		}
 	}
-	for ( i=lc,field = &playerStateFields[lc];i<numFields; i++, field++) {
-		fromF = (int *)( (byte *)from + field->offset );
-		toF = (int *)( (byte *)to + field->offset );
-		// no change
+#ifdef CLASSIC
+	if(!msg->compat)
+#endif
+	for ( i = lc ; i < numFields ; i++ ) {
+		fromF = (int *)( (byte *)from + fields[i].offset );
+		toF   = (int *)( (byte *)to   + fields[i].offset );
 		*toF = *fromF;
 	}
 
 
 	// read the arrays
+#ifdef CLASSIC
+	if (msg->compat || MSG_ReadBits( msg, 1 ) ) {
+#else
 	if (MSG_ReadBits( msg, 1 ) ) {
+#endif
 		// parse stats
 		if ( MSG_ReadBits( msg, 1 ) ) {
 			LOG("PS_STATS");

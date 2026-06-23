@@ -157,6 +157,10 @@ static void SV_WriteSnapshotToClient( client_t *client, msg_t *msg ) {
 	// NOTE, MRE: now sent at the start of every message from server to client
 	// let the client know which reliable clientCommands we have received
 	//MSG_WriteLong( msg, client->lastClientCommand );
+#ifdef CLASSIC
+	if(msg->compat)
+		MSG_WriteLong( msg, client->lastClientCommand );
+#endif
 
 	// send over the current server time so the client can drift
 	// its view of time to try to match
@@ -586,6 +590,46 @@ void SV_SendMessageToClient(msg_t *msg, client_t *client)
 }
 
 
+#ifdef CLASSIC
+/*
+===================
+SV_WriteDummySnapshotToClient
+
+Compat (proto 43): send a minimal snapshot during downloads so the client
+can update reliableAcknowledge without receiving full entity/playerstate data.
+===================
+*/
+void SV_WriteDummySnapshotToClient( client_t *client, msg_t *msg ) {
+	int snapFlags;
+	playerState_t ps;
+
+	MSG_WriteByte(msg, svc_snapshot);
+	if(msg->compat)
+		MSG_WriteLong(msg, client->lastClientCommand);
+
+	if(client->oldServerTime)
+		MSG_WriteLong(msg, sv.time + client->oldServerTime);
+	else
+		MSG_WriteLong(msg, sv.time);
+
+	MSG_WriteByte(msg, 0); // lastframe = 0
+
+	snapFlags = svs.snapFlagServerBit;
+	if(client->rateDelayed) snapFlags |= SNAPFLAG_RATE_DELAYED;
+	if(client->state != CS_ACTIVE) snapFlags |= SNAPFLAG_NOT_ACTIVE;
+	MSG_WriteByte(msg, snapFlags);
+
+	MSG_WriteByte(msg, 0); // areabytes = 0
+	MSG_WriteData(msg, NULL, 0);
+
+	Com_Memset(&ps, 0, sizeof(ps));
+	MSG_WriteDeltaPlayerstate(msg, &ps, &ps);
+
+	MSG_WriteBits(msg, (MAX_GENTITIES-1), GENTITYNUM_BITS);
+}
+#endif
+
+
 /*
 =======================
 SV_SendClientSnapshot
@@ -607,11 +651,22 @@ void SV_SendClientSnapshot( client_t *client ) {
 		return;
 	}
 
+#ifdef CLASSIC
+	if(client->compat)
+		MSG_InitOOB(&msg, msg_buf, sizeof(msg_buf));
+	else
+#endif
 	MSG_Init (&msg, msg_buf, sizeof(msg_buf));
+#ifdef CLASSIC
+	msg.compat = client->compat;
+#endif
 	msg.allowoverflow = qtrue;
 
 	// NOTE, MRE: all server->client messages now acknowledge
 	// let the client know which reliable clientCommands we have received
+#ifdef CLASSIC
+	if(!client->compat)
+#endif
 	MSG_WriteLong( &msg, client->lastClientCommand );
 
 	// (re)send any reliable server commands

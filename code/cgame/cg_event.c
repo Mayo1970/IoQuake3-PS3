@@ -1012,6 +1012,16 @@ void CG_EntityEvent( centity_t *cent, vec3_t position ) {
 		CG_Bullet( es->pos.trBase, es->otherEntityNum, dir, qtrue, es->eventParm );
 		break;
 
+#ifdef CLASSIC
+	case EV_BULLET:
+		DEBUGNAME("EV_BULLET");
+		{
+			vec3_t zeroDir = { 0, 0, 1 };
+			CG_Bullet( es->pos.trBase, es->otherEntityNum, zeroDir, qfalse, ENTITYNUM_WORLD );
+		}
+		break;
+#endif
+
 	case EV_SHOTGUN:
 		DEBUGNAME("EV_SHOTGUN");
 		CG_ShotgunFire( es );

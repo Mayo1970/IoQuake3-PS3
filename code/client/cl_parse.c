@@ -211,6 +211,10 @@ void CL_ParseSnapshot( msg_t *msg ) {
 	// get the reliable sequence acknowledge number
 	// NOTE: now sent with all server to client messages
 	//clc.reliableAcknowledge = MSG_ReadLong( msg );
+#ifdef CLASSIC
+	if(msg->compat)
+		clc.reliableAcknowledge = MSG_ReadLong( msg );
+#endif
 
 	// read in the new snapshot to a temporary buffer
 	// we will only copy to cl.snap if it is valid
@@ -486,7 +490,11 @@ void CL_ParseGamestate( msg_t *msg ) {
 		if ( cmd == svc_EOF ) {
 			break;
 		}
-		
+#ifdef CLASSIC
+		if ( msg->compat && cmd <= 0 ) {
+			break;
+		}
+#endif
 		if ( cmd == svc_configstring ) {
 			int		len;
 
@@ -518,8 +526,14 @@ void CL_ParseGamestate( msg_t *msg ) {
 		}
 	}
 
+#ifdef CLASSIC
+	if(!msg->compat)
+#endif
 	clc.clientNum = MSG_ReadLong(msg);
 	// read the checksum feed
+#ifdef CLASSIC
+	if(!clc.demoplaying || !msg->compat)
+#endif
 	clc.checksumFeed = MSG_ReadLong( msg );
 
 	// save old gamedir
@@ -864,26 +878,46 @@ void CL_ParseServerMessage( msg_t *msg ) {
 		Com_Printf ("------------------\n");
 	}
 
+#ifdef CLASSIC
+	if(!msg->compat) {
+#endif
 	MSG_Bitstream(msg);
 
 	// get the reliable sequence acknowledge number
 	clc.reliableAcknowledge = MSG_ReadLong( msg );
-	// 
+	//
 	if ( clc.reliableAcknowledge < clc.reliableSequence - MAX_RELIABLE_COMMANDS ) {
 		clc.reliableAcknowledge = clc.reliableSequence;
 	}
+#ifdef CLASSIC
+	}
+#endif
 
 	//
 	// parse the message
 	//
 	while ( 1 ) {
 		if ( msg->readcount > msg->cursize ) {
+#ifdef CLASSIC
+			if(msg->compat) {
+				/* Proto-43 messages don't use svc_EOF; the loop overruns by
+				 * one byte before the cmd <= 0 break fires.  Non-fatal. */
+				Com_Printf("WARNING: CL_ParseServerMessage: read past end of server message\n");
+				break;
+			}
+#endif
 			Com_Error (ERR_DROP,"CL_ParseServerMessage: read past end of server message");
 			break;
 		}
 
 		cmd = MSG_ReadByte( msg );
 
+#ifdef CLASSIC
+		if(msg->compat && cmd <= 0) {
+			SHOWNET( msg, "END OF MESSAGE" );
+			break;
+		}
+#endif
 		if (cmd == svc_EOF) {
 			SHOWNET( msg, "END OF MESSAGE" );
 			break;

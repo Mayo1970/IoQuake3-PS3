@@ -413,11 +413,7 @@ void ps3gl_apply_states(void)
     }
 
     if (d & PS3GL_DIRTY_VIEWPORT) {
-        /* Use signed values for viewport -- origin can be negative from
-         * sub-viewport rendering (e.g. Player Setup 3D model preview).
-         * RSX scale/offset handle the mapping; we clamp the hardware
-         * viewport rect to screen bounds while preserving the correct
-         * scale/offset for the full (possibly off-screen) viewport. */
+        /* Viewport origin can be negative (sub-viewport); clamp rect to screen bounds. */
         int vx = ps3gl.rs.vp_x;
         int vy = ps3gl.rs.vp_y;
         int vw = ps3gl.rs.vp_w;

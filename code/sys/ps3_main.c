@@ -29,9 +29,13 @@
 extern refexport_t *GetRefAPI(int apiVersion, refimport_t *rimp);
 extern void Com_WriteConfiguration(void);
 
+#ifdef CLASSIC
+#include "zpack_classic_embedded.h"
+#else
 #include "pak9_ps3_embedded.h"
 #ifdef STANDALONETA
 #include "pak4_ps3_embedded.h"
+#endif
 #endif
 
 SYS_PROCESS_PARAM(1001, 0x100000);
@@ -143,6 +147,7 @@ static unsigned int PS3_FileChecksum(const char *path)
     return csum;
 }
 
+#if !defined(STANDALONEOA) && !defined(CLASSIC)
 static void PS3_ExtractBundledPak9(void)
 {
     char destpath[256];
@@ -166,6 +171,7 @@ static void PS3_ExtractBundledPak9(void)
         printf("[ps3] WARNING: pak9-ps3.pk3 write incomplete (%u/%u)\n",
                (unsigned)written, pak9_ps3_data_len);
 }
+#endif /* !STANDALONEOA && !CLASSIC */
 
 #ifdef STANDALONETA
 static void PS3_ExtractBundledPak4(void)
@@ -193,6 +199,32 @@ static void PS3_ExtractBundledPak4(void)
 }
 #endif
 
+#ifdef CLASSIC
+static void PS3_ExtractBundledZpackClassic(void)
+{
+    char destpath[256];
+    snprintf(destpath, sizeof(destpath), "%s/baseq3/zpack-classic.pk3", ps3_base_path);
+
+    if (PS3_FileChecksum(destpath) == zpack_classic_data_csum) {
+        PS3LOG("zpack-classic.pk3 up to date, skipping");
+        return;
+    }
+
+    FILE *f = fopen(destpath, "wb");
+    if (!f) {
+        printf("[ps3] WARNING: could not write %s\n", destpath);
+        return;
+    }
+    size_t written = fwrite(zpack_classic_data, 1, zpack_classic_data_len, f);
+    fclose(f);
+    if (written == zpack_classic_data_len)
+        printf("[ps3] Extracted zpack-classic.pk3 -> baseq3\n");
+    else
+        printf("[ps3] WARNING: zpack-classic.pk3 write incomplete (%u/%u)\n",
+               (unsigned)written, zpack_classic_data_len);
+}
+#endif
+
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -216,11 +248,14 @@ int main(int argc, char *argv[])
     }
     PS3LOG("Filesystem ready");
 
-#ifndef STANDALONEOA
+#if !defined(STANDALONEOA) && !defined(CLASSIC)
     PS3_ExtractBundledPak9();
 #endif
 #ifdef STANDALONETA
     PS3_ExtractBundledPak4();
+#endif
+#ifdef CLASSIC
+    PS3_ExtractBundledZpackClassic();
 #endif
 
     PS3_Input_Init();

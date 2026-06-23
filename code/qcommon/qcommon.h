@@ -41,6 +41,9 @@ typedef struct {
 	int		cursize;
 	int		readcount;
 	int		bit;				// for bitwise reads and writes
+#ifdef LEGACY_PROTOCOL
+	qboolean	compat;			// true when speaking classic/legacy wire format
+#endif
 } msg_t;
 
 void MSG_Init (msg_t *buf, byte *data, int length);
@@ -250,8 +253,12 @@ PROTOCOL
 ==============================================================
 */
 
+#ifdef CLASSIC
+#define	PROTOCOL_VERSION	43
+#else
 #define	PROTOCOL_VERSION	71
 // 1.31 - 67
+#endif
 
 // maintain a list of compatible protocols for demo playing
 // NOTE: that stuff only works with two digits protocols
@@ -269,6 +276,9 @@ extern int demo_protocols[];
   #ifdef STANDALONEOA
     #define AUTHORIZE_SERVER_NAME		"dpmaster.deathmask.net"
     #define PROTOCOL_LEGACY_VERSION	71
+  #elif defined(CLASSIC)
+    /* Primary protocol IS 43; legacy version matches so clc.compat fires automatically. */
+    #define PROTOCOL_LEGACY_VERSION	43
   #endif
   #ifndef AUTHORIZE_SERVER_NAME
     #define	AUTHORIZE_SERVER_NAME	"authorize.quake3arena.com"
@@ -664,7 +674,8 @@ long		FS_FOpenFileRead( const char *qpath, fileHandle_t *file, qboolean uniqueFI
 // It is generally safe to always set uniqueFILE to true, because the majority of
 // file IO goes through FS_ReadFile, which Does The Right Thing already.
 
-int		FS_FileIsInPAK(const char *filename, int *pChecksum );
+int		FS_FileIsInPAK(const char *filename, qboolean compat, int *pChecksum );
+int		FS_FileIsInPAKNonCompat(const char *filename, int *pChecksum );
 // returns 1 if a file is in the PAK file, otherwise -1
 
 int		FS_Write( const void *buffer, int len, fileHandle_t f );
@@ -720,7 +731,7 @@ const char *FS_LoadedPakPureChecksums( void );
 
 const char *FS_ReferencedPakNames( void );
 const char *FS_ReferencedPakChecksums( void );
-const char *FS_ReferencedPakPureChecksums( void );
+const char *FS_ReferencedPakPureChecksums( qboolean compat );
 // Returns a space separated string containing the checksums of all loaded 
 // AND referenced pk3 files. Servers with sv_pure set will get this string 
 // back from clients for pure validation 

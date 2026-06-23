@@ -13,7 +13,9 @@
 #   make TA=1 pkg     - Build Team Arena PKG
 #   make oa           - Build Open Arena ELF
 #   make OA=1 pkg     - Build Open Arena PKG
-#   make all-flavors  - Build all three PKGs in sequence
+#   make classic      - Build CLASSIC (proto-43 Dreamcast crossplay) ELF
+#   make CLASSIC=1 pkg- Build CLASSIC PKG
+#   make all-flavors  - Build all three standard PKGs in sequence
 #   make clean        - Remove build artifacts for all three flavors
 #   make DEBUG=1      - Enable debug logging (any flavor)
 #
@@ -38,6 +40,9 @@ endif
 ifeq ($(MAKECMDGOALS),oa)
   OA := 1
 endif
+ifeq ($(MAKECMDGOALS),classic)
+  CLASSIC := 1
+endif
 
 ifeq ($(TA),1)
   FLAVOR        := ta
@@ -55,6 +60,14 @@ else ifeq ($(OA),1)
   BUILD         := build_oa
   DEFINES_EXTRA := -DSTANDALONEOA
   ICON0_SUBDIR  := oa
+else ifeq ($(CLASSIC),1)
+  FLAVOR        := classic
+  TITLE         := Quake 3 Classic
+  TITLE_ID      := IOQCPS301
+  TARGET        := ioquake3_classic_ps3
+  BUILD         := build_qc
+  DEFINES_EXTRA := -DCLASSIC -DLEGACY_PROTOCOL
+  ICON0_SUBDIR  := qc
 else
   FLAVOR        := q3
   TITLE         := ioQuake3
@@ -379,13 +392,15 @@ ASM_OBJS := $(patsubst %.S,$(BUILD)/%.o,$(PS3_ASM_SRCS))
 #---------------------------------------------------------------------------------
 # Phony targets
 #---------------------------------------------------------------------------------
-.PHONY: all ta oa all-flavors clean pkg self install prebuild
+.PHONY: all ta oa classic all-flavors clean pkg self install prebuild
 
 all: $(BUILD)/$(TARGET).elf
 
 ta: $(BUILD)/$(TARGET).elf
 
 oa: $(BUILD)/$(TARGET).elf
+
+classic: $(BUILD)/$(TARGET).elf
 
 #---------------------------------------------------------------------------------
 # Multi-flavor build
@@ -397,8 +412,10 @@ all-flavors:
 	$(MAKE) TA=1 pkg
 	@echo "=== Building Open Arena ==="
 	$(MAKE) OA=1 pkg
+	@echo "=== Building Quake 3 Classic ==="
+	$(MAKE) CLASSIC=1 pkg
 	@echo "=== All builds complete ==="
-	@ls -1 build/ioquake3_ps3.pkg build_ta/ioquake3_ta_ps3.pkg build_oa/ioquake3_oa_ps3.pkg 2>/dev/null || true
+	@ls -1 build/ioquake3_ps3.pkg build_ta/ioquake3_ta_ps3.pkg build_oa/ioquake3_oa_ps3.pkg build_qc/ioquake3_classic_ps3.pkg 2>/dev/null || true
 
 #---------------------------------------------------------------------------------
 # Prebuild: copy zlib headers next to unzip.h
@@ -441,9 +458,16 @@ $(BUILD)/pak4_ps3_embedded.h: fixes/missionpack/pak4-ps3.pk3
 	@echo "GEN $@"
 	@python3 -c "import sys; d=open(sys.argv[1],'rb').read(); n=sys.argv[2]; print('static const unsigned char '+n+'[] = {'+','.join(str(b) for b in d)+'};'); print('static const unsigned int '+n+'_len = '+str(len(d))+';'); print('static const unsigned int '+n+'_csum = '+str(sum(d))+'u;')" fixes/missionpack/pak4-ps3.pk3 pak4_ps3_data > $@
 
+$(BUILD)/zpack_classic_embedded.h: fixes/baseq3/zpack-classic.pk3
+	@mkdir -p $(dir $@)
+	@echo "GEN $@"
+	@python3 -c "import sys; d=open(sys.argv[1],'rb').read(); n=sys.argv[2]; print('static const unsigned char '+n+'[] = {'+','.join(str(b) for b in d)+'};'); print('static const unsigned int '+n+'_len = '+str(len(d))+';'); print('static const unsigned int '+n+'_csum = '+str(sum(d))+'u;')" fixes/baseq3/zpack-classic.pk3 zpack_classic_data > $@
+
 # Port-specific files need network shim
 ifeq ($(TA),1)
 PS3_MAIN_EMBEDDED_DEPS := $(BUILD)/pak9_ps3_embedded.h $(BUILD)/pak4_ps3_embedded.h
+else ifeq ($(CLASSIC),1)
+PS3_MAIN_EMBEDDED_DEPS := $(BUILD)/zpack_classic_embedded.h
 else
 PS3_MAIN_EMBEDDED_DEPS := $(BUILD)/pak9_ps3_embedded.h
 endif
@@ -512,6 +536,6 @@ pkg: $(BUILD)/$(TARGET).elf
 # Clean -- wipes all three flavor build dirs
 #---------------------------------------------------------------------------------
 clean:
-	@rm -rf build/ build_oa/ build_ta/
+	@rm -rf build/ build_oa/ build_ta/ build_qc/
 	@rm -f $(ZLIB_H_COPY) $(ZCONF_H_COPY)
 	@echo "Cleaned."

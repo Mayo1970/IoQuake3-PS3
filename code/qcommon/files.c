@@ -1705,7 +1705,7 @@ CONVENIENCE FUNCTIONS FOR ENTIRE FILES
 ======================================================================================
 */
 
-int	FS_FileIsInPAK(const char *filename, int *pChecksum ) {
+int	FS_FileIsInPAK(const char *filename, qboolean compat, int *pChecksum ) {
 	searchpath_t	*search;
 	pack_t			*pak;
 	fileInPack_t	*pakFile;
@@ -1754,7 +1754,11 @@ int	FS_FileIsInPAK(const char *filename, int *pChecksum ) {
 				// case and separator insensitive comparisons
 				if ( !FS_FilenameCompare( pakFile->name, filename ) ) {
 					if (pChecksum) {
+#ifdef CLASSIC
+						*pChecksum = compat ? pak->checksum : pak->pure_checksum;
+#else
 						*pChecksum = pak->pure_checksum;
+#endif
 					}
 					return 1;
 				}
@@ -1763,6 +1767,10 @@ int	FS_FileIsInPAK(const char *filename, int *pChecksum ) {
 		}
 	}
 	return -1;
+}
+
+int FS_FileIsInPAKNonCompat(const char *filename, int *pChecksum) {
+	return FS_FileIsInPAK(filename, qfalse, pChecksum);
 }
 
 /*
@@ -2950,6 +2958,50 @@ static void FS_AddGameDirectory( const char *path, const char *dir ) {
 
 		if (pakwhich) {
 			// The next .pk3 file is before the next .pk3dir
+#ifdef CLASSIC
+			{
+				/* CLASSIC: load only pak0-pak2, zpack-classic.pk3, and dc-mappack.pk3.
+				 * Skip everything else. */
+				const char *_pn = pakfiles[pakfilesi];
+				qboolean _skip = qfalse;
+				if (Q_stricmp(_pn, "zpack-classic.pk3") == 0 ||
+				    Q_stricmp(_pn, "dc-mappack.pk3") == 0) {
+					/* always pass zpack-classic.pk3 and dc-mappack.pk3 */
+					_skip = qfalse;
+				} else if (Q_stricmpn(_pn, "pak", 3) == 0) {
+					const char *_p = _pn + 3;
+					int _pakNum = 0;
+					qboolean _hasDigit = qfalse;
+					while (*_p >= '0' && *_p <= '9') {
+						_pakNum = _pakNum * 10 + (*_p - '0');
+						_hasDigit = qtrue;
+						_p++;
+					}
+					if (_hasDigit && (*_p == '.' || *_p == '\0')) {
+						/* plain pakN — skip if N > 2 */
+						_skip = (_pakNum > 2);
+					} else {
+						/* non-numeric suffix (e.g. pak9-ps3) — skip in CLASSIC */
+						_skip = qtrue;
+					}
+				} else {
+					/* unknown pak name — skip in CLASSIC */
+					_skip = qtrue;
+				}
+				if (_skip) {
+					pakfilesi++;
+					continue;
+				}
+			}
+#else
+			{
+				/* Non-CLASSIC: skip zpack-classic.pk3 (irrelevant to Q3/OA/TA builds). */
+				if (Q_stricmp(pakfiles[pakfilesi], "zpack-classic.pk3") == 0) {
+					pakfilesi++;
+					continue;
+				}
+			}
+#endif
 			pakfile = FS_BuildOSPath(path, dir, pakfiles[pakfilesi]);
 			if ((pak = FS_LoadZipFile(pakfile, pakfiles[pakfilesi])) == 0) {
 				// This isn't a .pk3! Next!
@@ -3899,7 +3951,7 @@ Servers with sv_pure set will get this string back from clients for pure validat
 The string has a specific order, "cgame ui @ ref1 ref2 ref3 ..."
 =====================
 */
-const char *FS_ReferencedPakPureChecksums( void ) {
+const char *FS_ReferencedPakPureChecksums( qboolean compat ) {
 	static char	info[BIG_INFO_STRING];
 	searchpath_t	*search;
 	int nFlags, numPaks, checksum;
@@ -3920,6 +3972,15 @@ const char *FS_ReferencedPakPureChecksums( void ) {
 		for ( search = fs_searchpaths ; search ; search = search->next ) {
 			// is the element a pak file and has it been referenced based on flag?
 			if ( search->pack && (search->pack->referenced & nFlags)) {
+#ifdef CLASSIC
+				if ( compat ) {
+					int pakNum;
+					/* proto-43: only report stock pak0-pak2; skip PS3-custom paks. */
+					if ( sscanf( search->pack->pakBasename, "pak%d", &pakNum ) != 1 || pakNum > 2 )
+						continue;
+					Q_strcat( info, sizeof( info ), va("%i ", search->pack->checksum ) );
+				} else
+#endif
 				Q_strcat( info, sizeof( info ), va("%i ", search->pack->pure_checksum ) );
 				if (nFlags & (FS_CGAME_REF | FS_UI_REF)) {
 					break;
@@ -3929,9 +3990,15 @@ const char *FS_ReferencedPakPureChecksums( void ) {
 			}
 		}
 	}
+#ifdef CLASSIC
+	if ( !compat ) {
+#endif
 	// last checksum is the encoded number of referenced pk3s
 	checksum ^= numPaks;
 	Q_strcat( info, sizeof( info ), va("%i ", checksum ) );
+#ifdef CLASSIC
+	}
+#endif
 
 	return info;
 }
@@ -4127,7 +4194,7 @@ void FS_InitFilesystem( void ) {
 	// try to start up normally
 	FS_Startup(com_basegame->string);
 
-#if !defined(STANDALONE) && !defined(STANDALONEOA) && !defined(STANDALONETA)
+#if !defined(STANDALONE) && !defined(STANDALONEOA) && !defined(STANDALONETA) && !defined(CLASSIC)
 	FS_CheckPak0( );
 #endif
 
@@ -4165,7 +4232,7 @@ void FS_Restart( int checksumFeed ) {
 	// try to start up normally
 	FS_Startup(com_basegame->string);
 
-#if !defined(STANDALONE) && !defined(STANDALONEOA) && !defined(STANDALONETA)
+#if !defined(STANDALONE) && !defined(STANDALONEOA) && !defined(STANDALONETA) && !defined(CLASSIC)
 	FS_CheckPak0( );
 #endif
 

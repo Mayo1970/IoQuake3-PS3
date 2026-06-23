@@ -758,9 +758,17 @@ void CL_WritePacket( void ) {
 	Com_Memset( &nullcmd, 0, sizeof(nullcmd) );
 	oldcmd = &nullcmd;
 
+#ifdef CLASSIC
+	if(clc.compat) {
+		MSG_InitOOB( &buf, data, sizeof(data) );
+		buf.compat = qtrue;
+	} else {
+#endif
 	MSG_Init( &buf, data, sizeof(data) );
-
 	MSG_Bitstream( &buf );
+#ifdef CLASSIC
+	}
+#endif
 	// write the current serverId so the server
 	// can tell if this is from the current gameState
 	MSG_WriteLong( &buf, cl.serverId );
@@ -873,6 +881,11 @@ void CL_WritePacket( void ) {
 		for ( i = 0 ; i < count ; i++ ) {
 			j = (cl.cmdNumber - count + i + 1) & CMD_MASK;
 			cmd = &cl.cmds[j];
+#ifdef CLASSIC
+			if(clc.compat)
+				MSG_WriteDeltaUsercmd (&buf, oldcmd, cmd);
+			else
+#endif
 			MSG_WriteDeltaUsercmdKey (&buf, key, oldcmd, cmd);
 			oldcmd = cmd;
 		}

@@ -293,14 +293,7 @@ static void KB_Frame(qboolean syncOnly)
                 s_key_logged++;
             }
         } else {
-            /* nb_keycode==0: queue empty or all released (indistinguishable).
-             * Do NOT release held keys here; multi-key transitions release via
-             * the memset+rebuild path above (missing key = released).
-             * Only apply a 2000ms emergency timeout so stuck keys can't
-             * persist forever if the release event was somehow missed.
-             * In INPUTCHAR mode auto-repeat fires every ~30ms after the
-             * initial 500ms delay, keeping last_seen fresh during a real hold,
-             * so the 2000ms guard should never fire during intentional holding. */
+            /* nb_keycode==0 is ambiguous; use 2000ms timeout to release stuck keys. */
             for (i = 1; i < 256; i++) {
                 if (s_kb_cur[i] && (now - s_kb_last_seen[i]) > 2000) {
                     printf("[ps3kb] emergency release raw=0x%02x (2000ms idle)\n", i);
@@ -524,10 +517,7 @@ void PS3_Input_Frame(void)
     int in_menu = (catchers & (KEYCATCH_UI | KEYCATCH_CGAME)) ? 1 : 0;
     int in_text = (catchers & (KEYCATCH_CONSOLE | KEYCATCH_MESSAGE)) ? 1 : 0;
 
-    /* When the UI catcher turns on (menu opens), clear ui_ime_target.
-     * Stock TA ui.qvm never sets this cvar, so stale values from a previous
-     * menu session (e.g. baseq3 ui.qvm setting it to a field name) would cause
-     * every CROSS press to open the OSK instead of confirming. */
+    /* Clear ui_ime_target on menu open to prevent stale field names from triggering OSK. */
     static int prev_in_menu = 0;
     if (in_menu && !prev_in_menu)
         Cvar_Set("ui_ime_target", "");
@@ -560,10 +550,7 @@ void PS3_Input_Frame(void)
             PS3_OSK_Open(in_console ? "Console Command" : "Chat", 128, NULL, qtrue, in_console, qfalse);
             cross_consumed = 1;
         } else if (in_menu) {
-            /* CROSS in menu: open OSK when a text field is focused (modified
-             * qvm publishes ui_ime_target), otherwise fall through to K_ENTER.
-             * "donothing" is the sentinel used by TA .menu files on mouseExit
-             * (instead of ""); treat it as empty so it doesn't wrongly open OSK. */
+            /* Open OSK if ui_ime_target names a field; skip on empty or "donothing". */
             const char *ime = Cvar_VariableString("ui_ime_target");
             if (ime && ime[0] && strcmp(ime, "donothing") != 0) {
                 PS3_OSK_Open("Enter text", 80, NULL, qfalse, qfalse, qtrue);

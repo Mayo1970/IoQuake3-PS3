@@ -1900,7 +1900,12 @@ void CL_SendPureChecksums( void ) {
 	char cMsg[MAX_INFO_VALUE];
 
 	// if we are pure we need to send back a command with our referenced pk3 checksums
-	Com_sprintf(cMsg, sizeof(cMsg), "cp %d %s", cl.serverId, FS_ReferencedPakPureChecksums());
+#ifdef CLASSIC
+	if(clc.compat)
+		Com_sprintf(cMsg, sizeof(cMsg), "cl_paks %s", FS_ReferencedPakPureChecksums(qtrue));
+	else
+#endif
+	Com_sprintf(cMsg, sizeof(cMsg), "cp %d %s", cl.serverId, FS_ReferencedPakPureChecksums(qfalse));
 
 	CL_AddReliableCommand(cMsg, qfalse);
 }
@@ -2425,6 +2430,11 @@ void CL_CheckForResend( void ) {
 		Info_SetValueForKey( info, "challenge", va("%i", clc.challenge ) );
 		
 		Com_sprintf( data, sizeof(data), "connect \"%s\"", info );
+#ifdef CLASSIC
+		if(clc.compat)
+			NET_OutOfBandPrint( NS_CLIENT, clc.serverAddress, "%s", data );
+		else
+#endif
 		NET_OutOfBandData( NS_CLIENT, clc.serverAddress, (byte *) data, strlen ( data ) );
 		// the most current userinfo has been sent, so watch for any
 		// newer changes to userinfo variables
@@ -2869,6 +2879,11 @@ void CL_PacketEvent( netadr_t from, msg_t *msg ) {
 	if (!CL_Netchan_Process( &clc.netchan, msg) ) {
 		return;		// out of order, duplicated, etc
 	}
+#ifdef CLASSIC
+	msg->compat = clc.compat;
+	if(msg->compat)
+		msg->bit = msg->readcount << 3;
+#endif
 
 	// the header is different lengths for reliable and unreliable messages
 	headerBytes = msg->readcount;
@@ -3306,7 +3321,7 @@ void CL_InitRef( void ) {
 	ri.FS_WriteFile = FS_WriteFile;
 	ri.FS_FreeFileList = FS_FreeFileList;
 	ri.FS_ListFiles = FS_ListFiles;
-	ri.FS_FileIsInPAK = FS_FileIsInPAK;
+	ri.FS_FileIsInPAK = FS_FileIsInPAKNonCompat;
 	ri.FS_FileExists = FS_FileExists_HomeData;
 	ri.Cvar_Get = Cvar_Get;
 	ri.Cvar_Set = Cvar_Set;
