@@ -45,6 +45,18 @@ A normal server packet will look like:
 =============================================================================
 */
 
+#ifdef CLASSIC
+// proto-43 hosting: every compat entity/playerstate write must carry RETAIL
+// event numbers (tables in msg.c). Internal state (frames, baselines) stays
+// modern; only stack copies at the write boundary are translated, so deltas
+// stay consistent (both from and to are translated identically).
+static entityState_t *SV_Classic_RetailEnt( const entityState_t *s, entityState_t *buf ) {
+	*buf = *s;
+	Classic_TranslateEntityToRetail( buf );
+	return buf;
+}
+#endif
+
 /*
 =============
 SV_EmitPacketEntities
@@ -88,6 +100,13 @@ static void SV_EmitPacketEntities( clientSnapshot_t *from, clientSnapshot_t *to,
 			// delta update from old position
 			// because the force parm is qfalse, this will not result
 			// in any bytes being emitted if the entity has not changed at all
+#ifdef CLASSIC
+			if ( msg->compat ) {
+				entityState_t oldC, newC;
+				MSG_WriteDeltaEntity( msg, SV_Classic_RetailEnt( oldent, &oldC ),
+					SV_Classic_RetailEnt( newent, &newC ), qfalse );
+			} else
+#endif
 			MSG_WriteDeltaEntity (msg, oldent, newent, qfalse );
 			oldindex++;
 			newindex++;
@@ -96,6 +115,14 @@ static void SV_EmitPacketEntities( clientSnapshot_t *from, clientSnapshot_t *to,
 
 		if ( newnum < oldnum ) {
 			// this is a new entity, send it from the baseline
+#ifdef CLASSIC
+			if ( msg->compat ) {
+				entityState_t baseC, newC;
+				MSG_WriteDeltaEntity( msg,
+					SV_Classic_RetailEnt( &sv.svEntities[newnum].baseline, &baseC ),
+					SV_Classic_RetailEnt( newent, &newC ), qtrue );
+			} else
+#endif
 			MSG_WriteDeltaEntity (msg, &sv.svEntities[newnum].baseline, newent, qtrue );
 			newindex++;
 			continue;
@@ -194,6 +221,21 @@ static void SV_WriteSnapshotToClient( client_t *client, msg_t *msg ) {
 	MSG_WriteData (msg, frame->areabits, frame->areabytes);
 
 	// delta encode the playerstate
+#ifdef CLASSIC
+	if ( msg->compat ) {
+		// retail event numbers on the wire; internal frames stay modern
+		playerState_t newPS, oldPS;
+		newPS = frame->ps;
+		Classic_TranslatePlayerstateToRetail( &newPS );
+		if ( oldframe ) {
+			oldPS = oldframe->ps;
+			Classic_TranslatePlayerstateToRetail( &oldPS );
+			MSG_WriteDeltaPlayerstate( msg, &oldPS, &newPS );
+		} else {
+			MSG_WriteDeltaPlayerstate( msg, NULL, &newPS );
+		}
+	} else
+#endif
 	if ( oldframe ) {
 		MSG_WriteDeltaPlayerstate( msg, &oldframe->ps, &frame->ps );
 	} else {

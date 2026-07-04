@@ -650,7 +650,15 @@ void SV_Init (void)
 	// systeminfo
 	Cvar_Get ("sv_cheats", "1", CVAR_SYSTEMINFO | CVAR_ROM );
 	sv_serverid = Cvar_Get ("sv_serverid", "0", CVAR_SYSTEMINFO | CVAR_ROM );
+#ifdef CLASSIC
+	// retail/DC clients can never validate our zpack QVM checksums - pure
+	// hosting guarantees an "Unpure Client" drop or the didn't-get-cp
+	// gamestate-resend loop in SV_UserMove. ROM so neither the start-server
+	// UI nor a config can flip it back.
+	sv_pure = Cvar_Get ("sv_pure", "0", CVAR_SYSTEMINFO | CVAR_ROM );
+#else
 	sv_pure = Cvar_Get ("sv_pure", "1", CVAR_SYSTEMINFO );
+#endif
 #ifdef USE_VOIP
 	sv_voip = Cvar_Get("sv_voip", "1", CVAR_LATCH);
 	Cvar_CheckRange(sv_voip, 0, 1, qtrue);

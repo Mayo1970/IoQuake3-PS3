@@ -1006,6 +1006,120 @@ netField_t classicEntityStateFields[] =
 { NETF(torsoAnim), 8 },
 };
 
+/*
+========================================================================
+Proto-43 (retail 1.13n/1.16n) <-> modern event-number translation.
+
+Retail entity_event_t lacks the TA-era inserts EV_GLOBAL_TEAM_SOUND
+(modern 47) and EV_MISSILE_MISS_METAL (modern 52), and the modern
+EV_BULLET insert is retail 53; retail entityType_t lacks ET_TEAM so
+retail ET_EVENTS is 12 (modern 13). Events 0..46 are identical.
+
+Used by cl_cgame.c (retail->modern on the cgame-facing snapshot copy)
+and sv_snapshot.c/sv_client.c (modern->retail on every compat entity/
+playerstate write when hosting). The QVM enum stays modern.
+========================================================================
+*/
+#define CLASSIC_ET_EVENTS_OLD	12
+#define CLASSIC_ET_EVENTS_NEW	13
+#define CLASSIC_EV_EVENT_BITS	0x300	// EV_EVENT_BIT1|EV_EVENT_BIT2 (bg_public.h; not visible here)
+
+static const struct { int retail, modern; } classicEventMap[] = {
+	{ 47, 48 },		// EV_BULLET_HIT_FLESH
+	{ 48, 49 },		// EV_BULLET_HIT_WALL   (HW anchor)
+	{ 49, 50 },		// EV_MISSILE_HIT
+	{ 50, 51 },		// EV_MISSILE_MISS
+	{ 51, 53 },		// EV_RAILTRAIL         (retail has no MISS_METAL; inferred)
+	{ 52, 54 },		// EV_SHOTGUN           (pinned: seed parms)
+	{ 53, 55 },		// EV_BULLET            (MG tracer; inferred)
+	{ 54, 56 },		// EV_PAIN              (pinned: health parms)
+	{ 55, 57 },		// EV_DEATH1
+	{ 56, 58 },		// EV_DEATH2
+	{ 57, 59 },		// EV_DEATH3
+	{ 58, 60 },		// EV_OBITUARY          (parm = meansOfDeath)
+	{ 59, 61 },		// EV_POWERUP_QUAD
+	{ 60, 62 },		// EV_POWERUP_BATTLESUIT
+	{ 61, 63 },		// EV_POWERUP_REGEN
+	{ 62, 64 },		// EV_GIB_PLAYER
+	{ 63, 74 },		// EV_DEBUG_LINE        (tail inferred)
+	{ 64, 75 },		// EV_STOPLOOPINGSOUND  (tail inferred)
+	{ 65, 76 },		// EV_TAUNT             (tail inferred)
+};
+
+int Classic_EventToModern( int ev ) {
+	int i;
+	for ( i = 0 ; i < (int)ARRAY_LEN( classicEventMap ) ; i++ ) {
+		if ( classicEventMap[i].retail == ev ) {
+			return classicEventMap[i].modern;
+		}
+	}
+	return ev;	// 0..46 and anything not known to shift
+}
+
+int Classic_EventToRetail( int ev ) {
+	int i;
+	for ( i = 0 ; i < (int)ARRAY_LEN( classicEventMap ) ; i++ ) {
+		if ( classicEventMap[i].modern == ev ) {
+			return classicEventMap[i].retail;
+		}
+	}
+	if ( ev > 46 ) {
+		// no retail equivalent (GLOBAL_TEAM_SOUND, MISS_METAL, SCOREPLUM,
+		// missionpack events) - the qagame CLASSIC guards should prevent
+		// these ever being emitted; send a harmless no-op if one slips.
+		return 0;	// EV_NONE
+	}
+	return ev;
+}
+
+// entityState_t.event / playerState_t events carry EV_EVENT_BITS toggles.
+int Classic_EventFieldToModern( int field ) {
+	int ev = field & ~CLASSIC_EV_EVENT_BITS;
+	if ( !ev ) {
+		return field;
+	}
+	return ( field & CLASSIC_EV_EVENT_BITS ) | Classic_EventToModern( ev );
+}
+
+int Classic_EventFieldToRetail( int field ) {
+	int ev = field & ~CLASSIC_EV_EVENT_BITS;
+	if ( !ev ) {
+		return field;
+	}
+	return ( field & CLASSIC_EV_EVENT_BITS ) | Classic_EventToRetail( ev );
+}
+
+// In-place modern->retail translation of one entityState for a compat write.
+void Classic_TranslateEntityToRetail( entityState_t *s ) {
+	if ( s->eType >= CLASSIC_ET_EVENTS_NEW ) {
+		s->eType = CLASSIC_ET_EVENTS_OLD
+			+ Classic_EventToRetail( s->eType - CLASSIC_ET_EVENTS_NEW );
+	} else if ( s->event ) {
+		s->event = Classic_EventFieldToRetail( s->event );
+	}
+}
+
+// In-place retail->modern translation of one received compat entityState
+// (applied to the cgame-facing copy only - the raw retail state must stay
+// untouched for delta chaining).
+void Classic_TranslateEntityToModern( entityState_t *s ) {
+	if ( s->eType >= CLASSIC_ET_EVENTS_OLD ) {
+		s->eType = CLASSIC_ET_EVENTS_NEW
+			+ Classic_EventToModern( s->eType - CLASSIC_ET_EVENTS_OLD );
+	} else if ( s->event ) {
+		s->event = Classic_EventFieldToModern( s->event );
+	}
+}
+
+// In-place modern->retail translation of one playerState for a compat write.
+void Classic_TranslatePlayerstateToRetail( playerState_t *ps ) {
+	int j;
+	for ( j = 0 ; j < MAX_PS_EVENTS ; j++ ) {
+		ps->events[j] = Classic_EventFieldToRetail( ps->events[j] );
+	}
+	ps->externalEvent = Classic_EventFieldToRetail( ps->externalEvent );
+}
+
 // Classic (proto 43) player state fields.
 #define PSF(x) #x,(size_t)&((playerState_t*)0)->x
 netField_t classicPlayerStateFields[] =

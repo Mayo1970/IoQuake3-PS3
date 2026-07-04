@@ -102,6 +102,18 @@ void MSG_ReadDeltaEntity( msg_t *msg, entityState_t *from, entityState_t *to,
 void MSG_WriteDeltaPlayerstate( msg_t *msg, struct playerState_s *from, struct playerState_s *to );
 void MSG_ReadDeltaPlayerstate( msg_t *msg, struct playerState_s *from, struct playerState_s *to );
 
+#ifdef CLASSIC
+// Proto-43 <-> modern event-number translation (tables live in msg.c).
+// Client side translates retail->modern on the cgame-facing snapshot copy
+// (cl_cgame.c); server side translates modern->retail on every compat
+// entity/playerstate write when hosting (sv_snapshot.c / sv_client.c).
+int Classic_EventToModern( int ev );
+int Classic_EventFieldToModern( int field );
+void Classic_TranslateEntityToModern( struct entityState_s *s );
+void Classic_TranslateEntityToRetail( struct entityState_s *s );
+void Classic_TranslatePlayerstateToRetail( struct playerState_s *ps );
+#endif
+
 
 void MSG_ReportChangeVectors_f( void );
 

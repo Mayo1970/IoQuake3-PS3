@@ -2365,6 +2365,40 @@ void CL_InitDownloads(void) {
 	CL_DownloadsComplete();
 }
 
+#ifdef CLASSIC
+/*
+=================
+CL_CompatUserinfo
+
+Build the userinfo sent to a proto-43 (compat) server. Real Dreamcast
+servers are closed pre-1.17 code on a 16 MB console: present exactly what a
+retail client would send. Modern-only keys (cl_guid, team_model,
+team_headmodel, teamtask, cl_voipProtocol, ...) are dropped, retail's single
+"color" is included, and the advertised rate is capped to a period-typical
+value so the server never has to service us at broadband cadence.
+=================
+*/
+static void CL_CompatUserinfo( char *info ) {
+	static const char *keys[] = {
+		"name", "rate", "snaps", "model", "headmodel", "color",
+		"handicap", "sex", "cl_anonymous", "cg_predictItems", "password"
+	};
+	const char	*v;
+	int			i;
+
+	info[0] = '\0';
+	for ( i = 0 ; i < (int)ARRAY_LEN( keys ) ; i++ ) {
+		v = Cvar_VariableString( keys[i] );
+		if ( *v ) {
+			Info_SetValueForKey( info, keys[i], v );
+		}
+	}
+	if ( Cvar_VariableIntegerValue( "rate" ) > 5000 ) {
+		Info_SetValueForKey( info, "rate", "5000" );
+	}
+}
+#endif
+
 /*
 =================
 CL_CheckForResend
@@ -2420,6 +2454,13 @@ void CL_CheckForResend( void ) {
 #ifdef LEGACY_PROTOCOL
 		if(com_legacyprotocol->integer == com_protocol->integer)
 			clc.compat = qtrue;
+
+#ifdef CLASSIC
+		// proto-43: retail-shaped userinfo (real-DC servers choke on the
+		// modern key set / broadband rate)
+		if(clc.compat)
+			CL_CompatUserinfo( info );
+#endif
 
 		if(clc.compat)
 			Info_SetValueForKey(info, "protocol", va("%i", com_legacyprotocol->integer));
@@ -2966,6 +3007,16 @@ void CL_CheckUserinfo( void ) {
 	if(cvar_modifiedFlags & CVAR_USERINFO)
 	{
 		cvar_modifiedFlags &= ~CVAR_USERINFO;
+#ifdef CLASSIC
+		if(clc.compat)
+		{
+			char	info[MAX_INFO_STRING];
+
+			CL_CompatUserinfo( info );
+			CL_AddReliableCommand(va("userinfo \"%s\"", info), qfalse);
+		}
+		else
+#endif
 		CL_AddReliableCommand(va("userinfo \"%s\"", Cvar_InfoString( CVAR_USERINFO ) ), qfalse);
 	}
 }
@@ -3684,6 +3735,11 @@ void CL_Init( void ) {
 	Cvar_Get ("team_headmodel", "*james", CVAR_USERINFO | CVAR_ARCHIVE );
 	Cvar_Get ("g_redTeam", "Stroggs", CVAR_SERVERINFO | CVAR_ARCHIVE);
 	Cvar_Get ("g_blueTeam", "Pagans", CVAR_SERVERINFO | CVAR_ARCHIVE);
+#ifdef CLASSIC
+	// retail-era single rail color, read by proto-43 servers (modern split
+	// it into color1/color2); sent via CL_CompatUserinfo
+	Cvar_Get ("color", "4", CVAR_USERINFO | CVAR_ARCHIVE );
+#endif
 	Cvar_Get ("color1",  "4", CVAR_USERINFO | CVAR_ARCHIVE );
 	Cvar_Get ("color2", "5", CVAR_USERINFO | CVAR_ARCHIVE );
 	Cvar_Get ("handicap", "100", CVAR_USERINFO | CVAR_ARCHIVE );
