@@ -1,6 +1,4 @@
-/*
- * ps3gl_colors.c -- GL-to-RSX layer: vertex color management.
- */
+/* ps3gl_colors.c -- GL-to-RSX layer: vertex color management. */
 
 #include "ps3gl.h"
 

@@ -1,33 +1,6 @@
-/*
- * spu_vtx.c -- SPU vertex interleave program.
- *
- * Compiled with spu-gcc. Runs as a persistent SPU thread that blocks
- * on the inbound mailbox waiting for jobs from the PPE.
- *
- * Protocol (per job):
- *   PPE sends 3 inbound mailbox words:
- *     [0] SPU_VTX_CMD_JOB
- *     [1] descriptor EA high 32 bits
- *     [2] descriptor EA low  32 bits
- *   SPU:
- *     DMA-get descriptor (128 bytes, tag 0)
- *     DMA-get source arrays into LS (tag 1, serialized per array)
- *     interleave into LS output buffer
- *     DMA-put output to XDR staging buffer (tag 2)
- *     write outbound mailbox: SPU_VTX_DONE
- *
- * IMPORTANT: dst_ea must point to XDR (normal host memory).
- * SPU DMA cannot reach RSX VRAM. The PPE copies staging→RSX ring after wait.
- *
- * Local store layout:
- *   ls_desc  [128 B, 128-aligned]  job descriptor
- *   ls_pos   [16 KB, 16-aligned]   position array  (1000 × 16)
- *   ls_tc0   [16 KB, 16-aligned]   texcoord 0      (1000 × 16 worst-case)
- *   ls_tc1   [16 KB, 16-aligned]   texcoord 1
- *   ls_col   [ 4 KB, 16-aligned]   color array     (1000 × 4)
- *   ls_out   [36 KB, 128-aligned]  interleaved output (1000 × 36 = 36000, pad to 36096)
- *   Total: ~88 KB of 256 KB LS used.
- */
+/* spu_vtx.c -- persistent SPU thread (spu-gcc): blocks on the inbound mailbox for a job EA,
+ * DMAs descriptor + source arrays into LS, interleaves, DMAs the result out to XDR.
+ * dst_ea MUST be XDR, never RSX VRAM -- SPU DMA physically cannot reach VRAM. */
 
 #include <stdint.h>
 #include <string.h>
@@ -187,7 +160,7 @@ int main(void)
         /* Interleave into LS output buffer */
         interleave(job, ls_pos, ls_tc0, ls_tc1, ls_col, ls_out);
 
-        /* DMA-put result to XDR staging buffer (NOT RSX VRAM) */
+        /* DMA-put result to the XDR staging buffer -- NOT RSX VRAM, the SPU can't see it. */
         dma_put(ls_out, job->dst_ea, (uint32_t)(n * SPU_VTX_VERTEX_SIZE), TAG_OUT);
         dma_wait(TAG_OUT);
 

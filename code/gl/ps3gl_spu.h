@@ -12,24 +12,15 @@ int  ps3gl_spu_init(void);
 /* Stop the SPU vertex thread. */
 void ps3gl_spu_shutdown(void);
 
-/*
- * Dispatch a vertex interleave job.
- * Copies job descriptor to the shared XDR buffer and sends mailbox to SPU.
- * Returns immediately — SPU works in parallel.
- */
+/* Dispatch a vertex interleave job: copies the descriptor to the shared XDR buffer
+ * and mailboxes the SPU, then returns immediately -- SPU runs in parallel. */
 void ps3gl_spu_dispatch(const spu_vtx_job_t *job);
 
-/*
- * Block until the SPU signals job completion via outbound mailbox.
- * Must be called before using the staging buffer contents.
- */
+/* Blocks until the SPU signals job completion via its outbound mailbox; call before touching the staging buffer. */
 void ps3gl_spu_wait(void);
 
-/*
- * Pointer to the XDR staging buffer where the SPU writes its output.
- * After ps3gl_spu_wait() returns, copy this to the RSX ring buffer.
- * Aligned to 128 bytes, size = SHADER_MAX_VERTEXES * SPU_VTX_VERTEX_SIZE.
- */
+/* XDR staging buffer the SPU writes its output to; copy to the RSX ring after
+ * ps3gl_spu_wait() returns. 128-byte aligned, size = SHADER_MAX_VERTEXES * SPU_VTX_VERTEX_SIZE. */
 void *ps3gl_spu_staging(void);
 
 /* 1 if SPU thread initialized successfully, 0 if using scalar fallback. */

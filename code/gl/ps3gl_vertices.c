@@ -10,7 +10,11 @@ extern const float *ps3gl_get_mvp(void);
 
 void ps3gl_vring_init(void)
 {
-    ps3gl.vring.capacity = PS3GL_VRING_SIZE;
+    static const int seg_labels[PS3GL_VRING_SEGMENTS] = {
+        PS3GL_LABEL_VRING_SEG0, PS3GL_LABEL_VRING_SEG1
+    };
+
+    ps3gl.vring.seg_capacity = PS3GL_VRING_SIZE / PS3GL_VRING_SEGMENTS;
     ps3gl.vring.base = (uint8_t *)rsxMemalign(128, PS3GL_VRING_SIZE);
     if (!ps3gl.vring.base) {
         printf("[ps3gl] FATAL: failed to allocate vertex ring buffer (%u bytes)\n",
@@ -18,17 +22,21 @@ void ps3gl_vring_init(void)
         return;
     }
     rsxAddressToOffset(ps3gl.vring.base, &ps3gl.vring.base_off);
-    ps3gl.vring.head = 0;
+    ps3gl.vring.head    = 0;
+    ps3gl.vring.cur_seg = 0;
 
-    /* Backend label for GPU-side fence. RSX writes fence_val here after the
-     * pipeline drains; we poll this in begin_frame before resetting the ring. */
-    ps3gl.vring.fence_label = (volatile uint32_t *)gcmGetLabelAddress(PS3GL_LABEL_VRING);
-    ps3gl.vring.fence_val   = 0;
-    if (ps3gl.vring.fence_label)
-        *ps3gl.vring.fence_label = 0;
+    /* One backend label per segment -- RSX only writes fence_val here once the pipeline
+     * fully drains. begin_frame waits on it before reusing that segment's head. */
+    for (int i = 0; i < PS3GL_VRING_SEGMENTS; i++) {
+        ps3gl.vring.fence_label[i] = (volatile uint32_t *)gcmGetLabelAddress(seg_labels[i]);
+        ps3gl.vring.fence_val[i]   = 0;
+        if (ps3gl.vring.fence_label[i])
+            *ps3gl.vring.fence_label[i] = 0;
+    }
 
-    printf("[ps3gl] Vertex ring buffer: %u bytes at %p (offset 0x%08x)\n",
-           PS3GL_VRING_SIZE, ps3gl.vring.base, ps3gl.vring.base_off);
+    printf("[ps3gl] Vertex ring buffer: %u bytes (%d x %u) at %p (offset 0x%08x)\n",
+           PS3GL_VRING_SIZE, PS3GL_VRING_SEGMENTS, ps3gl.vring.seg_capacity,
+           ps3gl.vring.base, ps3gl.vring.base_off);
 }
 
 void ps3gl_vring_shutdown(void)
@@ -43,14 +51,28 @@ ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset)
 {
     uint32_t needed = (uint32_t)(count * PS3GL_VERTEX_SIZE);
 
-    /* If we'd overflow, wrap to start (previous frame data is consumed) */
-    if (ps3gl.vring.head + needed > ps3gl.vring.capacity) {
-        ps3gl.vring.head = 0;
+    if (ps3gl.vring.head + needed > ps3gl.vring.seg_capacity) {
+        /* Segment full for this frame -- refuse to wrap rather than stomp data the GPU hasn't
+         * fetched yet (submission runs ahead of GPU execution). Should never trip; if it does, drop the batch, don't silently corrupt the frame. */
+        static int warned = 0;
+        if (!warned) {
+            printf("[ps3gl] WARNING: vertex ring segment exhausted this frame "
+                   "(need %u, have %u of %u) -- dropping draw\n",
+                   needed, ps3gl.vring.seg_capacity - ps3gl.vring.head,
+                   ps3gl.vring.seg_capacity);
+            warned = 1;
+        }
+        return NULL;
     }
 
-    ps3gl_vertex_t *ptr = (ps3gl_vertex_t *)(ps3gl.vring.base + ps3gl.vring.head);
-    *out_offset = ps3gl.vring.base_off + ps3gl.vring.head;
-    ps3gl.vring.head += needed;
+    uint32_t seg_base = (uint32_t)ps3gl.vring.cur_seg * ps3gl.vring.seg_capacity;
+    ps3gl_vertex_t *ptr = (ps3gl_vertex_t *)(ps3gl.vring.base + seg_base + ps3gl.vring.head);
+    *out_offset = ps3gl.vring.base_off + seg_base + ps3gl.vring.head;
+
+    /* Round up to 16-byte alignment -- every carve must self-align its own start or
+     * attribute sub-offsets (TC0/TC1/COLOR) drift and RSX vertex fetch wedges the whole console. */
+    ps3gl.vring.head = (ps3gl.vring.head + needed + 15u) & ~15u;
+
     return ptr;
 }
 

@@ -180,9 +180,8 @@ void ps3gl_Scissor(GLint x, GLint y, GLsizei w, GLsizei h)
 
 void ps3gl_Viewport(GLint x, GLint y, GLsizei w, GLsizei h)
 {
-    /* ioq3 passes GL-convention viewport Y (Y=0 at bottom of screen).
-     * RSX framebuffer has Y=0 at top.  Convert: rsx_y = screen_h - gl_y - h.
-     * For full-screen viewports (y=0, h=screen_h) this is a no-op (0). */
+    /* ioq3 viewport Y is GL-convention (Y=0 at bottom); RSX framebuffer has Y=0 at top --
+     * convert with rsx_y = screen_h - gl_y - h. No-op for full-screen viewports (y=0, h=screen_h). */
     int rsx_y = (int)ps3gl.screen_h - y - (int)h;
 
     ps3gl.rs.vp_x = (int16_t)x;

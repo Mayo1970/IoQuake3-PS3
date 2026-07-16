@@ -1,39 +1,7 @@
 /*
- * ps3_setjmp.S -- PPC64-correct setjmp/longjmp for PS3 (PSL1GHT)
- *
- * The newlib 1.20.0 setjmp.S bundled with ps3toolchain has two bugs:
- *
- *   1. BUFFER OVERFLOW: setjmp.S was compiled with -mcpu=cell (implies
- *      __ALTIVEC__), so it saves AltiVec registers and writes 448 bytes.
- *      But code compiled with -mno-altivec sees jmp_buf as double[32]
- *      (256 bytes). Every setjmp() overflows by 192 bytes, corrupting
- *      the stack.
- *
- *   2. 32-BIT GPR SAVES: Uses stw/lwz (32-bit) for 64-bit registers.
- *      Upper 32 bits of SP, TOC, LR, and r13-r31 are lost. On PS3
- *      homebrew, all addresses are <4GB so this is less severe, but
- *      still wrong per the PPC64 ABI.
- *
- * This replacement:
- *   - Uses std/ld for all GPR saves (correct 64-bit)
- *   - Does NOT save AltiVec registers (matches -mno-altivec jmp_buf)
- *   - Fits within double[64] = 512 bytes (we override _JBLEN to 64)
- *
- * Layout (all 8-byte aligned):
- *   Offset   Size   Content
- *     0       8     r1  (SP)
- *     8       8     r2  (TOC)
- *    16       8     r13
- *    24       8     r14
- *    ...             ...
- *   168       8     r31
- *   176       8     LR
- *   184       8     CR  (stored as 8 bytes for alignment)
- *   192       8     f14
- *   200       8     f15
- *    ...             ...
- *   328       8     f31
- *   Total: 328 bytes (fits in 512-byte jmp_buf)
+ * Stock newlib setjmp.S is -mcpu=cell and blows 448 bytes into our -mno-altivec 256-byte
+ * jmp_buf (192B of silent stack corruption per call) plus truncates 64-bit GPRs via stw/lwz.
+ * Fixed here with std/ld + no AltiVec, sized for the 512-byte _JBLEN=64 override -- don't "simplify" this back toward stock newlib, it WILL corrupt the stack again.
  */
 
 #include "ppc-asm.h"

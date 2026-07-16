@@ -24,118 +24,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "tr_dsa.h"
 
-#ifdef __WIIU__
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <EGL/egl.h>
-
-#ifndef GL_PROGRAM_BINARY_LENGTH
-#define GL_PROGRAM_BINARY_LENGTH 0x8741
-#endif
-
-#define WIIU_SHADERCACHE_DIR "fs:/vol/external01/wiiu/apps/ioquake3/shadercache"
-
-typedef void (*PFNWIIU_GetProgramBinary)(GLuint, GLsizei, GLsizei *, GLenum *, void *);
-typedef void (*PFNWIIU_ProgramBinary)(GLuint, GLenum, const void *, GLsizei);
-static PFNWIIU_GetProgramBinary s_wiiuGetProgBin = NULL;
-static PFNWIIU_ProgramBinary    s_wiiuProgBin    = NULL;
-static qboolean s_wiiuCacheReady = qfalse;
-
-static void WIIU_InitShaderCache(void)
-{
-	if (s_wiiuCacheReady) return;
-	s_wiiuCacheReady = qtrue;
-	s_wiiuGetProgBin = (PFNWIIU_GetProgramBinary)eglGetProcAddress("glGetProgramBinary");
-	s_wiiuProgBin    = (PFNWIIU_ProgramBinary)eglGetProcAddress("glProgramBinary");
-	if (s_wiiuGetProgBin && s_wiiuProgBin) {
-		mkdir(WIIU_SHADERCACHE_DIR, 0755);
-		ri.Printf(PRINT_ALL, "WiiU: shader binary cache enabled\n");
-	} else {
-		s_wiiuGetProgBin = NULL;
-		s_wiiuProgBin    = NULL;
-		ri.Printf(PRINT_ALL, "WiiU: glGetProgramBinary unavailable, cache disabled\n");
-	}
-}
-
-static unsigned int WIIU_HashStr(const char *s, int len)
-{
-	unsigned int h = 5381;
-	int i;
-	for (i = 0; i < len; i++)
-		h = ((h << 5) + h) + (unsigned char)s[i];
-	return h;
-}
-
-static qboolean WIIU_LoadProgramBinary(GLuint prog, const char *vp, const char *fp)
-{
-	unsigned int h;
-	char path[256];
-	FILE *f;
-	long sz, blobSz;
-	GLenum fmt;
-	void *blob;
-	GLint linked;
-
-	if (!s_wiiuProgBin) return qfalse;
-	h = WIIU_HashStr(vp, strlen(vp));
-	h = h * 31 + WIIU_HashStr(fp ? fp : "", fp ? strlen(fp) : 0);
-	Com_sprintf(path, sizeof(path), "%s/%08x.bin", WIIU_SHADERCACHE_DIR, h);
-	f = fopen(path, "rb");
-	if (!f) return qfalse;
-	fseek(f, 0, SEEK_END);
-	sz = ftell(f);
-	rewind(f);
-	if (sz <= (long)sizeof(GLenum)) { fclose(f); return qfalse; }
-	if (fread(&fmt, sizeof(fmt), 1, f) != 1) { fclose(f); return qfalse; }
-	blobSz = sz - (long)sizeof(GLenum);
-	blob = malloc(blobSz);
-	if (!blob) { fclose(f); return qfalse; }
-	if ((long)fread(blob, 1, blobSz, f) != blobSz) { fclose(f); free(blob); return qfalse; }
-	fclose(f);
-	s_wiiuProgBin(prog, fmt, blob, (GLsizei)blobSz);
-	free(blob);
-	linked = 0;
-	qglGetProgramiv(prog, GL_LINK_STATUS, &linked);
-	return linked ? qtrue : qfalse;
-}
-
-static void WIIU_SaveProgramBinary(GLuint prog, const char *vp, const char *fp)
-{
-	unsigned int h;
-	char path[256];
-	GLint sz;
-	void *blob;
-	GLsizei written;
-	GLenum fmt;
-	FILE *f;
-
-	static int s_saveCount = 0;
-	if (!s_wiiuGetProgBin) return;
-	sz = 0;
-	qglGetProgramiv(prog, GL_PROGRAM_BINARY_LENGTH, &sz);
-	if (s_saveCount == 0)
-		ri.Printf(PRINT_ALL, "WiiU: first shader GL_PROGRAM_BINARY_LENGTH=%d\n", sz);
-	s_saveCount++;
-	if (sz <= 0) return;
-	blob = malloc(sz);
-	if (!blob) return;
-	written = 0; fmt = 0;
-	s_wiiuGetProgBin(prog, sz, &written, &fmt, blob);
-	if (written <= 0) { free(blob); return; }
-	h = WIIU_HashStr(vp, strlen(vp));
-	h = h * 31 + WIIU_HashStr(fp ? fp : "", fp ? strlen(fp) : 0);
-	Com_sprintf(path, sizeof(path), "%s/%08x.bin", WIIU_SHADERCACHE_DIR, h);
-	f = fopen(path, "wb");
-	if (!f) { free(blob); return; }
-	fwrite(&fmt, sizeof(fmt), 1, f);
-	fwrite(blob, 1, written, f);
-	fclose(f);
-	free(blob);
-}
-#endif /* __WIIU__ */
-
 extern const char *fallbackShader_bokeh_vp;
 extern const char *fallbackShader_bokeh_fp;
 extern const char *fallbackShader_calclevels4x_vp;
@@ -361,23 +249,6 @@ static void GLSL_GetShaderHeader( GLenum shaderType, const GLchar *extra, char *
 
 	dest[0] = '\0';
 
-#ifdef __WIIU__
-	/* CafeGLSL only accepts GLSL ES 1.00 (#version 100).
-	 * ANGLE reports GLSL ES 3.20 as the driver version, which causes the
-	 * version detection below to emit "#version 150" -- rejected by CafeGLSL
-	 * with "'150' : client/version number not supported".
-	 * Force #version 100 unconditionally; attribute/varying/texture2D/
-	 * gl_FragColor are native in #version 100, no compatibility defines needed. */
-	Q_strcat(dest, size, "#version 100\n");
-	if (extra)
-		Q_strcat(dest, size, extra);
-	Q_strcat(dest, size, "precision mediump float;\n");
-	if (glRefConfig.shadowSamplers)
-	{
-		Q_strcat(dest, size, "precision mediump sampler2DShadow;\n");
-		Q_strcat(dest, size, "#define shadow2D(a,b) shadow2DEXT(a,b)\n");
-	}
-#else
 	// HACK: abuse the GLSL preprocessor to turn GLSL 1.20 shaders into 1.30 ones
 	if(glRefConfig.glslMajorVersion > 1 || (glRefConfig.glslMajorVersion == 1 && glRefConfig.glslMinorVersion >= 30))
 	{
@@ -447,7 +318,6 @@ static void GLSL_GetShaderHeader( GLenum shaderType, const GLchar *extra, char *
 			Q_strcat(dest, size, "#define shadow2D(a,b) shadow2D(a,b).r\n");
 		}
 	}
-#endif /* !__WIIU__ */
 
 	// HACK: add some macros to avoid extra uniforms and save speed and code maintenance
 	//Q_strcat(dest, size,
@@ -684,14 +554,6 @@ static int GLSL_InitGPUShader2(shaderProgram_t * program, const char *name, int 
 	program->program = qglCreateProgram();
 	program->attribs = attribs;
 
-#ifdef __WIIU__
-	WIIU_InitShaderCache();
-	if (WIIU_LoadProgramBinary(program->program, vpCode, fpCode ? fpCode : "")) {
-		ri.Printf(PRINT_DEVELOPER, "WiiU: shader cache hit: %s\n", name);
-		return 1;
-	}
-#endif
-
 	if (!(GLSL_CompileGPUShader(program->program, &program->vertexShader, vpCode, strlen(vpCode), GL_VERTEX_SHADER)))
 	{
 		ri.Printf(PRINT_ALL, "GLSL_InitGPUShader2: Unable to load \"%s\" as GL_VERTEX_SHADER\n", name);
@@ -755,10 +617,6 @@ static int GLSL_InitGPUShader2(shaderProgram_t * program, const char *name, int 
 		qglBindAttribLocation(program->program, ATTR_INDEX_TANGENT2, "attr_Tangent2");
 
 	GLSL_LinkProgram(program->program);
-
-#ifdef __WIIU__
-	WIIU_SaveProgramBinary(program->program, vpCode, fpCode ? fpCode : "");
-#endif
 
 	return 1;
 }
@@ -1108,15 +966,6 @@ void GLSL_InitGPUShaders(void)
 	int numGenShaders = 0, numLightShaders = 0, numEtcShaders = 0;
 
 	ri.Printf(PRINT_ALL, "------- GLSL_InitGPUShaders -------\n");
-
-#ifdef __WIIU__
-	/* Shader compilation takes 8+ seconds. Mark as a GL op so the ProcUI
-	 * pump skips ProcUIDrawDoneRelease() if RELEASE_FOREGROUND arrives --
-	 * that call would block waiting for eglSwapBuffers which can't happen
-	 * here. ANGLE handles GX2DrawDone() in its priority-100 callback. */
-	extern void wiiu_gl_op_begin(void);
-	wiiu_gl_op_begin();
-#endif
 
 	R_IssuePendingRenderCommands();
 
@@ -1468,12 +1317,6 @@ void GLSL_InitGPUShaders(void)
 		numEtcShaders++;
 	}
 
-/* On Wii U (ANGLE/GX2 + GLES 2.0):
- * - pshadow uses float(bool) casts -- illegal in GLSL ES 1.00, never used without pshadow FBOs
- * - postprocess shaders (down4x, bokeh, tonemap, calclevels4x, shadowmask, ssao, depthBlur,
- *   greyscale) require r_hdr/r_postProcess which are forced off in autoexec.cfg; compiling
- *   them wastes 30+ seconds on hardware and some will fail GLSL ES 1.00 compilation */
-#if !defined(__WIIU__)
 	attribs = ATTR_POSITION | ATTR_NORMAL;
 	extradefines[0] = '\0';
 
@@ -1683,7 +1526,6 @@ void GLSL_InitGPUShaders(void)
 			numEtcShaders++;
 		}
 	}
-#endif /* !__WIIU__ */
 
 #if 0
 	attribs = ATTR_POSITION | ATTR_TEXCOORD;
@@ -1709,11 +1551,6 @@ void GLSL_InitGPUShaders(void)
 	ri.Printf(PRINT_ALL, "loaded %i GLSL shaders (%i gen %i light %i etc) in %5.2f seconds\n",
 		numGenShaders + numLightShaders + numEtcShaders, numGenShaders, numLightShaders,
 		numEtcShaders, (endTime - startTime) / 1000.0);
-
-#ifdef __WIIU__
-	extern void wiiu_gl_op_end(void);
-	wiiu_gl_op_end();
-#endif
 }
 
 void GLSL_ShutdownGPUShaders(void)

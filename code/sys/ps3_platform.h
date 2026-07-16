@@ -92,7 +92,7 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #include "sys/ps3_net.h"
 #endif
 
-/* Memory tuning for ~145 MB free user RAM at boot. */
+/* Memory tuning for ~145 MB free user RAM at boot — this budget is razor thin, don't get greedy. */
 #undef  MIN_DEDICATED_COMHUNKMEGS
 #undef  MIN_COMHUNKMEGS
 #undef  DEF_COMHUNKMEGS
@@ -115,13 +115,30 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #define MAX_DOWNLOAD_WINDOW     16      /* stock: 48 */
 #endif
 
-/* cl_parse.c writes to stream index (sender + MAX_CLIENTS + 1) for voice
- * chat; q_shared.h hardcodes MAX_CLIENTS=64 regardless of -D overrides. */
+/* cl_parse.c voice chat indexes stream (sender + MAX_CLIENTS + 1), and MAX_CLIENTS is hardcoded
+ * 64 in q_shared.h no matter what you -D override. Undersize this and it writes OOB into s_rawsamples[]. */
 #ifndef MAX_RAW_STREAMS
 #define MAX_RAW_STREAMS (2 * 64 + 1)
 #endif
+/* RoQ cinematic audio (stream 0) legitimately runs 13500-16200 samples
+ * (~280-340ms) ahead of s_soundtime -- confirmed via hardware log, see
+ * CLAUDE.md audio pipeline notes. Below that, every S_RawSamples() write
+ * wraps the ring and clobbers not-yet-played samples: continuous crackle on
+ * any cinematic long/heavy enough to sustain that lead.
+ * TRIED bumping this to stock's 16384 for ALL streams (the array is
+ * [MAX_RAW_STREAMS][this], so +8192 here is +~8 MB of static memory) --
+ * confirmed on real hardware this HANGS at boot despite the ~25 MB margin
+ * looking sufficient on paper. Do not re-attempt a uniform bump. Fix is
+ * stream-0-only: MAX_RAW_SAMPLES_STREAM0 below gives cinematics/music their
+ * own deeper buffer (s_rawsamples0 in snd_dma.c) for +128 KB instead, while
+ * the other 128 voice-chat streams stay at this smaller size. This constant
+ * is ALSO set in the Makefile's CFLAGS (-DMAX_RAW_SAMPLES=...), which wins
+ * over this #ifndef -- edit both or changes silently don't apply. */
 #ifndef MAX_RAW_SAMPLES
-#define MAX_RAW_SAMPLES  8192          /* stock: 16384 */
+#define MAX_RAW_SAMPLES  8192          /* stock: 16384, see comment above */
+#endif
+#ifndef MAX_RAW_SAMPLES_STREAM0
+#define MAX_RAW_SAMPLES_STREAM0  16384
 #endif
 
 #define USE_INTERNAL_SDL_HEADERS

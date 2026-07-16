@@ -34,6 +34,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "client.h"
 #include "snd_local.h"
 
+#ifdef __PS3__
+extern void ps3_log(const char *msg);
+#endif
+
 #define MAXSIZE				8
 #define MINSIZE				4
 
@@ -1373,21 +1377,55 @@ e_status CIN_RunCinematic (int handle)
 	cinTable[currentHandle].tfps = (((CL_ScaledMilliseconds() - cinTable[currentHandle].startTime)*3)/100);
 
 	start = cinTable[currentHandle].startTime;
-#ifdef __WIIU__
-	/* Cap decode iterations per frame -- Espresso is slow and the spin loop
-	 * can stall the main thread long enough for the OS watchdog to kill the
-	 * process via ProcUI timeout (same class as bugs 1 and 3). */
+#ifdef __PS3__
+	/* Cap decode iterations per frame. The in-order PPE is slow enough on
+	 * heavy cinematics (full FMV intro/tier videos, not the tiny idlogo)
+	 * that an uncapped catch-up loop here bursts several frames' worth of
+	 * RoQInterrupt()/S_RawSamples() back-to-back in one call, feeding audio
+	 * unevenly -- heard as crackle even though the sample data itself is
+	 * fine. Capping trades a slight visible skip/slowdown on those
+	 * cinematics for steady audio. */
 	{
 		int roq_iters = 0;
+		int loopStart = CL_ScaledMilliseconds();
+		static int ps3_cin_slow_logs = 0;
+		static int ps3_cin_cap_logs = 0;
 		while(  (cinTable[currentHandle].tfps != cinTable[currentHandle].numQuads)
 			&& (cinTable[currentHandle].status == FMV_PLAY)
 			&& (roq_iters < 4) )
 		{
+			int iterStart = CL_ScaledMilliseconds();
 			RoQInterrupt();
 			roq_iters++;
+			{
+				int iterMs = CL_ScaledMilliseconds() - iterStart;
+				/* One LV2 audio block is ~5.33ms; a single RoQInterrupt() call
+				 * taking longer than that means interleaving S_Update() between
+				 * iterations can't help -- the stall is inside one call, not
+				 * between them. Diagnostic only, rate-limited. */
+				if (iterMs >= 4 && ps3_cin_slow_logs < 40) {
+					char buf[160];
+					snprintf(buf, sizeof(buf),
+						"PS3_CIN: slow RoQInterrupt iter=%d took %dms numQuads=%d tfps=%d",
+						roq_iters, iterMs, cinTable[currentHandle].numQuads, cinTable[currentHandle].tfps);
+					ps3_log(buf);
+					ps3_cin_slow_logs++;
+				}
+			}
 			if (start != cinTable[currentHandle].startTime) {
 				cinTable[currentHandle].tfps = (((CL_ScaledMilliseconds() - cinTable[currentHandle].startTime)*3)/100);
 				start = cinTable[currentHandle].startTime;
+			}
+		}
+		if (roq_iters > 0 && ps3_cin_cap_logs < 40) {
+			int loopMs = CL_ScaledMilliseconds() - loopStart;
+			if (roq_iters == 4 || loopMs >= 4) {
+				char buf[160];
+				snprintf(buf, sizeof(buf),
+					"PS3_CIN: RunCinematic burst iters=%d totalMs=%d numQuads=%d tfps=%d",
+					roq_iters, loopMs, cinTable[currentHandle].numQuads, cinTable[currentHandle].tfps);
+				ps3_log(buf);
+				ps3_cin_cap_logs++;
 			}
 		}
 		/* If we hit the cap, sync startTime so the next frame doesn't

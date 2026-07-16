@@ -1,9 +1,5 @@
-/*
- * ps3gl_matrices.c -- GL-to-RSX layer: matrix stack management.
- *
- * Maintains 32-deep modelview and projection stacks (column-major).
- * Matrices are uploaded to RSX vertex program constants before each draw.
- */
+/* ps3gl_matrices.c -- GL-to-RSX layer: matrix stack management.
+ * 32-deep modelview/projection stacks (column-major), uploaded to RSX VP constants before each draw. */
 
 #include "ps3gl.h"
 #include <math.h>
@@ -215,9 +211,18 @@ void ps3gl_GetFloatv(GLenum pname, GLfloat *params)
 /* MVP scratch space, transposed for RSX (row-major for VP constants) */
 static float s_mvp[16];
 
+/* Bumped only when s_mvp is actually recomputed below, so callers can skip
+ * re-uploading the RSX vertex-program constant when nothing has changed. */
+static uint32_t s_mvp_generation = 1;
+
 const float *ps3gl_get_mvp(void)
 {
     return s_mvp;
+}
+
+uint32_t ps3gl_get_mvp_generation(void)
+{
+    return s_mvp_generation;
 }
 
 void ps3gl_apply_matrices(void)
@@ -231,6 +236,7 @@ void ps3gl_apply_matrices(void)
 
     /* RSX VP expects constants in row-major order */
     mat4_transpose(s_mvp, mvp);
+    s_mvp_generation++;
 
     ps3gl.mv.dirty  = 0;
     ps3gl.proj.dirty = 0;

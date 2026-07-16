@@ -79,21 +79,8 @@ static void R_JPGOutputMessage(j_common_ptr cinfo)
 }
 
 #ifdef __PS3__
-/*
- * PS3/PPC64: Two-level setjmp scheme to survive libjpeg errors.
- *
- * Problem: longjmp on PPC64 GCC corrupts the stack frame of the function
- * containing setjmp. Even an noinline helper crashes during its epilogue
- * because the compiler restores callee-saved registers from the (corrupted)
- * stack frame, not from the jmp_buf.
- *
- * Solution: R_LoadJPG sets up an "escape" jmp_buf. The helper receives a
- * pointer to it. When libjpeg errors, libjpeg longjmps to the helper's
- * local setjmp. The helper's error handler then longjmps AGAIN to
- * R_LoadJPG's escape jmp_buf -- bypassing the helper's corrupted epilogue
- * entirely. R_LoadJPG's setjmp was established before any libjpeg calls,
- * so its stack frame is pristine.
- */
+/* PPC64 GCC's longjmp corrupts the setjmp() frame it returns to -- the epilogue
+ * restores regs from the wrecked stack, so we double-longjmp past the doomed helper straight to R_LoadJPG's untouched escape frame instead. */
 static jmp_buf *ps3_jpg_escape;  /* pointer to R_LoadJPG's escape jmp_buf */
 
 static void __attribute__((noinline)) R_LoadJPG_Decompress(
@@ -117,9 +104,8 @@ static void __attribute__((noinline)) R_LoadJPG_Decompress(
 
   if (setjmp(jerr.setjmp_buffer))
   {
-    /* libjpeg signaled an error. This function's stack is corrupted.
-     * Do NOT return -- epilogue would read garbage from stack.
-     * Instead, longjmp to R_LoadJPG's escape point. */
+    /* Stack is corrupted here -- do NOT return, longjmp to R_LoadJPG's
+     * escape point or the epilogue reads garbage off the stack. */
     longjmp(*ps3_jpg_escape, 1);
     /* NOTREACHED */
   }

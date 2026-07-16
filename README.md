@@ -91,10 +91,11 @@ cd /e/path/to/ioquake3-PS3
 make clean && make all-flavors
 ```
 
-This builds Q3A, Open Arena, and Team Arena PKGs in sequence (Classic is not included — build it separately with `CLASSIC=1`):
+This builds ioQuake3, Team Arena, Open Arena, and Quake 3 Classic PKGs in sequence:
 - `build/ioquake3_ps3.pkg`
-- `build_oa/ioquake3_oa_ps3.pkg`
 - `build_ta/ioquake3_ta_ps3.pkg`
+- `build_oa/ioquake3_oa_ps3.pkg`
+- `build_qc/ioquake3_classic_ps3.pkg`
 
 ### Build individual variants
 
@@ -139,7 +140,7 @@ make clean        # wipe all build dirs (build/, build_oa/, build_ta/, build_qc/
 | ioQuake3        | `build/ioquake3_ps3.pkg` |
 | Open Arena      | `build_oa/ioquake3_oa_ps3.pkg` |
 | Team Arena      | `build_ta/ioquake3_ta_ps3.pkg` |
-| Quake 3 Classic | `build_classic/ioquake3_classic_ps3.pkg` |
+| Quake 3 Classic | `build_qc/ioquake3_classic_ps3.pkg` |
 
 Always run `make clean` before rebuilding after a flag change.
 

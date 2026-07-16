@@ -1,13 +1,6 @@
-/*
- * spu_vtx_shared.h -- Job descriptor shared between PPE and SPU.
- *
- * Rules:
- *   - All pointer fields are 64-bit EAs, valid on both sides.
- *   - dst_ea points to an XDR staging buffer (NOT RSX VRAM).
- *     SPU DMA cannot reach RSX VRAM; the PPE copies staging→ring after wait.
- *   - Struct is 128-byte aligned and padded to exactly 128 bytes so the SPU
- *     can fetch it in a single 128-byte DMA transfer.
- */
+/* spu_vtx_shared.h -- job descriptor shared between PPE and SPU; all pointer fields are 64-bit EAs.
+ * dst_ea MUST be XDR, never RSX VRAM -- SPU DMA can't reach it, PPE copies staging->ring after wait.
+ * Struct is 128-byte aligned/padded so the SPU fetches it in a single DMA transfer. */
 
 #ifndef SPU_VTX_SHARED_H
 #define SPU_VTX_SHARED_H
@@ -24,17 +17,8 @@
 /* Output vertex stride (must match ps3gl_vertex_t) */
 #define SPU_VTX_VERTEX_SIZE 36
 
-/*
- * Layout: x,y,z,w (16) + u0,v0 (8) + u1,v1 (8) + color (4) = 36 bytes.
- *
- * Byte count of fields below:
- *   pos_ea(8) pos_stride(4) pos_size(4)
- *   tc0_ea(8) tc0_stride(4) _pad0(4)
- *   tc1_ea(8) tc1_stride(4) _pad1(4)
- *   col_ea(8) col_stride(4) imm_color(4)
- *   dst_ea(8) num_verts(4) _pad2(4)
- *   = 80 bytes used → 48 bytes padding to reach 128.
- */
+/* Output vertex layout: x,y,z,w(16) + u0,v0(8) + u1,v1(8) + color(4) = 36 bytes.
+ * Struct fields total 80 bytes; the remaining 48 is padding to hit the 128-byte DMA size. */
 typedef struct __attribute__((aligned(128))) {
     uint64_t pos_ea;        /* source position array EA */
     uint32_t pos_stride;    /* bytes between elements (always 16) */

@@ -129,52 +129,105 @@ static int gl_format_bpp(GLenum format)
     }
 }
 
-/*
- * Convert source pixels to ARGB8888 for RSX.
- * src_bpp: 1 (L or A), 2 (LA), 3 (RGB), 4 (RGBA)
- */
-static void convert_pixels(uint8_t *dst, const uint8_t *src,
+/* Convert source pixels to ARGB8888 for RSX. src_bpp: 1=L/A, 2=LA, 3=RGB, 4=RGBA.
+ * dst_stride can exceed width*4 -- RSX mip levels share the base level's pitch, so smaller levels get padded rows instead of tight packing. */
+static void convert_pixels(uint8_t *dst, uint32_t dst_stride, const uint8_t *src,
                            int width, int height, int src_bpp,
                            GLenum src_format)
 {
-    int npix = width * height;
-    for (int i = 0; i < npix; i++) {
-        uint8_t r, g, b, a;
-        switch (src_bpp) {
-        case 1:
-            if (src_format == GL_ALPHA) {
-                r = g = b = 255;
-                a = src[i];
-            } else {
-                /* Luminance */
-                r = g = b = src[i];
-                a = 255;
+    if (src_bpp == 4) {
+        /* Fast path: Upload32() always uploads via GL_RGBA/GL_UNSIGNED_BYTE, so this
+         * is the only src_bpp seen in practice -- skip the per-pixel format switch and
+         * do one packed 32-bit store per pixel instead of four byte stores. PS3 is
+         * big-endian, so a native uint32_t store of 0xAARRGGBB lands in memory as bytes
+         * A,R,G,B -- the same order the byte-store path below produces. */
+        for (int row = 0; row < height; row++) {
+            uint32_t *drow = (uint32_t *)(dst + (uint32_t)row * dst_stride);
+            const uint8_t *srow = src + (size_t)row * width * 4;
+            for (int col = 0; col < width; col++) {
+                uint8_t r = srow[col * 4 + 0];
+                uint8_t g = srow[col * 4 + 1];
+                uint8_t b = srow[col * 4 + 2];
+                uint8_t a = srow[col * 4 + 3];
+                drow[col] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
             }
-            break;
-        case 2:
-            r = g = b = src[i * 2];
-            a = src[i * 2 + 1];
-            break;
-        case 3:
-            r = src[i * 3 + 0];
-            g = src[i * 3 + 1];
-            b = src[i * 3 + 2];
-            a = 255;
-            break;
-        case 4:
-        default:
-            r = src[i * 4 + 0];
-            g = src[i * 4 + 1];
-            b = src[i * 4 + 2];
-            a = src[i * 4 + 3];
-            break;
         }
-        /* RSX A8R8G8B8 in big-endian memory: byte order A R G B */
-        dst[i * 4 + 0] = a;
-        dst[i * 4 + 1] = r;
-        dst[i * 4 + 2] = g;
-        dst[i * 4 + 3] = b;
+        return;
     }
+
+    for (int row = 0; row < height; row++) {
+        uint8_t *drow = dst + (uint32_t)row * dst_stride;
+        const uint8_t *srow = src + (size_t)row * width * src_bpp;
+        for (int col = 0; col < width; col++) {
+            uint8_t r, g, b, a;
+            switch (src_bpp) {
+            case 1:
+                if (src_format == GL_ALPHA) {
+                    r = g = b = 255;
+                    a = srow[col];
+                } else {
+                    /* Luminance */
+                    r = g = b = srow[col];
+                    a = 255;
+                }
+                break;
+            case 2:
+                r = g = b = srow[col * 2];
+                a = srow[col * 2 + 1];
+                break;
+            case 3:
+                r = srow[col * 3 + 0];
+                g = srow[col * 3 + 1];
+                b = srow[col * 3 + 2];
+                a = 255;
+                break;
+            case 4:
+            default:
+                r = srow[col * 4 + 0];
+                g = srow[col * 4 + 1];
+                b = srow[col * 4 + 2];
+                a = srow[col * 4 + 3];
+                break;
+            }
+            /* RSX A8R8G8B8 in big-endian memory: byte order A R G B */
+            drow[col * 4 + 0] = a;
+            drow[col * 4 + 1] = r;
+            drow[col * 4 + 2] = g;
+            drow[col * 4 + 3] = b;
+        }
+    }
+}
+
+/* Mip chain helpers. RSX linear textures describe the whole chain from ONE width/height/
+ * pitch/offset -- every level uses the BASE level's pitch, only row count shrinks. NOT tightly packed, don't "fix" it into being so. */
+
+static uint32_t mip_level_dim(uint32_t base, int level)
+{
+    uint32_t d = base >> level;
+    return d ? d : 1;
+}
+
+static int mip_num_levels(uint32_t w0, uint32_t h0)
+{
+    uint32_t maxdim = (w0 > h0) ? w0 : h0;
+    int levels = 1;
+    while (maxdim > 1) { maxdim >>= 1; levels++; }
+    return levels;
+}
+
+/* Byte offset of `level`'s data within the packed mip buffer, given the
+ * base level's row pitch (shared by every level) and height. */
+static uint32_t mip_level_offset(uint32_t pitch, uint32_t h0, int level)
+{
+    uint32_t off = 0;
+    for (int i = 0; i < level; i++)
+        off += pitch * mip_level_dim(h0, i);
+    return off;
+}
+
+static uint32_t mip_total_size(uint32_t pitch, uint32_t w0, uint32_t h0)
+{
+    return mip_level_offset(pitch, h0, mip_num_levels(w0, h0));
 }
 
 /* Build gcmTexture descriptor */
@@ -182,7 +235,7 @@ static void build_gcm_texture(ps3gl_texture_t *t)
 {
     memset(&t->gcm_tex, 0, sizeof(t->gcm_tex));
     t->gcm_tex.format    = GCM_TEXTURE_FORMAT_A8R8G8B8 | GCM_TEXTURE_FORMAT_LIN;
-    t->gcm_tex.mipmap    = 1;
+    t->gcm_tex.mipmap    = t->num_levels ? t->num_levels : 1;
     t->gcm_tex.dimension = GCM_TEXTURE_DIMS_2D;
     t->gcm_tex.cubemap   = GCM_FALSE;
     t->gcm_tex.remap     = PS3GL_TEX_REMAP_IDENTITY;
@@ -203,7 +256,7 @@ void ps3gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
 {
     (void)target; (void)border; (void)type;
 
-    if (level != 0) return; /* only base mip level */
+    if (level < 0) return;
 
     ps3gl_texture_t *t = ps3gl.tmu[ps3gl.active_tmu].bound;
     if (!t) return;
@@ -212,42 +265,55 @@ void ps3gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
     if (ps3gl_teximg_diag_count < 30) {
         char dbg[128];
         snprintf(dbg, sizeof(dbg),
-                 "PS3GL_TEXIMG: tex=%d %dx%d intfmt=0x%x fmt=0x%x type=0x%x px=%p",
-                 t->glname, (int)width, (int)height,
+                 "PS3GL_TEXIMG: tex=%d level=%d %dx%d intfmt=0x%x fmt=0x%x type=0x%x px=%p",
+                 t->glname, (int)level, (int)width, (int)height,
                  (unsigned)internalformat, (unsigned)format,
                  (unsigned)type, pixels);
         ps3_log(dbg);
         ps3gl_teximg_diag_count++;
     }
 
-    /* Free old data if dimensions changed */
-    if (t->data && (t->width != (uint16_t)width || t->height != (uint16_t)height)) {
-        rsxFree(t->data);
-        t->data = NULL;
-    }
-
-    t->width  = (uint16_t)width;
-    t->height = (uint16_t)height;
-    t->bpp    = 4; /* always store as ARGB8888 */
-
-    uint32_t size = (uint32_t)(width * height * 4);
-    if (!t->data) {
-        t->data = (uint8_t *)rsxMemalign(64, size);
-        if (!t->data) {
-            printf("[ps3gl] WARNING: failed to allocate %u bytes for texture %d\n",
-                   size, t->glname);
-            return;
+    if (level == 0) {
+        /* Free old data if base dimensions changed */
+        if (t->data && (t->width != (uint16_t)width || t->height != (uint16_t)height)) {
+            rsxFree(t->data);
+            t->data = NULL;
         }
-        rsxAddressToOffset(t->data, &t->offset);
+
+        t->width      = (uint16_t)width;
+        t->height     = (uint16_t)height;
+        t->bpp        = 4; /* always store as ARGB8888 */
+        t->num_levels = 0; /* becomes 1 once this level's data lands below */
+
+        if (!t->data) {
+            uint32_t pitch = (uint32_t)width * 4;
+            uint32_t size  = mip_total_size(pitch, (uint32_t)width, (uint32_t)height);
+            t->data = (uint8_t *)rsxMemalign(64, size);
+            if (!t->data) {
+                printf("[ps3gl] WARNING: failed to allocate %u bytes for texture %d\n",
+                       size, t->glname);
+                return;
+            }
+            rsxAddressToOffset(t->data, &t->offset);
+        }
     }
+
+    if (!t->data) return; /* level>0 arrived before level 0 -- ignore */
+    if (level >= mip_num_levels(t->width, t->height)) return; /* beyond the allocated pyramid */
+
+    uint32_t pitch   = (uint32_t)t->width * 4;
+    uint32_t lvl_off = mip_level_offset(pitch, t->height, level);
 
     if (pixels) {
         int src_bpp = gl_format_bpp(format);
-        convert_pixels(t->data, (const uint8_t *)pixels,
+        convert_pixels(t->data + lvl_off, pitch, (const uint8_t *)pixels,
                        width, height, src_bpp, format);
     } else {
-        memset(t->data, 0, size);
+        memset(t->data + lvl_off, 0, pitch * mip_level_dim(t->height, level));
     }
+
+    if ((uint8_t)(level + 1) > t->num_levels)
+        t->num_levels = (uint8_t)(level + 1);
 
     build_gcm_texture(t);
     t->dirty = 1;
@@ -433,7 +499,12 @@ void ps3gl_apply_textures(void)
         if (!tmu->dirty && !t->dirty) continue;
 
         rsxLoadTexture(ctx, i, &t->gcm_tex);
-        rsxTextureControl(ctx, i, GCM_TRUE, 0, 0, GCM_TEXTURE_MAX_ANISO_1);
+        /* maxlod is 4.8 fixed point, NOT an integer level count -- get this wrong and the
+         * texture binds but renders nothing. maxlod = (num_levels-1)<<8 so the sampler can reach every uploaded mip. */
+        {
+            uint16_t maxlod = (uint16_t)(((t->num_levels ? t->num_levels : 1) - 1) << 8);
+            rsxTextureControl(ctx, i, GCM_TRUE, 0, maxlod, GCM_TEXTURE_MAX_ANISO_1);
+        }
         rsxTextureFilter(ctx, i, 0, t->min_filter, t->mag_filter,
                          GCM_TEXTURE_CONVOLUTION_QUINCUNX);
         rsxTextureWrapMode(ctx, i, t->wrap_s, t->wrap_t,

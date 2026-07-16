@@ -40,6 +40,13 @@ void S_Base_StopBackgroundTrack( void );
 #ifdef __PS3__
 #include <stdint.h>
 extern void PS3_SetRumble(uint8_t large, uint8_t small, int durationMs);
+extern void ps3_log(const char *msg);
+static int ps3_raw_overflow_logs = 0;
+static int ps3_raw_lead_logs = 0;
+static int ps3_raw_lead_calls = 0;
+#define S_RAW_STREAM0_CAP MAX_RAW_SAMPLES_STREAM0
+#else
+#define S_RAW_STREAM0_CAP MAX_RAW_SAMPLES
 #endif
 
 snd_stream_t	*s_backgroundStream = NULL;
@@ -125,6 +132,9 @@ static	channel_t		*freelist = NULL;
 
 int						s_rawend[MAX_RAW_STREAMS];
 portable_samplepair_t s_rawsamples[MAX_RAW_STREAMS][MAX_RAW_SAMPLES];
+#ifdef __PS3__
+portable_samplepair_t s_rawsamples0[MAX_RAW_SAMPLES_STREAM0];
+#endif
 
 
 // ====================================================================
@@ -1026,6 +1036,7 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int numCha
 	float	scale;
 	int		intVolumeLeft, intVolumeRight;
 	portable_samplepair_t *rawsamples;
+	int		rawMask;
 
 	if ( !s_soundStarted || s_soundMuted ) {
 		return;
@@ -1035,7 +1046,16 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int numCha
 		return;
 	}
 
-	rawsamples = s_rawsamples[stream];
+#ifdef __PS3__
+	if (stream == 0) {
+		rawsamples = s_rawsamples0;
+		rawMask = MAX_RAW_SAMPLES_STREAM0 - 1;
+	} else
+#endif
+	{
+		rawsamples = s_rawsamples[stream];
+		rawMask = MAX_RAW_SAMPLES - 1;
+	}
 
 	if ( s_muted->integer ) {
 		intVolumeLeft = intVolumeRight = 0;
@@ -1067,7 +1087,7 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int numCha
 		{	// optimized case
 			for (i=0 ; i<samples ; i++)
 			{
-				dst = s_rawend[stream]&(MAX_RAW_SAMPLES-1);
+				dst = s_rawend[stream]&rawMask;
 				s_rawend[stream]++;
 				rawsamples[dst].left = ((short *)data)[i*2] * intVolumeLeft;
 				rawsamples[dst].right = ((short *)data)[i*2+1] * intVolumeRight;
@@ -1075,15 +1095,27 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int numCha
 		}
 		else
 		{
+			/* Linear interpolation instead of nearest-neighbor: scale is rarely a
+			 * clean ratio (e.g. RoQ cinematics at 22050Hz resampled to this port's
+			 * fixed 48000Hz hardware output rate, scale ~= 0.459) -- picking the
+			 * nearest source sample alone produces an uneven hold pattern that's
+			 * audible as aliasing/distortion over a sustained clip. */
 			for (i=0 ; ; i++)
 			{
-				src = i*scale;
+				float fsrc = i*scale;
+				src = (int)fsrc;
 				if (src >= samples)
 					break;
-				dst = s_rawend[stream]&(MAX_RAW_SAMPLES-1);
-				s_rawend[stream]++;
-				rawsamples[dst].left = ((short *)data)[src*2] * intVolumeLeft;
-				rawsamples[dst].right = ((short *)data)[src*2+1] * intVolumeRight;
+				{
+					float frac = fsrc - (float)src;
+					int src2 = (src+1 < samples) ? src+1 : src;
+					short l0 = ((short *)data)[src*2],  r0 = ((short *)data)[src*2+1];
+					short l1 = ((short *)data)[src2*2], r1 = ((short *)data)[src2*2+1];
+					dst = s_rawend[stream]&rawMask;
+					s_rawend[stream]++;
+					rawsamples[dst].left  = (int)(l0 + (l1 - l0) * frac) * intVolumeLeft;
+					rawsamples[dst].right = (int)(r0 + (r1 - r0) * frac) * intVolumeRight;
+				}
 			}
 		}
 	}
@@ -1091,13 +1123,21 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int numCha
 	{
 		for (i=0 ; ; i++)
 		{
-			src = i*scale;
+			float fsrc = i*scale;
+			src = (int)fsrc;
 			if (src >= samples)
 				break;
-			dst = s_rawend[stream]&(MAX_RAW_SAMPLES-1);
-			s_rawend[stream]++;
-			rawsamples[dst].left = ((short *)data)[src] * intVolumeLeft;
-			rawsamples[dst].right = ((short *)data)[src] * intVolumeRight;
+			{
+				float frac = fsrc - (float)src;
+				int src2 = (src+1 < samples) ? src+1 : src;
+				short s0 = ((short *)data)[src];
+				short s1 = ((short *)data)[src2];
+				int val = (int)(s0 + (s1 - s0) * frac);
+				dst = s_rawend[stream]&rawMask;
+				s_rawend[stream]++;
+				rawsamples[dst].left = val * intVolumeLeft;
+				rawsamples[dst].right = val * intVolumeRight;
+			}
 		}
 	}
 	else if (numChannels == 2 && width == 1)
@@ -1107,13 +1147,20 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int numCha
 
 		for (i=0 ; ; i++)
 		{
-			src = i*scale;
+			float fsrc = i*scale;
+			src = (int)fsrc;
 			if (src >= samples)
 				break;
-			dst = s_rawend[stream]&(MAX_RAW_SAMPLES-1);
-			s_rawend[stream]++;
-			rawsamples[dst].left = ((char *)data)[src*2] * intVolumeLeft;
-			rawsamples[dst].right = ((char *)data)[src*2+1] * intVolumeRight;
+			{
+				float frac = fsrc - (float)src;
+				int src2 = (src+1 < samples) ? src+1 : src;
+				char l0 = ((char *)data)[src*2],  r0 = ((char *)data)[src*2+1];
+				char l1 = ((char *)data)[src2*2], r1 = ((char *)data)[src2*2+1];
+				dst = s_rawend[stream]&rawMask;
+				s_rawend[stream]++;
+				rawsamples[dst].left  = (int)(l0 + (l1 - l0) * frac) * intVolumeLeft;
+				rawsamples[dst].right = (int)(r0 + (r1 - r0) * frac) * intVolumeRight;
+			}
 		}
 	}
 	else if (numChannels == 1 && width == 1)
@@ -1123,19 +1170,55 @@ void S_Base_RawSamples( int stream, int samples, int rate, int width, int numCha
 
 		for (i=0 ; ; i++)
 		{
-			src = i*scale;
+			float fsrc = i*scale;
+			src = (int)fsrc;
 			if (src >= samples)
 				break;
-			dst = s_rawend[stream]&(MAX_RAW_SAMPLES-1);
-			s_rawend[stream]++;
-			rawsamples[dst].left = (((byte *)data)[src]-128) * intVolumeLeft;
-			rawsamples[dst].right = (((byte *)data)[src]-128) * intVolumeRight;
+			{
+				float frac = fsrc - (float)src;
+				int src2 = (src+1 < samples) ? src+1 : src;
+				int s0 = ((byte *)data)[src]  - 128;
+				int s1 = ((byte *)data)[src2] - 128;
+				int val = (int)(s0 + (s1 - s0) * frac);
+				dst = s_rawend[stream]&rawMask;
+				s_rawend[stream]++;
+				rawsamples[dst].left = val * intVolumeLeft;
+				rawsamples[dst].right = val * intVolumeRight;
+			}
 		}
 	}
 
-	if ( s_rawend[stream] > s_soundtime + MAX_RAW_SAMPLES ) {
+	if ( s_rawend[stream] > s_soundtime + rawMask + 1 ) {
 		Com_DPrintf( "S_Base_RawSamples: overflowed %i > %i\n", s_rawend[stream], s_soundtime );
+#ifdef __PS3__
+		if (stream == 0 && ps3_raw_overflow_logs < 20) {
+			char buf[160];
+			snprintf(buf, sizeof(buf),
+				"PS3_SND: raw stream0 OVERFLOW lead=%d rawend=%d soundtime=%d",
+				s_rawend[stream]-s_soundtime, s_rawend[stream], s_soundtime);
+			ps3_log(buf);
+			ps3_raw_overflow_logs++;
+		}
+#endif
 	}
+#ifdef __PS3__
+	/* Diagnostic: track how far ahead of playback (s_soundtime) the raw
+	 * stream-0 write cursor sits, sampled every 64 calls during cinematics
+	 * (and background music, which shares stream 0). A lead that keeps
+	 * growing over a long cinematic points at sustained overrun; a lead that
+	 * spikes then recovers points at stall-driven bursts instead. */
+	if (stream == 0) {
+		ps3_raw_lead_calls++;
+		if ((ps3_raw_lead_calls & 63) == 0 && ps3_raw_lead_logs < 40) {
+			char buf[160];
+			snprintf(buf, sizeof(buf),
+				"PS3_SND: raw stream0 lead=%d rawend=%d soundtime=%d",
+				s_rawend[stream]-s_soundtime, s_rawend[stream], s_soundtime);
+			ps3_log(buf);
+			ps3_raw_lead_logs++;
+		}
+	}
+#endif
 }
 
 //=============================================================================
@@ -1492,8 +1575,8 @@ void S_UpdateBackgroundTrack( void ) {
 		s_rawend[0] = s_soundtime;
 	}
 
-	while ( s_rawend[0] < s_soundtime + MAX_RAW_SAMPLES ) {
-		bufferSamples = MAX_RAW_SAMPLES - (s_rawend[0] - s_soundtime);
+	while ( s_rawend[0] < s_soundtime + S_RAW_STREAM0_CAP ) {
+		bufferSamples = S_RAW_STREAM0_CAP - (s_rawend[0] - s_soundtime);
 
 		// decide how much data needs to be read from the file
 		fileSamples = bufferSamples * s_backgroundStream->info.rate / dma.speed;

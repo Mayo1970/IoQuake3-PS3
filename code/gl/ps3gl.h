@@ -70,9 +70,10 @@ typedef struct {
     int             glname;     /* -1 = free */
     uint8_t        *data;
     uint32_t        offset;     /* RSX offset */
-    uint16_t        width;
+    uint16_t        width;      /* level 0 (base) dimensions */
     uint16_t        height;
     uint8_t         bpp;
+    uint8_t         num_levels; /* contiguous mip levels uploaded so far, >=1 */
     uint8_t         wrap_s, wrap_t;
     uint8_t         min_filter, mag_filter;
     gcmTexture      gcm_tex;
@@ -102,17 +103,21 @@ typedef struct {
     GLsizei     stride;
 } ps3gl_array_ptr_t;
 
-/* GCM backend label used to fence the vring. Index <64 are system-reserved. */
-#define PS3GL_LABEL_VRING 64
+/* Double-buffered: command submission runs ahead of GPU execution, so without this a
+ * same-frame wrap would stomp data the GPU hasn't fetched yet. Labels <64 are system-reserved; 65 is saved for an unimplemented tess-arena fence -- don't reuse it. */
+#define PS3GL_VRING_SEGMENTS    2
+#define PS3GL_LABEL_VRING_SEG0  64
+#define PS3GL_LABEL_VRING_SEG1  66
 
 /* Vertex ring buffer in RSX memory */
 typedef struct {
     uint8_t    *base;
     uint32_t    base_off;
-    uint32_t    capacity;
-    uint32_t    head;
-    volatile uint32_t *fence_label; /* GCM label address; RSX writes here when pipeline drains */
-    uint32_t    fence_val;          /* last value written to the label */
+    uint32_t    seg_capacity;  /* bytes per segment */
+    uint32_t    head;          /* offset within the current segment */
+    int         cur_seg;       /* 0 or 1 */
+    volatile uint32_t *fence_label[PS3GL_VRING_SEGMENTS]; /* GCM label addr; RSX writes here when pipeline drains */
+    uint32_t    fence_val[PS3GL_VRING_SEGMENTS];           /* last value written to each label */
 } ps3gl_vring_t;
 
 /* Shader program pair (vertex + fragment) */
@@ -167,9 +172,8 @@ typedef struct {
         uint32_t clear_stencil;
     } rs;
 
-    /* GL_CLIP_PLANE0: clip plane for portal/mirror rendering.
-     * clip_plane[] stores the world-space plane (normal.xyz, dist).
-     * Evaluated in software in DrawElements against world-space vertex positions. */
+    /* GL_CLIP_PLANE0: world-space plane (normal.xyz, dist) for portal/mirror clipping.
+     * Must stay world-space -- eye-space flips the sign and blacks out the mirror. Software-evaluated in DrawElements. */
     int                 clip_plane_enabled;
     float               clip_plane[4];     /* (nx,ny,nz,dist): dot(n,v)>=dist keeps */
 
@@ -204,6 +208,8 @@ typedef struct {
 
     ps3gl_shader_t      shaders[PS3GL_TENV_COUNT];
     int                 active_shader;
+    rsxVertexProgram   *active_vp;      /* physical VP currently loaded on RSX; all shader slots share one VP, so this is tracked separately from active_shader (the FP key) */
+    uint32_t            mvp_uploaded_gen; /* last ps3gl_get_mvp_generation() value uploaded to active_vp */
 
 } ps3gl_state_t;
 
@@ -275,9 +281,8 @@ void ps3gl_ClearStencil(GLint s);
 void ps3gl_LineWidth(GLfloat width);
 void ps3gl_ClipPlane(GLenum plane, const GLdouble *equation);
 
-/* PS3-specific: set clip plane directly in world space (normal.xyz, dist).
- * Avoids the eye-space transform complexity of glClipPlane.
- * Called from tr_backend.c before the portal/mirror render pass. */
+/* PS3-specific: sets the clip plane directly in world space (normal.xyz, dist),
+ * skipping glClipPlane's eye-space transform. Called from tr_backend.c before the portal/mirror pass. */
 void ps3gl_SetWorldClipPlane(float nx, float ny, float nz, float dist);
 void ps3gl_GetIntegerv(GLenum pname, GLint *params);
 void ps3gl_GetBooleanv(GLenum pname, GLboolean *params);

@@ -224,8 +224,17 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
     uint32_t gcm_prim = GCM_TYPE_TRIANGLES; /* Q3 always uses GL_TRIANGLES here */
     (void)mode; /* mode is always GL_TRIANGLES in practice */
 
-    /* RSX expects 16-bit indices; 65536 static buffer avoids stack alloc. */
+    /* RSX wants 16-bit indices; static 65536 buffer avoids a stack alloc. Q3's own
+     * tessellator never gets this big (SHADER_MAX_VERTEXES caps it well below), so this is a safety net -- if it ever fires, warn loudly, don't silently eat triangles. */
     static uint16_t idx16[65536];
+    if (count > 65536) {
+        static int warned = 0;
+        if (!warned) {
+            printf("[ps3gl] WARNING: DrawElements count %d exceeds 65536 -- "
+                   "truncating, geometry will be missing\n", count);
+            warned = 1;
+        }
+    }
     int n = (count > 65536) ? 65536 : count;
 
     /* Software clip plane: cull triangles where all 3 verts are behind plane. */

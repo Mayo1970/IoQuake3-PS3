@@ -71,7 +71,11 @@ static void ps3_audio_thread_func(void *arg)
         s32 ret = sysEventQueueReceive(ps3_audio_eventQ, &event, 20 * 1000);
         if (ret != 0) {
             timeout_count++;
-            if (timeout_count <= 3) {
+            /* First few timeouts are expected during startup; keep sampling
+             * every 100th one after that so a starvation window later in the
+             * session (e.g. during a cinematic) still shows up in the log
+             * instead of going silent after the first 3. */
+            if (timeout_count <= 3 || (timeout_count % 100) == 0) {
                 char buf[96];
                 snprintf(buf, sizeof(buf),
                          "PS3_AUDIO: eventQ timeout #%d ret=0x%08x",
@@ -90,7 +94,13 @@ static void ps3_audio_thread_func(void *arg)
 
         u32 ring_pos = (ps3_audio_blocks_written * (u32)block_samples) % (u32)total_interleaved;
 
-        /* VMX int16→f32 conversion (8 samples/iter) to staging buffer, then memcpy. */
+        /* VMX int16→f32 conversion (8 samples/iter) to staging buffer, then memcpy.
+         * PSL1GHT's audio.h doesn't document an alignment guarantee for
+         * audioDataStart, and vec_st silently rounds a misaligned address down to
+         * the nearest 16 bytes instead of faulting -- writing straight into the
+         * port buffer risked corrupting a few bytes of every block if that
+         * assumption were wrong. Stage into a compiler-guaranteed-aligned local
+         * buffer and let memcpy (alignment-safe either way) carry it across. */
         {
             static f32 staging[PS3_AUDIO_BLOCK_SIZE * PS3_AUDIO_CHANNELS] __attribute__((aligned(16)));
             const s16 * __restrict__ vsrc = src + ring_pos;
@@ -231,8 +241,14 @@ qboolean SNDDMA_Init(void)
     ps3_audio_running = 1;
 
     static char audio_thread_name[] = "AudioThread";
+    /* Priority 100, well above the main thread's 1001 (lv2: 0 = highest priority).
+     * This thread has a hard ~5.3ms deadline per audio block; at equal priority with
+     * the main thread it only gets scheduled at round-robin quantum boundaries, which
+     * heavy sustained main-thread work (full-motion cinematics, no natural yield
+     * points) can miss, producing audio crackle. Elevating it guarantees it preempts
+     * the main thread instead of waiting its turn. */
     ret = sysThreadCreate(&ps3_audio_thread, ps3_audio_thread_func, NULL,
-                          1001, 0x4000, THREAD_JOINABLE, audio_thread_name);
+                          100, 0x4000, THREAD_JOINABLE, audio_thread_name);
     if (ret != 0) {
         char buf[64];
         snprintf(buf, sizeof(buf), "SNDDMA_Init: sysThreadCreate failed: 0x%08x", (unsigned)ret);
@@ -292,7 +308,7 @@ void SNDDMA_Capture(int samples, byte *data) { (void)samples; (void)data; }
 void SNDDMA_StopCapture(void) {}
 void SNDDMA_MasterGain(float val) { (void)val; }
 
-/* snd_main.c is not compiled on PS3; dispatch goes straight to S_Base_*. */
+/* snd_main.c isn't compiled on PS3 -- dispatch goes straight to S_Base_*. */
 extern void S_Update_(void);
 extern void S_Base_Update(void);
 extern void S_Base_Shutdown(void);
@@ -319,8 +335,8 @@ cvar_t *s_doppler;
 
 static soundInterface_t s_snd_if;
 
-/* snd_main.c is not compiled on PS3, so register its console commands here
- * to prevent them from being forwarded to the server as unknown client commands. */
+/* snd_main.c isn't compiled on PS3, so its console commands (play/music/stopmusic/etc)
+ * MUST be hand-registered here -- miss one and it gets forwarded to the server as chat. */
 static void S_Play_f(void)
 {
     int i, c;
@@ -353,6 +369,18 @@ static void S_StopMusic_f(void)
     S_Base_StopBackgroundTrack();
 }
 
+static void S_List_f(void)
+{
+    if (s_snd_if.SoundList)
+        s_snd_if.SoundList();
+}
+
+static void S_Info_f(void)
+{
+    if (s_snd_if.SoundInfo)
+        s_snd_if.SoundInfo();
+}
+
 void S_Init(void)
 {
     s_volume      = Cvar_Get("s_volume",      "0.8",  CVAR_ARCHIVE);
@@ -368,6 +396,9 @@ void S_Init(void)
     Cmd_AddCommand("play",      S_Play_f);
     Cmd_AddCommand("music",     S_Music_f);
     Cmd_AddCommand("stopmusic", S_StopMusic_f);
+    Cmd_AddCommand("s_list",    S_List_f);
+    Cmd_AddCommand("s_stop",    S_Base_StopAllSounds);
+    Cmd_AddCommand("s_info",   S_Info_f);
 }
 
 void S_Shutdown(void)
@@ -375,6 +406,9 @@ void S_Shutdown(void)
     Cmd_RemoveCommand("play");
     Cmd_RemoveCommand("music");
     Cmd_RemoveCommand("stopmusic");
+    Cmd_RemoveCommand("s_list");
+    Cmd_RemoveCommand("s_stop");
+    Cmd_RemoveCommand("s_info");
     if (s_snd_if.Shutdown)
         s_snd_if.Shutdown();
     SNDDMA_Shutdown();
@@ -399,8 +433,6 @@ void        S_StartBackgroundTrack(const char *i,const char *l)       { S_Base_S
 void        S_StopBackgroundTrack(void)                                { S_Base_StopBackgroundTrack(); }
 void        S_RawSamples(int stream,int samples,int rate,int width,int channels,const byte *d,float v,int e)
                                                                        { S_Base_RawSamples(stream,samples,rate,width,channels,d,v,e); }
-
-void PS3_Snd_Init(void) {}
 
 void PS3_Snd_Shutdown(void)
 {

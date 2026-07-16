@@ -1,6 +1,4 @@
-/*
- * ps3gl_main.c -- GL-to-RSX layer: initialization, shutdown, frame bracket.
- */
+/* ps3gl_main.c -- GL-to-RSX layer: initialization, shutdown, frame bracket. */
 
 #include "ps3gl.h"
 #include <stdio.h>
@@ -164,16 +162,22 @@ void ps3gl_begin_frame(void)
     if (!ps3gl.ctx && (uintptr_t)s_gcm_ctx_backup > 0x1000)
         ps3gl.ctx = s_gcm_ctx_backup;
 
-    /* Wait for GPU to finish ring data before resetting (fence label from end_frame). */
-    if (ps3gl.vring.fence_label) {
-        int waited = 0;
-        while (*ps3gl.vring.fence_label != ps3gl.vring.fence_val && waited < 20000) {
-            usleep(10);
-            waited++;
+    /* Swap to the other vring segment and wait for the GPU to finish whatever it held
+     * last time around -- same one-frame pipeline slack as before, just fenced per segment instead of the whole ring. */
+    ps3gl.vring.cur_seg = (ps3gl.vring.cur_seg + 1) % PS3GL_VRING_SEGMENTS;
+    {
+        int seg = ps3gl.vring.cur_seg;
+        volatile uint32_t *label = ps3gl.vring.fence_label[seg];
+        if (label) {
+            int waited = 0;
+            while (*label != ps3gl.vring.fence_val[seg] && waited < 20000) {
+                usleep(10);
+                waited++;
+            }
+            if (*label != ps3gl.vring.fence_val[seg])
+                printf("[ps3gl] WARNING: vring segment %d fence timed out (val=%u label=%u)\n",
+                       seg, ps3gl.vring.fence_val[seg], *label);
         }
-        if (*ps3gl.vring.fence_label != ps3gl.vring.fence_val)
-            printf("[ps3gl] WARNING: vring fence timed out (val=%u label=%u)\n",
-                   ps3gl.vring.fence_val, *ps3gl.vring.fence_label);
     }
 
     ps3gl.vring.head = 0;
@@ -182,18 +186,26 @@ void ps3gl_begin_frame(void)
     ps3gl.mv.dirty  = 1;
     ps3gl.proj.dirty = 1;
     ps3gl.active_shader = -1;
+    /* Reassert the VP once per frame too, not just the FP-driven key above --
+     * anything that shares the RSX between our draws (sysutil overlays like the
+     * OSK, message/trophy dialogs) can rebind its own vertex program, and our
+     * active_vp cache has no way to see that. Reloading once per frame bounds
+     * the staleness window instead of letting it persist for the whole session. */
+    ps3gl.active_vp = NULL;
     for (int i = 0; i < PS3GL_MAX_TMUS; i++)
         ps3gl.tmu[i].dirty = 1;
 }
 
 void ps3gl_end_frame(void)
 {
-    /* Write a backend label after all this frame's draw commands.
-     * The RSX pipeline writes fence_val to fence_label only after it has
-     * drained all preceding vertex fetches — safe to reuse the ring after. */
+    /* Backend label write, after this frame's draws: RSX only writes fence_val to fence_label
+     * once it has drained every preceding vertex fetch -- begin_frame seeing this value is what makes the segment safe to reuse. */
     gcmContextData *ctx = ps3gl_get_ctx();
-    if (ctx && ps3gl.vring.fence_label) {
-        ps3gl.vring.fence_val++;
-        rsxSetWriteBackendLabel(ctx, PS3GL_LABEL_VRING, ps3gl.vring.fence_val);
+    int seg = ps3gl.vring.cur_seg;
+    if (ctx && ps3gl.vring.fence_label[seg]) {
+        ps3gl.vring.fence_val[seg]++;
+        rsxSetWriteBackendLabel(ctx,
+            seg == 0 ? PS3GL_LABEL_VRING_SEG0 : PS3GL_LABEL_VRING_SEG1,
+            ps3gl.vring.fence_val[seg]);
     }
 }

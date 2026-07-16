@@ -202,8 +202,8 @@ void PS3_OSK_SysutilCallback(u64 status, u64 param)
                 if (!osk_ime_field[0])
                     osk_inject_result(osk_return.str, osk_return.len);
 
-                /* TA cvar path: set ui_ime_text/field/done so QVM can write
-                 * result directly into the field cvar without needing g_editingField. */
+                /* TA's g_editingField path never fires, so write straight to the
+                 * field cvar instead -- ui_ime_text/field/done, QVM picks it up. */
                 if (osk_ime_field[0]) {
                     int i, out = 0;
                     char ascii[256];

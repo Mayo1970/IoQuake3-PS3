@@ -209,6 +209,20 @@ extern	dma_t	dma;
 extern	portable_samplepair_t s_rawsamples[MAX_RAW_STREAMS][MAX_RAW_SAMPLES];
 extern	int		s_rawend[MAX_RAW_STREAMS];
 
+#ifdef __PS3__
+/* Stream 0 (cinematics + background music, see S_UpdateBackgroundTrack and
+ * cl_cin.c's RoQ audio) needs a deeper ring than the other MAX_RAW_STREAMS-1
+ * voice-chat streams: RoQ audio legitimately runs 13500-16200 samples ahead
+ * of s_soundtime, more than MAX_RAW_SAMPLES=8192 on this port. Giving ALL
+ * streams that depth costs +~8 MB of static memory and hangs at boot
+ * (confirmed on hardware) -- a dedicated stream-0-only buffer costs +128 KB
+ * instead. See CLAUDE.md audio pipeline notes. */
+#ifndef MAX_RAW_SAMPLES_STREAM0
+#define MAX_RAW_SAMPLES_STREAM0 16384
+#endif
+extern	portable_samplepair_t s_rawsamples0[MAX_RAW_SAMPLES_STREAM0];
+#endif
+
 extern cvar_t *s_volume;
 extern cvar_t *s_musicVolume;
 extern cvar_t *s_muted;

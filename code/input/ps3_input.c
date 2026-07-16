@@ -37,6 +37,10 @@ static padData  ps3_pad_data;
 static qboolean ps3_pad_connected = qfalse;
 static qboolean ps3_quit_pressed  = qfalse;
 
+/* Port the active pad enumerates on -- BT/USB reconnects can land on a
+ * different port than before, so this is re-resolved every frame, not hardcoded to 0. */
+static int ps3_active_pad_port = 0;
+
 static float ps3_cursor_accum_x = 0.0f;
 static float ps3_cursor_accum_y = 0.0f;
 static int ps3_btn_prev[NUM_PS3_BUTTONS];
@@ -64,7 +68,7 @@ void PS3_SetRumble(uint8_t large, uint8_t small_motor, int durationMs)
     memset(&act, 0, sizeof(act));
     act.large_motor = (uint8_t)lg;
     act.small_motor = (sm > 0) ? 1 : 0;
-    ioPadSetActDirect(0, &act);
+    ioPadSetActDirect(ps3_active_pad_port, &act);
 
     int now    = Sys_Milliseconds();
     int expiry = now + durationMs;
@@ -79,7 +83,7 @@ static void PS3_RumbleTick(void)
 
     padActParam act;
     memset(&act, 0, sizeof(act));
-    ioPadSetActDirect(0, &act);
+    ioPadSetActDirect(ps3_active_pad_port, &act);
     s_rumbleActive   = 0;
     s_rumbleExpiryMs = 0;
 }
@@ -88,7 +92,7 @@ static void PS3_RumbleStop(void)
 {
     padActParam act;
     memset(&act, 0, sizeof(act));
-    ioPadSetActDirect(0, &act);
+    ioPadSetActDirect(ps3_active_pad_port, &act);
     s_rumbleActive   = 0;
     s_rumbleExpiryMs = 0;
 }
@@ -115,9 +119,7 @@ static const int q3_key_map[NUM_PS3_BUTTONS] = {
     K_JOY8,             /* R2 analog */
 };
 
-/* ============================================================
- * USB Keyboard
- * ============================================================ */
+/* -- USB Keyboard -- */
 
 /* Raw USB HID usage code (0x04-0x65) → Q3 keynum (0 = unmapped).
  * Letters are always lowercase; shifted chars come via SE_CHAR. */
@@ -293,7 +295,8 @@ static void KB_Frame(qboolean syncOnly)
                 s_key_logged++;
             }
         } else {
-            /* nb_keycode==0 is ambiguous; use 2000ms timeout to release stuck keys. */
+            /* nb_keycode==0 means "no keys" AND "read failed" -- SDK won't say which.
+             * 2000ms emergency timeout is the only reliable way to release a stuck key. */
             for (i = 1; i < 256; i++) {
                 if (s_kb_cur[i] && (now - s_kb_last_seen[i]) > 2000) {
                     printf("[ps3kb] emergency release raw=0x%02x (2000ms idle)\n", i);
@@ -329,9 +332,7 @@ static void KB_Frame(qboolean syncOnly)
     memcpy(s_kb_prev, s_kb_cur, sizeof(s_kb_cur));
 }
 
-/* ============================================================
- * USB Mouse
- * ============================================================ */
+/* -- USB Mouse -- */
 
 static mouseInfo s_mouse_info;
 static qboolean  s_mouse_connected = qfalse;
@@ -476,6 +477,21 @@ void PS3_Input_Shutdown(void)
     Mouse_Shutdown();
 }
 
+/* Sticky port: keep the current one if still connected (avoids hopping between
+ * paired pads), else pick the first connected. Must run every frame -- BT sleep/USB replug re-enumerates. */
+static void PS3_SelectActivePadPort(void)
+{
+    if (ps3_pad_info.status[ps3_active_pad_port])
+        return;
+
+    for (int i = 0; i < 7; i++) {
+        if (ps3_pad_info.status[i]) {
+            ps3_active_pad_port = i;
+            return;
+        }
+    }
+}
+
 void PS3_Input_Frame(void)
 {
     int btn_cur[NUM_PS3_BUTTONS];
@@ -489,25 +505,28 @@ void PS3_Input_Frame(void)
     /* OSK owns the pad while open -- only keep edge state in sync. */
     if (osk_active) {
         ioPadGetInfo(&ps3_pad_info);
-        if (ps3_pad_info.status[0] && ioPadGetData(0, &ps3_pad_data) == 0) {
+        PS3_SelectActivePadPort();
+        if (ps3_pad_info.status[ps3_active_pad_port] &&
+            ioPadGetData(ps3_active_pad_port, &ps3_pad_data) == 0) {
             read_buttons(&ps3_pad_data, ps3_btn_prev);
         }
         return;
     }
 
     ioPadGetInfo(&ps3_pad_info);
+    PS3_SelectActivePadPort();
 
-    if (ps3_pad_info.status[0] == 0) {
+    if (ps3_pad_info.status[ps3_active_pad_port] == 0) {
         ps3_pad_connected = qfalse;
         return;
     }
     ps3_pad_connected = qtrue;
 
-    if (ioPadGetData(0, &ps3_pad_data) != 0)
+    if (ioPadGetData(ps3_active_pad_port, &ps3_pad_data) != 0)
         return;
 
-    /* Don't bail on len==0: ps3_pad_data still holds last poll's values,
-     * and skipping the analog accumulator freezes the menu cursor at 60fps. */
+    /* Do NOT bail on len==0 -- ps3_pad_data still holds the last poll's values.
+     * Skip the accumulator here and the menu cursor freezes solid at 60fps. */
 
     PS3_RumbleTick();
 
@@ -645,7 +664,7 @@ void PS3_Input_Frame(void)
                 if (fy >  1.0f) fy =  1.0f;
                 if (fy < -1.0f) fy = -1.0f;
 
-                /* Linear; squared curves underflow accum to 0 and stutter. */
+                /* Linear only -- a squared curve underflows the accumulator to 0 and stutters. */
                 float ax = fx * MENU_CURSOR_SPEED;
                 float ay = fy * MENU_CURSOR_SPEED;
 

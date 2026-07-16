@@ -15,10 +15,8 @@
 
 /* IPv6 stubs (AF_INET6 defined but non-functional; socket() fails at runtime). */
 
-/* sockaddr_storage -- large enough to hold any sockaddr type.
- * PSL1GHT uses BSD-style sockaddr with sa_len at offset 0 and
- * sa_family (u8) at offset 1. We must match that layout so that
- * code reading ss_family gets the actual address family, not sa_len. */
+/* sockaddr_storage must match PSL1GHT's BSD-style layout (sa_len @0, sa_family u8 @1),
+ * or code reading ss_family gets sa_len instead of the real address family. */
 #ifndef _SS_SIZE
 #define _SS_MAXSIZE 128
 #define _SS_ALIGNSIZE (sizeof(int64_t))
@@ -113,13 +111,10 @@ static inline int gethostname(char *name, size_t len)
 /* Include PSL1GHT's netdb.h for struct addrinfo, AI_PASSIVE, etc. */
 #include <netdb.h>
 
-/* PSL1GHT's netdb.h provides struct addrinfo and AI_* defines but
- * does NOT provide getaddrinfo/freeaddrinfo/getnameinfo functions.
- * We provide minimal implementations below. */
+/* PSL1GHT's netdb.h gives struct addrinfo and AI_* defines but no
+ * getaddrinfo/freeaddrinfo/getnameinfo — minimal implementations below fill the gap. */
 
-/* Initialize PS3 networking.
- * Must be called before any socket operations.
- * Returns 0 on success, negative on failure. */
+/* Initialize PS3 networking; must run before any socket call. Returns 0 on success, negative on failure. */
 static inline int PS3_Net_Init(void)
 {
     int ret;

@@ -1,23 +1,13 @@
-/*
- * ps3gl_shaders.c -- GL-to-RSX layer: shader program management.
- *
- * Manages pre-compiled Cg vertex/fragment programs for each texenv mode.
- * One vertex program is shared across all modes. Each texenv mode
- * (disabled, modulate, replace, decal, add, blend) has its own fragment
- * program.
- *
- * When shaders are not yet compiled (PS3GL_SHADERS_AVAILABLE == 0),
- * all shader operations are no-ops and drawing produces no visible output.
- * Once the toolchain is built and shaders compiled, this module loads the
- * embedded binaries and wires them into the RSX pipeline.
- */
+/* ps3gl_shaders.c -- GL-to-RSX layer: shader program management. One shared vertex
+ * program, one fragment program per texenv mode. If PS3GL_SHADERS_AVAILABLE==0 the shaders weren't compiled -- every draw is a silent no-op, nothing renders. */
 
 #include "ps3gl.h"
 #include "ps3gl_shader_data.h"
 #include <stdio.h>
 
-/* Forward declaration */
+/* Forward declarations */
 extern const float *ps3gl_get_mvp(void);
+extern uint32_t ps3gl_get_mvp_generation(void);
 
 #if PS3GL_SHADERS_AVAILABLE
 
@@ -65,6 +55,8 @@ void ps3gl_shaders_init(void)
     load_fp(&ps3gl.shaders[PS3GL_TENV_MODULATE2], shader_fp_modulate2_data, shader_fp_modulate2_data_size);
 
     ps3gl.active_shader = -1;
+    ps3gl.active_vp = NULL;
+    ps3gl.mvp_uploaded_gen = 0;
     printf("[ps3gl] Shaders loaded: %d modes\n", PS3GL_TENV_COUNT);
 }
 
@@ -102,10 +94,15 @@ void ps3gl_apply_shader(void)
     gcmContextData *ctx = ps3gl_get_ctx();
     if (!ctx) return;
 
-    /* Only reload VP/FP programs when shader key changes */
-    if (key != ps3gl.active_shader) {
+    /* All shader slots share one physical vertex program (see ps3gl_shaders_init),
+     * so the VP only needs reloading when it's not already the one bound on the
+     * RSX -- not on every FP/texenv key change. */
+    if (s->vp != ps3gl.active_vp) {
         rsxLoadVertexProgram(ctx, s->vp, s->vp_ucode);
+        ps3gl.active_vp = s->vp;
+    }
 
+    if (key != ps3gl.active_shader) {
         if (s->fp_ucode) {
             rsxLoadFragmentProgramLocation(ctx, s->fp, s->fp_offset,
                                            GCM_LOCATION_RSX);
@@ -114,15 +111,19 @@ void ps3gl_apply_shader(void)
         ps3gl.active_shader = key;
     }
 
-    /* MVP matrix must be uploaded every draw call (changes per-surface) */
-    const float *mvp = ps3gl_get_mvp();
-    if (s->mvp_const) {
+    /* MVP constant lives in the VP's own constant memory and is independent of
+     * which FP is bound, so it only needs re-patching when it actually changed
+     * since the last upload (constants are patched into RSX microcode -- not
+     * free). */
+    uint32_t mvp_gen = ps3gl_get_mvp_generation();
+    if (s->mvp_const && mvp_gen != ps3gl.mvp_uploaded_gen) {
+        const float *mvp = ps3gl_get_mvp();
         rsxSetVertexProgramParameter(ctx, s->vp, s->mvp_const, mvp);
+        ps3gl.mvp_uploaded_gen = mvp_gen;
     }
 
-    /* Upload world-space clip plane when the recompiled shader supports it.
-     * NULL when the old pre-clip-plane shader binary is in use;
-     * the software clip path in ps3gl_draw.c handles that case instead. */
+    /* Upload the world-space clip plane only if this shader binary was recompiled to support
+     * it (clip_plane_const is NULL on the old pre-clip-plane binary -- software clip in ps3gl_draw.c covers that case). */
     if (s->clip_plane_const) {
         rsxSetVertexProgramParameter(ctx, s->vp, s->clip_plane_const,
                                      ps3gl.clip_plane);

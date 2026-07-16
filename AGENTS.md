@@ -63,8 +63,7 @@ USB keyboard/mouse, cinematics, and OGG music.
 | `make ta` / `make TA=1 pkg` | Team Arena | `STANDALONETA` | `build_ta/` | `IOTAPS300` |
 | `make classic` / `make CLASSIC=1 pkg` | Quake 3 Classic | `CLASSIC LEGACY_PROTOCOL` | `build_qc/` | `IOQCPS301` |
 
-- `make all-flavors` builds the three standard PKGs (Q3/OA/TA) in sequence.
-  Classic is built separately.
+- `make all-flavors` builds all four PKGs (Q3/TA/OA/Classic) in sequence.
 - `make clean` wipes all build dirs. Append `pkg` (installable PKG), `self`
   (raw SELF), or `install` (FTP-ready dir).
 - `make DEBUG=1` adds `-DPS3_DEBUG -g`, enables the `ps3_log()` file and
@@ -109,6 +108,26 @@ USB keyboard/mouse, cinematics, and OGG music.
   (`q_shared.h` hardcodes 64). Size arrays for 64.
 - `MAX_RAW_STREAMS` must be ≥ `2*MAX_CLIENTS+1` = **129** (`= 2*64+1` in
   ps3_platform.h) or `cl_parse.c` voice-chat writes OOB into `s_rawsamples[]`.
+- `MAX_RAW_SAMPLES` = **8192** (`s_rawsamples[MAX_RAW_STREAMS][MAX_RAW_SAMPLES]`,
+  set in **both** `ps3_platform.h` and the Makefile's `CFLAGS` — the Makefile
+  `-D` wins over the header's `#ifndef` fallback on every compile, clean or
+  not, so both must be edited together or a header-only change silently does
+  nothing). RoQ cinematic audio (stream 0) legitimately runs ~13500-16200
+  samples ahead of `s_soundtime`, more than 8192 holds — **do not bump this
+  constant to fix that**, confirmed on real hardware that raising it for all
+  129 streams (+~8 MB static memory) hangs at boot despite the ~25 MB margin
+  looking sufficient on paper.
+- Cinematic/music crackle is instead fixed via a **stream-0-only** deeper
+  buffer: `s_rawsamples0[MAX_RAW_SAMPLES_STREAM0]` (16384, `snd_dma.c`,
+  declared in `snd_local.h`, sized in `ps3_platform.h`) is a separate array
+  used only when `stream == 0` (cinematics + background music — see
+  `S_Base_RawSamples`, `S_PaintChannels` in `snd_mix.c`, and
+  `S_UpdateBackgroundTrack`'s `S_RAW_STREAM0_CAP`); the other 128 voice-chat
+  streams keep using the small shared `s_rawsamples[][MAX_RAW_SAMPLES]` array.
+  Cost is +128 KB, not +8 MB. If you touch raw-stream masking logic, every
+  site must pick its mask from the same stream-0-vs-other branch — a mismatch
+  between the write-side mask (`S_Base_RawSamples`) and read-side mask
+  (`S_PaintChannels`) reads/writes the wrong ring slot.
 
 ---
 
@@ -208,8 +227,15 @@ the PS3 block in `q_platform.h` does **not** define `HAVE_VM_COMPILED`.
   whole-console freeze. Never rely on the previous carve's size keeping alignment.
 - **Ring/arena GPU fences**: use `rsxSetWriteBackendLabel` (drains the pipeline),
   **not** a command label (races ahead of vertex fetch). Label indices < 64 are
-  system-reserved; vring uses 64, tess arena uses 65. `gcmGetLabelAddress` returns
-  `u32*` — cast to `volatile u32*`.
+  system-reserved. The vring is **double-buffered per frame** (`ps3gl_vring_t`,
+  `code/gl/ps3gl.h`): segment 0 uses label 64, segment 1 uses label 66 (65 stays
+  reserved), `ps3gl_begin_frame` swaps segments and waits only on the one it's
+  about to reuse. A same-frame overflow refuses to wrap (drops that batch with a
+  warning) rather than clobbering earlier draws still in flight — never make it
+  silently wrap again. The tess-arena zero-copy path (`ps3gl_draw.c`'s direct
+  `rsxAddressToOffset` bind onto Q3's own `tess.xyz`) has **no fence at all** —
+  do not assume one exists; this is a known, deferred gap, not yet hardware-
+  validated. `gcmGetLabelAddress` returns `u32*` — cast to `volatile u32*`.
 - **Dual-texture lightmap**: `RB_StageIteratorLightmappedMultitexture` needs the
   `PS3GL_TENV_MODULATE2` key (tex0×tex1). If lightmaps render flat-lit,
   `ps3gl_shader_key()` is only looking at TMU0.

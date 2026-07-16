@@ -369,9 +369,8 @@ qboolean Sys_RandomBytes(byte *string, int len)
     return qtrue;
 }
 
-/* Local XMB user (works offline) -> PSN nickname -> "player".
- * NICKNAME (0x113) needs sign-in; CURRENT_USERNAME (0x131) is always available.
- * Each param requires its own buffer size or sysUtil returns INVALID_VALUE. */
+/* Local XMB user (works offline) -> PSN nickname (needs sign-in) -> "player".
+ * Each sysUtil param needs its OWN exact buffer size or it returns INVALID_VALUE — mix them up and you silently get no name. */
 char *Sys_GetCurrentUser(void)
 {
     static char username[SYSUTIL_SYSTEMPARAM_NICKNAME_SIZE];
@@ -448,8 +447,8 @@ void Sys_PlatformInit(void)
 
     Sys_SetFloatEnv();
 
-    /* Real ceiling before Com_InitHunkMemory; raise DEF_COMHUNKMEGS only if
-     * this stays comfortably above hunk+zone. */
+    /* Real ceiling before Com_InitHunkMemory. ~145MB free is all we get (GameOS
+     * eats the rest) — don't raise DEF_COMHUNKMEGS unless this clears hunk+zone with room to spare. */
     free_mb = ps3_probe_free_user_mem_mb();
     snprintf(line, sizeof(line),
              "[mem] free user memory at Sys_PlatformInit: ~%u MB "

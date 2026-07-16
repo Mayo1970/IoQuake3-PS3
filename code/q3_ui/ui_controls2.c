@@ -289,6 +289,14 @@ static configcvar_t g_configcvars[] =
 
 static menucommon_s *g_movement_controls[] =
 {
+	(menucommon_s *)&s_controls.walkforward,
+	(menucommon_s *)&s_controls.backpedal,
+	(menucommon_s *)&s_controls.stepleft,
+	(menucommon_s *)&s_controls.stepright,
+	(menucommon_s *)&s_controls.turnleft,
+	(menucommon_s *)&s_controls.turnright,
+	(menucommon_s *)&s_controls.sidestep,
+	(menucommon_s *)&s_controls.run,
 	(menucommon_s *)&s_controls.alwaysrun,
 	(menucommon_s *)&s_controls.moveup,
 	(menucommon_s *)&s_controls.movedown,
@@ -299,12 +307,29 @@ static menucommon_s *g_weapons_controls[] = {
 	(menucommon_s *)&s_controls.attack,
 	(menucommon_s *)&s_controls.nextweapon,
 	(menucommon_s *)&s_controls.prevweapon,
+	(menucommon_s *)&s_controls.chainsaw,
+	(menucommon_s *)&s_controls.machinegun,
+	(menucommon_s *)&s_controls.shotgun,
+	(menucommon_s *)&s_controls.grenadelauncher,
+	(menucommon_s *)&s_controls.rocketlauncher,
+	(menucommon_s *)&s_controls.lightning,
+	(menucommon_s *)&s_controls.railgun,
+	(menucommon_s *)&s_controls.plasma,
+	(menucommon_s *)&s_controls.bfg,
 	(menucommon_s *)&s_controls.autoswitch,
 	NULL,
 };
 
 static menucommon_s *g_looking_controls[] = {
+	(menucommon_s *)&s_controls.mouselook,
+	(menucommon_s *)&s_controls.lookup,
+	(menucommon_s *)&s_controls.lookdown,
+	(menucommon_s *)&s_controls.centerview,
 	(menucommon_s *)&s_controls.zoomview,
+	(menucommon_s *)&s_controls.freelook,
+	(menucommon_s *)&s_controls.invertmouse,
+	(menucommon_s *)&s_controls.smoothmouse,
+	(menucommon_s *)&s_controls.sensitivity,
 	(menucommon_s *)&s_controls.joythreshold,
 	(menucommon_s *)&s_controls.rumbleenable,
 	(menucommon_s *)&s_controls.zoomfov,
@@ -314,6 +339,12 @@ static menucommon_s *g_looking_controls[] = {
 static menucommon_s *g_misc_controls[] = {
 	(menucommon_s *)&s_controls.showscores,
 	(menucommon_s *)&s_controls.useitem,
+	(menucommon_s *)&s_controls.gesture,
+	(menucommon_s *)&s_controls.chat,
+	(menucommon_s *)&s_controls.chat2,
+	(menucommon_s *)&s_controls.chat3,
+	(menucommon_s *)&s_controls.chat4,
+	(menucommon_s *)&s_controls.togglemenu,
 	NULL,
 };
 
@@ -1662,12 +1693,28 @@ static void Controls_MenuInit( void )
 	Menu_AddItem( &s_controls.menu, &s_controls.misc );
 
 	/* LOOK */
+	Menu_AddItem( &s_controls.menu, &s_controls.mouselook );
+	Menu_AddItem( &s_controls.menu, &s_controls.lookup );
+	Menu_AddItem( &s_controls.menu, &s_controls.lookdown );
+	Menu_AddItem( &s_controls.menu, &s_controls.centerview );
 	Menu_AddItem( &s_controls.menu, &s_controls.zoomview );
+	Menu_AddItem( &s_controls.menu, &s_controls.freelook );
+	Menu_AddItem( &s_controls.menu, &s_controls.invertmouse );
+	Menu_AddItem( &s_controls.menu, &s_controls.smoothmouse );
+	Menu_AddItem( &s_controls.menu, &s_controls.sensitivity );
 	Menu_AddItem( &s_controls.menu, &s_controls.joythreshold );
 	Menu_AddItem( &s_controls.menu, &s_controls.rumbleenable );
 	Menu_AddItem( &s_controls.menu, &s_controls.zoomfov );
 
 	/* MOVE */
+	Menu_AddItem( &s_controls.menu, &s_controls.walkforward );
+	Menu_AddItem( &s_controls.menu, &s_controls.backpedal );
+	Menu_AddItem( &s_controls.menu, &s_controls.stepleft );
+	Menu_AddItem( &s_controls.menu, &s_controls.stepright );
+	Menu_AddItem( &s_controls.menu, &s_controls.turnleft );
+	Menu_AddItem( &s_controls.menu, &s_controls.turnright );
+	Menu_AddItem( &s_controls.menu, &s_controls.sidestep );
+	Menu_AddItem( &s_controls.menu, &s_controls.run );
 	Menu_AddItem( &s_controls.menu, &s_controls.alwaysrun );
 	Menu_AddItem( &s_controls.menu, &s_controls.moveup );
 	Menu_AddItem( &s_controls.menu, &s_controls.movedown );
@@ -1676,11 +1723,26 @@ static void Controls_MenuInit( void )
 	Menu_AddItem( &s_controls.menu, &s_controls.attack );
 	Menu_AddItem( &s_controls.menu, &s_controls.nextweapon );
 	Menu_AddItem( &s_controls.menu, &s_controls.prevweapon );
+	Menu_AddItem( &s_controls.menu, &s_controls.chainsaw );
+	Menu_AddItem( &s_controls.menu, &s_controls.machinegun );
+	Menu_AddItem( &s_controls.menu, &s_controls.shotgun );
+	Menu_AddItem( &s_controls.menu, &s_controls.grenadelauncher );
+	Menu_AddItem( &s_controls.menu, &s_controls.rocketlauncher );
+	Menu_AddItem( &s_controls.menu, &s_controls.lightning );
+	Menu_AddItem( &s_controls.menu, &s_controls.railgun );
+	Menu_AddItem( &s_controls.menu, &s_controls.plasma );
+	Menu_AddItem( &s_controls.menu, &s_controls.bfg );
 	Menu_AddItem( &s_controls.menu, &s_controls.autoswitch );
 
 	/* MISC */
 	Menu_AddItem( &s_controls.menu, &s_controls.showscores );
 	Menu_AddItem( &s_controls.menu, &s_controls.useitem );
+	Menu_AddItem( &s_controls.menu, &s_controls.gesture );
+	Menu_AddItem( &s_controls.menu, &s_controls.chat );
+	Menu_AddItem( &s_controls.menu, &s_controls.chat2 );
+	Menu_AddItem( &s_controls.menu, &s_controls.chat3 );
+	Menu_AddItem( &s_controls.menu, &s_controls.chat4 );
+	Menu_AddItem( &s_controls.menu, &s_controls.togglemenu );
 
 	Menu_AddItem( &s_controls.menu, &s_controls.back );
 

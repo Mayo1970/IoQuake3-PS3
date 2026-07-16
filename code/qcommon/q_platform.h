@@ -42,7 +42,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #endif
 
 #if (defined(powerc) || defined(powerpc) || defined(ppc) || \
-	defined(__ppc) || defined(__ppc__)) && !defined(C_ONLY)
+	defined(__ppc) || defined(__ppc__) || \
+	defined(__PPC__) || defined(__powerpc__) || defined(__powerpc64__) || \
+	defined(_ARCH_PPC) || defined(_ARCH_PPC64)) && !defined(C_ONLY)
 #define idppc 1
 #if defined(__VEC__)
 #define idppc_altivec 1

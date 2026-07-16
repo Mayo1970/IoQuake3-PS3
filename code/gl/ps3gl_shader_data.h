@@ -1,7 +1,5 @@
-/*
- * ps3gl_shader_data.h -- Auto-generated embedded shader binaries.
- * Do not edit manually. Regenerate with: cd shaders && ./compile_shaders.sh
- */
+/* ps3gl_shader_data.h -- Auto-generated embedded shader binaries. Do not edit manually.
+ * Regenerate with: cd shaders && ./compile_shaders.sh */
 #ifndef PS3GL_SHADER_DATA_H
 #define PS3GL_SHADER_DATA_H
 

@@ -140,24 +140,18 @@ void FBO_CreateBuffer(FBO_t *fbo, int format, int index, int multisample)
 
 		case GL_DEPTH_COMPONENT:
 		case GL_DEPTH_COMPONENT16_ARB:
-#if !defined(__WIIU__)
 		case GL_DEPTH_COMPONENT24_ARB:
 		case GL_DEPTH_COMPONENT32_ARB:
-#endif
 			fbo->depthFormat = format;
 			pRenderBuffer = &fbo->depthBuffer;
 			attachment = GL_DEPTH_ATTACHMENT;
 			break;
 
-#if !defined(__WIIU__)
 		case GL_STENCIL_INDEX:
 		case GL_STENCIL_INDEX1:
 		case GL_STENCIL_INDEX4:
-#endif
 		case GL_STENCIL_INDEX8:
-#if !defined(__WIIU__)
 		case GL_STENCIL_INDEX16:
-#endif
 			fbo->stencilFormat = format;
 			pRenderBuffer = &fbo->stencilBuffer;
 			attachment = GL_STENCIL_ATTACHMENT;
@@ -271,10 +265,8 @@ void FBO_Init(void)
 	R_IssuePendingRenderCommands();
 
 	hdrFormat = GL_RGBA8;
-#if !defined(__WIIU__)
 	if (r_hdr->integer && glRefConfig.textureFloat)
 		hdrFormat = GL_RGBA16F_ARB;
-#endif
 
 	if (glRefConfig.framebufferMultisample)
 		qglGetIntegerv(GL_MAX_SAMPLES, &multisample);
@@ -294,11 +286,7 @@ void FBO_Init(void)
 	{
 		tr.renderFbo = FBO_Create("_render", tr.renderDepthImage->width, tr.renderDepthImage->height);
 		FBO_CreateBuffer(tr.renderFbo, hdrFormat, 0, multisample);
-#if defined(__WIIU__)
-		FBO_CreateBuffer(tr.renderFbo, GL_DEPTH_COMPONENT16_ARB, 0, 0);
-#else
 		FBO_CreateBuffer(tr.renderFbo, GL_DEPTH_COMPONENT24, 0, multisample);
-#endif
 		R_CheckFBO(tr.renderFbo);
 
 		tr.msaaResolveFbo = FBO_Create("_msaaResolve", tr.renderDepthImage->width, tr.renderDepthImage->height);
@@ -310,11 +298,7 @@ void FBO_Init(void)
 	{
 		tr.renderFbo = FBO_Create("_render", tr.renderDepthImage->width, tr.renderDepthImage->height);
 		FBO_AttachImage(tr.renderFbo, tr.renderImage, GL_COLOR_ATTACHMENT0, 0);
-#if defined(__WIIU__)
-		FBO_CreateBuffer(tr.renderFbo, GL_DEPTH_COMPONENT16_ARB, 0, 0);
-#else
 		FBO_AttachImage(tr.renderFbo, tr.renderDepthImage, GL_DEPTH_ATTACHMENT, 0);
-#endif
 		R_CheckFBO(tr.renderFbo);
 	}
 
@@ -330,11 +314,7 @@ void FBO_Init(void)
 	{
 		tr.screenScratchFbo = FBO_Create("screenScratch", tr.screenScratchImage->width, tr.screenScratchImage->height);
 		FBO_AttachImage(tr.screenScratchFbo, tr.screenScratchImage, GL_COLOR_ATTACHMENT0, 0);
-#if defined(__WIIU__)
-		FBO_CreateBuffer(tr.screenScratchFbo, GL_DEPTH_COMPONENT16_ARB, 0, 0);
-#else
 		FBO_AttachImage(tr.screenScratchFbo, tr.renderDepthImage, GL_DEPTH_ATTACHMENT, 0);
-#endif
 		R_CheckFBO(tr.screenScratchFbo);
 	}
 
@@ -346,7 +326,6 @@ void FBO_Init(void)
 		R_CheckFBO(tr.sunRaysFbo);
 	}
 
-#if !defined(__WIIU__)
 	if (MAX_DRAWN_PSHADOWS && tr.pshadowMaps[0])
 	{
 		for( i = 0; i < MAX_DRAWN_PSHADOWS; i++)
@@ -368,7 +347,6 @@ void FBO_Init(void)
 			R_CheckFBO(tr.sunShadowFbo[i]);
 		}
 	}
-#endif /* !__WIIU__ */
 
 	if (tr.screenShadowImage)
 	{
@@ -429,11 +407,7 @@ void FBO_Init(void)
 	{
 		tr.renderCubeFbo = FBO_Create("_renderCubeFbo", tr.renderCubeImage->width, tr.renderCubeImage->height);
 		FBO_AttachImage(tr.renderCubeFbo, tr.renderCubeImage, GL_COLOR_ATTACHMENT0, 0);
-#if defined(__WIIU__)
-		FBO_CreateBuffer(tr.renderCubeFbo, GL_DEPTH_COMPONENT16_ARB, 0, 0);
-#else
 		FBO_CreateBuffer(tr.renderCubeFbo, GL_DEPTH_COMPONENT24_ARB, 0, 0);
-#endif
 		R_CheckFBO(tr.renderCubeFbo);
 	}
 

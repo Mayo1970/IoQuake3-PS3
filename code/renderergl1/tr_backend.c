@@ -495,8 +495,8 @@ void RB_BeginDrawingView (void) {
 		qglClipPlane (GL_CLIP_PLANE0, plane2);
 		qglEnable (GL_CLIP_PLANE0);
 #ifdef __PS3__
-		/* Supply the world-space plane directly so ps3gl can evaluate it
-		 * without the eye-space transform confusion from plane2/s_flipMatrix. */
+		/* RSX has no fixed-function clip plane -- must feed ps3gl WORLD-space
+		 * plane[]. Use eye-space plane2/s_flipMatrix here and the sign flips: black mirror. */
 		ps3gl_SetWorldClipPlane(plane[0], plane[1], plane[2], plane[3]);
 #endif
 	} else {

@@ -23,10 +23,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../qcommon/q_shared.h"
 #include "../qcommon/qcommon.h"
 
-#ifdef __WIIU__
-#include <coreinit/time.h>
-#endif
-
 #ifdef _WIN32
 #	include <winsock2.h>
 #	include <ws2tcpip.h>
@@ -223,7 +219,7 @@ char *NET_ErrorString( void ) {
 static void NetadrToSockadr( netadr_t *a, struct sockaddr *s ) {
 	if( a->type == NA_BROADCAST ) {
 #ifdef __PS3__
-		((struct sockaddr_in *)s)->sin_len = sizeof(struct sockaddr_in); /* __PS3__: set sin_len */
+		((struct sockaddr_in *)s)->sin_len = sizeof(struct sockaddr_in); /* PSL1GHT wants BSD sin_len set or send() returns ENOENT -- ask how I know */
 #endif
 		((struct sockaddr_in *)s)->sin_family = AF_INET;
 		((struct sockaddr_in *)s)->sin_port = a->port;
@@ -231,7 +227,7 @@ static void NetadrToSockadr( netadr_t *a, struct sockaddr *s ) {
 	}
 	else if( a->type == NA_IP ) {
 #ifdef __PS3__
-		((struct sockaddr_in *)s)->sin_len = sizeof(struct sockaddr_in); /* __PS3__: set sin_len */
+		((struct sockaddr_in *)s)->sin_len = sizeof(struct sockaddr_in); /* PSL1GHT wants BSD sin_len set or send() returns ENOENT -- ask how I know */
 #endif
 		((struct sockaddr_in *)s)->sin_family = AF_INET;
 		((struct sockaddr_in *)s)->sin_addr.s_addr = *(int *)&a->ip;
@@ -544,7 +540,7 @@ qboolean NET_GetPacket(netadr_t *net_from, msg_t *net_message, fd_set *fdr)
 	socklen_t	fromlen;
 	int		err;
 	
-	if(ip_socket != INVALID_SOCKET && (!fdr || FD_ISSET(ip_socket, fdr))) /* __PS3__: skip FD_ISSET */
+	if(ip_socket != INVALID_SOCKET && (!fdr || FD_ISSET(ip_socket, fdr))) /* PSL1GHT sets bit 30 on socket fds -- FD_ISSET on that is garbage, so skip it when fdr==NULL */
 	{
 		fromlen = sizeof(from);
 		ret = recvfrom( ip_socket, (void *)net_message->data, net_message->maxsize, 0, (struct sockaddr *) &from, &fromlen );
@@ -588,7 +584,7 @@ qboolean NET_GetPacket(netadr_t *net_from, msg_t *net_message, fd_set *fdr)
 		}
 	}
 	
-	if(ip6_socket != INVALID_SOCKET && (!fdr || FD_ISSET(ip6_socket, fdr))) /* __PS3__: skip FD_ISSET */
+	if(ip6_socket != INVALID_SOCKET && (!fdr || FD_ISSET(ip6_socket, fdr))) /* PSL1GHT fd bit-30 issue again, see NET_GetPacket's ip_socket check above */
 	{
 		fromlen = sizeof(from);
 		ret = recvfrom(ip6_socket, (void *)net_message->data, net_message->maxsize, 0, (struct sockaddr *) &from, &fromlen);
@@ -616,7 +612,7 @@ qboolean NET_GetPacket(netadr_t *net_from, msg_t *net_message, fd_set *fdr)
 		}
 	}
 
-	if(multicast6_socket != INVALID_SOCKET && multicast6_socket != ip6_socket && (!fdr || FD_ISSET(multicast6_socket, fdr))) /* __PS3__: skip FD_ISSET */
+	if(multicast6_socket != INVALID_SOCKET && multicast6_socket != ip6_socket && (!fdr || FD_ISSET(multicast6_socket, fdr))) /* same PSL1GHT fd bit-30 issue, see above */
 	{
 		fromlen = sizeof(from);
 		ret = recvfrom(multicast6_socket, (void *)net_message->data, net_message->maxsize, 0, (struct sockaddr *) &from, &fromlen);
@@ -881,7 +877,7 @@ SOCKET NET_IPSocket( char *net_interface, int port, int *err ) {
 	}
 
 #ifdef __PS3__
-	address.sin_len = sizeof(address); /* __PS3__: set bind sin_len */
+	address.sin_len = sizeof(address); /* same PSL1GHT sin_len nonsense as NetadrToSockadr -- don't drop this */
 #endif
 	if( bind( newsocket, (void *)&address, sizeof(address) ) == SOCKET_ERROR ) {
 		Com_Printf( "WARNING: NET_IPSocket: bind: %s\n", NET_ErrorString() );
@@ -1675,7 +1671,8 @@ Sleeps msec or until something happens on the network
 void NET_Sleep(int msec)
 {
 #ifdef __PS3__
-	/* __PS3__: skip select */
+	/* PSL1GHT select()/FD_ISSET are useless on our bit-30 fds -- don't even
+	 * try. Just poll NET_Event and sleep out the rest of the frame budget. */
 	NET_Event(NULL);
 	if(msec > 0) {
 		if(msec > 16) msec = 16;
@@ -1690,17 +1687,6 @@ void NET_Sleep(int msec)
 
 	if(msec < 0)
 		msec = 0;
-
-#ifdef __WIIU__
-	/* wut select() is unreliable even with a zero timeout and a valid
-	 * fd_set -- it can return a false positive, causing NET_Event ->
-	 * recvfrom to block on a socket whose FIONBIO may not have taken
-	 * effect.  Just yield the CPU for the requested interval; UDP
-	 * packets are drained by the game's regular Com_EventLoop path. */
-	if (msec > 0)
-		OSSleepTicks(OSMillisecondsToTicks(msec));
-	return;
-#endif
 
 	FD_ZERO(&fdr);
 

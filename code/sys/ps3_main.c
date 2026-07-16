@@ -102,16 +102,17 @@ void ps3_log(const char *msg)
 #define PS3LOG(fmt, ...) ((void)0)
 #endif
 
-/* Try HDD, fall back to USB. */
-static const char *ps3_base_path  = "/dev_hdd0/data/ioq3";
-static const char *ps3_usb_path   = "/dev_usb000/quake3";
+/* Try HDD, fall back to USB (any of usb000..usb006 -- a stick can enumerate
+ * on any port depending on how many devices are plugged in). */
+static char ps3_base_path[64] = "/dev_hdd0/data/ioq3";
 
 static qboolean PS3_SetupFilesystem(void)
 {
-    const char *probe_hdd = "/dev_hdd0/data/ioq3/" PS3_GAMEDIR "/pak0.pk3";
-    const char *probe_usb = "/dev_usb000/quake3/"  PS3_GAMEDIR "/pak0.pk3";
+    char probe[128];
+    char usb_path[64];
 
-    FILE *f = fopen(probe_hdd, "rb");
+    snprintf(probe, sizeof(probe), "/dev_hdd0/data/ioq3/" PS3_GAMEDIR "/pak0.pk3");
+    FILE *f = fopen(probe, "rb");
     if (f) {
         fclose(f);
         chdir(ps3_base_path);
@@ -119,13 +120,18 @@ static qboolean PS3_SetupFilesystem(void)
         return qtrue;
     }
 
-    f = fopen(probe_usb, "rb");
-    if (f) {
-        fclose(f);
-        chdir(ps3_usb_path);
-        ps3_base_path = ps3_usb_path;
-        PS3LOG("Using USB path: %s", ps3_usb_path);
-        return qtrue;
+    for (int usb = 0; usb < 7; usb++) {
+        snprintf(usb_path, sizeof(usb_path), "/dev_usb%03d/quake3", usb);
+        snprintf(probe, sizeof(probe), "%s/" PS3_GAMEDIR "/pak0.pk3", usb_path);
+
+        f = fopen(probe, "rb");
+        if (f) {
+            fclose(f);
+            chdir(usb_path);
+            snprintf(ps3_base_path, sizeof(ps3_base_path), "%s", usb_path);
+            PS3LOG("Using USB path: %s", ps3_base_path);
+            return qtrue;
+        }
     }
 
     printf("FATAL: " PS3_GAMEDIR "/pak0.pk3 not found on HDD or USB\n");
@@ -261,8 +267,6 @@ int main(int argc, char *argv[])
     PS3_Input_Init();
     printf("[ps3] Input OK\n");
     PS3_OSK_Init();
-    PS3_Snd_Init();
-    printf("[ps3] Audio OK\n");
 
     /* RSX must be up before Com_Init -- CL_Init issues BeginFrame immediately. */
     PS3_RSX_Init();
@@ -277,8 +281,8 @@ int main(int argc, char *argv[])
     extern void Sys_PlatformInit(void);
     Sys_PlatformInit();
 
-    /* Cmdline values beat Cvar_Get defaults; Cvar_Set from Sys_Init is
-     * overwritten by config load. Strip quotes/ctrl so we don't break parsing. */
+    /* Cmdline wins over Cvar_Get defaults. Cvar_Set in Sys_Init gets clobbered
+     * by config load, so don't bother. Strip quotes/ctrl so we don't break parsing. */
     extern char *Sys_GetCurrentUser(void);
     static char ps3_nick[64];
     {
@@ -318,13 +322,13 @@ int main(int argc, char *argv[])
         "+set r_subdivisions 4 "
         "+set r_drawSun 0 "
         "+set r_primitives 2 "
-        "+set com_maxfps 60 "         /* cap at 60; 0 can overfill GCM buffer and stall */
+        "+set com_maxfps 60 "         /* uncapped floods the GCM buffer and stalls mid-frame, keep the cap */
         "+set pmove_fixed 1 "
         "+set s_khz 48 "
         "+set com_soundMegs 8 "
         "+set sv_pure 0 "
         "+set cl_allowDownload 1 "
-        "+set g_doWarmup 0 "          /* Q3 warmup loops on PS3 due to slow cgame load */
+        "+set g_doWarmup 0 "          /* warmup map_restart on slow cgame reload = serverId race, don't turn this on */
         "+set sv_maxclients 8 "
         "+set in_joystick 1 "
         "+set in_joystickUseAnalog 1 "
@@ -365,9 +369,8 @@ int main(int argc, char *argv[])
     Com_Init(cmdline);
     printf("[ps3] Com_Init done\n");
 
-    /* If name is still the hardcoded default, no saved config set it —
-       apply the XMB nick. If the user changed it in-game it won't be
-       "UnnamedPlayer", so we leave it alone. */
+    /* Only apply the XMB nick if name is still the hardcoded default —
+       otherwise we'd stomp an in-game rename. */
     {
         cvar_t *cv = Cvar_Get("name", "UnnamedPlayer", CVAR_USERINFO | CVAR_ARCHIVE);
         if (Q_stricmp(cv->string, "UnnamedPlayer") == 0) {
@@ -396,8 +399,8 @@ int main(int argc, char *argv[])
         Com_Frame();
     }
 
-    /* XMB exit: ps3_running was set to 0 by sysutil callback.
-       Com_Quit_f was not called, so flush config and shut down cleanly. */
+    /* XMB exit path: sysutil callback set ps3_running=0, Com_Quit_f never ran,
+       so flush config and shut down manually here. */
     if (!ps3_running) {
         Com_WriteConfiguration();
         SV_Shutdown("Server quit");

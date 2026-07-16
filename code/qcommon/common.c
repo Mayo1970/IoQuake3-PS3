@@ -2852,9 +2852,7 @@ void Com_Init( char *commandLine ) {
 		// if the user didn't give any commands, run default action
 		if ( !com_dedicated->integer ) {
 #ifdef CINEMATICS_LOGO
-#ifndef __WIIU__  // no video decoder on Wii U; cinematic blocks indefinitely
 			Cbuf_AddText ("cinematic " CINEMATICS_LOGO "\n");
-#endif
 #endif
 #ifdef CINEMATICS_INTRO
 			if( !com_introPlayed->integer ) {
