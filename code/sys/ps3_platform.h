@@ -120,20 +120,8 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #ifndef MAX_RAW_STREAMS
 #define MAX_RAW_STREAMS (2 * 64 + 1)
 #endif
-/* RoQ cinematic audio (stream 0) legitimately runs 13500-16200 samples
- * (~280-340ms) ahead of s_soundtime -- confirmed via hardware log, see
- * CLAUDE.md audio pipeline notes. Below that, every S_RawSamples() write
- * wraps the ring and clobbers not-yet-played samples: continuous crackle on
- * any cinematic long/heavy enough to sustain that lead.
- * TRIED bumping this to stock's 16384 for ALL streams (the array is
- * [MAX_RAW_STREAMS][this], so +8192 here is +~8 MB of static memory) --
- * confirmed on real hardware this HANGS at boot despite the ~25 MB margin
- * looking sufficient on paper. Do not re-attempt a uniform bump. Fix is
- * stream-0-only: MAX_RAW_SAMPLES_STREAM0 below gives cinematics/music their
- * own deeper buffer (s_rawsamples0 in snd_dma.c) for +128 KB instead, while
- * the other 128 voice-chat streams stay at this smaller size. This constant
- * is ALSO set in the Makefile's CFLAGS (-DMAX_RAW_SAMPLES=...), which wins
- * over this #ifndef -- edit both or changes silently don't apply. */
+/* Do not bump for all streams (hangs at boot, see CLAUDE.md memory budget) --
+ * stream 0 gets its own deeper buffer via MAX_RAW_SAMPLES_STREAM0 instead. */
 #ifndef MAX_RAW_SAMPLES
 #define MAX_RAW_SAMPLES  8192          /* stock: 16384, see comment above */
 #endif

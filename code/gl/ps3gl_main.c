@@ -186,11 +186,8 @@ void ps3gl_begin_frame(void)
     ps3gl.mv.dirty  = 1;
     ps3gl.proj.dirty = 1;
     ps3gl.active_shader = -1;
-    /* Reassert the VP once per frame too, not just the FP-driven key above --
-     * anything that shares the RSX between our draws (sysutil overlays like the
-     * OSK, message/trophy dialogs) can rebind its own vertex program, and our
-     * active_vp cache has no way to see that. Reloading once per frame bounds
-     * the staleness window instead of letting it persist for the whole session. */
+    /* Reassert VP once per frame too -- sysutil overlays (OSK, dialogs) can
+     * rebind their own vertex program behind our active_vp cache's back. */
     ps3gl.active_vp = NULL;
     for (int i = 0; i < PS3GL_MAX_TMUS; i++)
         ps3gl.tmu[i].dirty = 1;

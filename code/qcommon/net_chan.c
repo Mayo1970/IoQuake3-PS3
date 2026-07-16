@@ -99,7 +99,7 @@ void Netchan_Setup(netsrc_t sock, netchan_t *chan, netadr_t adr, int qport, int 
 #endif
 }
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 #define	SCRAMBLE_START	6
 static void Netchan_ScramblePacket( msg_t *buf ) {
 	unsigned	seed;
@@ -168,7 +168,7 @@ static void Netchan_UnScramblePacket( msg_t *buf ) {
 		buf->data[i] ^= seq[i];
 	}
 }
-#endif /* CLASSIC */
+#endif /* CLASSIC || ELITEFORCE */
 
 /*
 =================
@@ -209,7 +209,7 @@ void Netchan_TransmitNextFragment( netchan_t *chan ) {
 	MSG_WriteShort( &send, fragmentLength );
 	MSG_WriteData( &send, chan->unsentBuffer + chan->unsentFragmentStart, fragmentLength );
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(chan->compat)
 		Netchan_ScramblePacket( &send );
 #endif
@@ -289,7 +289,7 @@ void Netchan_Transmit( netchan_t *chan, int length, const byte *data ) {
 
 	MSG_WriteData( &send, data, length );
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(chan->compat)
 		Netchan_ScramblePacket( &send );
 #endif
@@ -328,7 +328,7 @@ qboolean Netchan_Process( netchan_t *chan, msg_t *msg ) {
 	qboolean	fragmented;
 
 	// XOR unscramble all data in the packet after the header
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(chan->compat)
 		Netchan_UnScramblePacket( msg );
 #endif

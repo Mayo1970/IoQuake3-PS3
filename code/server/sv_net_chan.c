@@ -164,7 +164,7 @@ void SV_Netchan_TransmitNextInQueue(client_t *client)
 	Com_DPrintf("#462 Netchan_TransmitNextFragment: popping a queued message for transmit\n");
 	netbuf = client->netchan_start_queue;
 
-#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC)
+#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC) && !defined(ELITEFORCE)
 	if(client->compat)
 		SV_Netchan_Encode(client, &netbuf->msg, netbuf->clientCommandString);
 #endif
@@ -223,7 +223,7 @@ then buffer them and make sure they get sent in correct order
 
 void SV_Netchan_Transmit( client_t *client, msg_t *msg)
 {
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(!msg->compat)
 #endif
 	MSG_WriteByte( msg, svc_EOF );
@@ -249,7 +249,7 @@ void SV_Netchan_Transmit( client_t *client, msg_t *msg)
 	}
 	else
 	{
-#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC)
+#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC) && !defined(ELITEFORCE)
 		if(client->compat)
 			SV_Netchan_Encode(client, msg, client->lastClientCommandString);
 #endif
@@ -268,7 +268,7 @@ qboolean SV_Netchan_Process( client_t *client, msg_t *msg ) {
 	if (!ret)
 		return qfalse;
 
-#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC)
+#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC) && !defined(ELITEFORCE)
 	if(client->compat)
 		SV_Netchan_Decode(client, msg);
 #endif

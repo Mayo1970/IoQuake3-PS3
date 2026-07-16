@@ -170,6 +170,27 @@ void EA_Attack(int client)
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
+#ifdef ELITEFORCE
+void EA_AltAttack(int client)
+{
+	bot_input_t *bi;
+
+	bi = &botinputs[client];
+
+	bi->actionflags |= ACTION_ALTATTACK;
+} //end of the function EA_AltAttack
+//===========================================================================
+//
+// Parameter:			-
+// Returns:				-
+// Changes Globals:		-
+//===========================================================================
+#endif
+//
+// Parameter:			-
+// Returns:				-
+// Changes Globals:		-
+//===========================================================================
 void EA_Talk(int client)
 {
 	bot_input_t *bi;

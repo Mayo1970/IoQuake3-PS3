@@ -94,9 +94,8 @@ void ps3gl_apply_shader(void)
     gcmContextData *ctx = ps3gl_get_ctx();
     if (!ctx) return;
 
-    /* All shader slots share one physical vertex program (see ps3gl_shaders_init),
-     * so the VP only needs reloading when it's not already the one bound on the
-     * RSX -- not on every FP/texenv key change. */
+    /* All shader slots share one VP (see ps3gl_shaders_init) -- reload it only
+     * when it's not already bound, not on every FP/texenv key change. */
     if (s->vp != ps3gl.active_vp) {
         rsxLoadVertexProgram(ctx, s->vp, s->vp_ucode);
         ps3gl.active_vp = s->vp;
@@ -111,10 +110,8 @@ void ps3gl_apply_shader(void)
         ps3gl.active_shader = key;
     }
 
-    /* MVP constant lives in the VP's own constant memory and is independent of
-     * which FP is bound, so it only needs re-patching when it actually changed
-     * since the last upload (constants are patched into RSX microcode -- not
-     * free). */
+    /* MVP constant is independent of which FP is bound -- only re-patch it
+     * when it changed since the last upload (patching RSX microcode isn't free). */
     uint32_t mvp_gen = ps3gl_get_mvp_generation();
     if (s->mvp_const && mvp_gen != ps3gl.mvp_uploaded_gen) {
         const float *mvp = ps3gl_get_mvp();

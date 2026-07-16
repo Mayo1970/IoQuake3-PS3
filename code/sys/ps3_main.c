@@ -31,6 +31,8 @@ extern void Com_WriteConfiguration(void);
 
 #ifdef CLASSIC
 #include "zpack_classic_embedded.h"
+#elif defined(ELITEFORCE)
+/* No fix-pak yet for this flavor (v1). */
 #else
 #include "pak9_ps3_embedded.h"
 #ifdef STANDALONETA
@@ -72,6 +74,10 @@ static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
 #  define PS3_GAMEDIR       "missionpack"
 #  define PS3_LOG_SUFFIX    "log_ta.txt"
 #  define PS3_TITLE         "teamarena-PS3"
+#elif defined(ELITEFORCE)
+#  define PS3_GAMEDIR       "baseEF"
+#  define PS3_LOG_SUFFIX    "log_ef.txt"
+#  define PS3_TITLE         "eliteforce-PS3"
 #else
 #  define PS3_GAMEDIR       "baseq3"
 #  define PS3_LOG_SUFFIX    "log.txt"
@@ -153,7 +159,7 @@ static unsigned int PS3_FileChecksum(const char *path)
     return csum;
 }
 
-#if !defined(STANDALONEOA) && !defined(CLASSIC)
+#if !defined(STANDALONEOA) && !defined(CLASSIC) && !defined(ELITEFORCE)
 static void PS3_ExtractBundledPak9(void)
 {
     char destpath[256];
@@ -177,7 +183,7 @@ static void PS3_ExtractBundledPak9(void)
         printf("[ps3] WARNING: pak9-ps3.pk3 write incomplete (%u/%u)\n",
                (unsigned)written, pak9_ps3_data_len);
 }
-#endif /* !STANDALONEOA && !CLASSIC */
+#endif /* !STANDALONEOA && !CLASSIC && !ELITEFORCE */
 
 #ifdef STANDALONETA
 static void PS3_ExtractBundledPak4(void)
@@ -254,7 +260,7 @@ int main(int argc, char *argv[])
     }
     PS3LOG("Filesystem ready");
 
-#if !defined(STANDALONEOA) && !defined(CLASSIC)
+#if !defined(STANDALONEOA) && !defined(CLASSIC) && !defined(ELITEFORCE)
     PS3_ExtractBundledPak9();
 #endif
 #ifdef STANDALONETA

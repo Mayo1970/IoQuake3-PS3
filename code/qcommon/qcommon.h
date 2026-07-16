@@ -269,6 +269,8 @@ PROTOCOL
 
 #ifdef CLASSIC
 #define	PROTOCOL_VERSION	43
+#elif defined(ELITEFORCE)
+#define	PROTOCOL_VERSION	26
 #else
 #define	PROTOCOL_VERSION	71
 // 1.31 - 67
@@ -278,12 +280,21 @@ PROTOCOL
 // NOTE: that stuff only works with two digits protocols
 extern int demo_protocols[];
 
-#if !defined UPDATE_SERVER_NAME && !defined STANDALONE
-#define	UPDATE_SERVER_NAME	"update.quake3arena.com"
-#endif
-// override on command line, config files etc.
-#ifndef MASTER_SERVER_NAME
-#define MASTER_SERVER_NAME	"master.quake3arena.com"
+#ifdef ELITEFORCE
+  #if !defined UPDATE_SERVER_NAME && !defined STANDALONE
+  #define	UPDATE_SERVER_NAME	"motd.stef1.ravensoft.com"
+  #endif
+  #ifndef MASTER_SERVER_NAME
+  #define MASTER_SERVER_NAME	"master.stef1.ravensoft.com"
+  #endif
+#else
+  #if !defined UPDATE_SERVER_NAME && !defined STANDALONE
+  #define	UPDATE_SERVER_NAME	"update.quake3arena.com"
+  #endif
+  // override on command line, config files etc.
+  #ifndef MASTER_SERVER_NAME
+  #define MASTER_SERVER_NAME	"master.quake3arena.com"
+  #endif
 #endif
 
 #ifndef STANDALONE
@@ -293,19 +304,39 @@ extern int demo_protocols[];
   #elif defined(CLASSIC)
     /* Primary protocol IS 43; legacy version matches so clc.compat fires automatically. */
     #define PROTOCOL_LEGACY_VERSION	43
+  #elif defined(ELITEFORCE)
+    #define AUTHORIZE_SERVER_NAME		"authenticate.stef1.ravensoft.com"
+    /* 26 is ioEF's own protocol id; 24 is the real retail Elite Force wire
+       protocol. Since the two differ by design, CL_CheckForResend's
+       `com_legacyprotocol == com_protocol` check never fires here, so
+       clc.compat/cl->compat stay FALSE for normal PS3<->PS3 play (confirmed
+       against ioEF, which behaves identically) — ongoing traffic runs the
+       engine's modern/non-scramble path, not the wire-compat path. compat
+       only turns on if a genuine retail EF server reports a different
+       protocol in its challengeResponse (see cl_main.c's challengeResponse
+       handler). Do not "fix" this equality check to force compat=true. */
+    #define PROTOCOL_LEGACY_VERSION	24
   #endif
   #ifndef AUTHORIZE_SERVER_NAME
     #define	AUTHORIZE_SERVER_NAME	"authorize.quake3arena.com"
   #endif
   #ifndef PORT_AUTHORIZE
-    #define	PORT_AUTHORIZE		27952
+    #ifdef ELITEFORCE
+      #define	PORT_AUTHORIZE		27953
+    #else
+      #define	PORT_AUTHORIZE		27952
+    #endif
   #endif
 #endif
 #ifndef PROTOCOL_LEGACY_VERSION
   #define PROTOCOL_LEGACY_VERSION	68
 #endif
 
+#ifdef ELITEFORCE
+#define	PORT_MASTER			27953
+#else
 #define	PORT_MASTER			27950
+#endif
 #define	PORT_UPDATE			27951
 #define	PORT_SERVER			27960
 #define	NUM_SERVER_PORTS	4		// broadcast scan this many ports after

@@ -71,10 +71,8 @@ static void ps3_audio_thread_func(void *arg)
         s32 ret = sysEventQueueReceive(ps3_audio_eventQ, &event, 20 * 1000);
         if (ret != 0) {
             timeout_count++;
-            /* First few timeouts are expected during startup; keep sampling
-             * every 100th one after that so a starvation window later in the
-             * session (e.g. during a cinematic) still shows up in the log
-             * instead of going silent after the first 3. */
+            /* First few timeouts are expected at startup; keep sampling every
+             * 100th one after so a later starvation window still logs. */
             if (timeout_count <= 3 || (timeout_count % 100) == 0) {
                 char buf[96];
                 snprintf(buf, sizeof(buf),
@@ -94,13 +92,9 @@ static void ps3_audio_thread_func(void *arg)
 
         u32 ring_pos = (ps3_audio_blocks_written * (u32)block_samples) % (u32)total_interleaved;
 
-        /* VMX int16→f32 conversion (8 samples/iter) to staging buffer, then memcpy.
-         * PSL1GHT's audio.h doesn't document an alignment guarantee for
-         * audioDataStart, and vec_st silently rounds a misaligned address down to
-         * the nearest 16 bytes instead of faulting -- writing straight into the
-         * port buffer risked corrupting a few bytes of every block if that
-         * assumption were wrong. Stage into a compiler-guaranteed-aligned local
-         * buffer and let memcpy (alignment-safe either way) carry it across. */
+        /* VMX int16->f32 (8 samples/iter) into an aligned staging buffer, then
+         * memcpy -- audioDataStart's alignment isn't guaranteed and vec_st
+         * silently rounds a misaligned address down instead of faulting. */
         {
             static f32 staging[PS3_AUDIO_BLOCK_SIZE * PS3_AUDIO_CHANNELS] __attribute__((aligned(16)));
             const s16 * __restrict__ vsrc = src + ring_pos;
@@ -241,12 +235,9 @@ qboolean SNDDMA_Init(void)
     ps3_audio_running = 1;
 
     static char audio_thread_name[] = "AudioThread";
-    /* Priority 100, well above the main thread's 1001 (lv2: 0 = highest priority).
-     * This thread has a hard ~5.3ms deadline per audio block; at equal priority with
-     * the main thread it only gets scheduled at round-robin quantum boundaries, which
-     * heavy sustained main-thread work (full-motion cinematics, no natural yield
-     * points) can miss, producing audio crackle. Elevating it guarantees it preempts
-     * the main thread instead of waiting its turn. */
+    /* Priority 100, well above the main thread's 1001 (lv2: 0 = highest). This
+     * thread has a hard ~5.3ms deadline/block; equal priority risks crackle
+     * under heavy main-thread load (cinematics), so it must preempt instead. */
     ret = sysThreadCreate(&ps3_audio_thread, ps3_audio_thread_func, NULL,
                           100, 0x4000, THREAD_JOINABLE, audio_thread_name);
     if (ret != 0) {

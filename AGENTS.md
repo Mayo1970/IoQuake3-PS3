@@ -43,7 +43,7 @@ A working PS3 port of [ioquake3](https://github.com/ioquake/ioq3) on the PSL1GHT
 homebrew SDK. PS3 has no GPU OpenGL driver, so the project ships a custom
 GL-1.1 → RSX/GCM translation layer (`code/gl/`). All upstream ioq3 sources are
 **vendored under `code/` and patched in place** — there is no external `../ioq3`
-checkout and no patch-script step. One source tree builds **four** PKGs (see
+checkout and no patch-script step. One source tree builds **five** PKGs (see
 below). It boots, renders, plays online/LAN/bots, has DS3 input + rumble, OSK,
 USB keyboard/mouse, cinematics, and OGG music.
 
@@ -62,13 +62,16 @@ USB keyboard/mouse, cinematics, and OGG music.
 | `make oa` / `make OA=1 pkg` | Open Arena | `STANDALONEOA` | `build_oa/` | `IOOAPS300` |
 | `make ta` / `make TA=1 pkg` | Team Arena | `STANDALONETA` | `build_ta/` | `IOTAPS300` |
 | `make classic` / `make CLASSIC=1 pkg` | Quake 3 Classic | `CLASSIC LEGACY_PROTOCOL` | `build_qc/` | `IOQCPS301` |
+| `make ef` / `make EF=1 pkg` | Elite Force | `ELITEFORCE LEGACY_PROTOCOL` | `build_ef/` | `IOEFPS300` |
 
-- `make all-flavors` builds all four PKGs (Q3/TA/OA/Classic) in sequence.
+- All TITLE_IDs are **9 characters** — `CONTENT_ID`/PARAM.SFO APP_ID parsing on
+  PS3 firmware expects exactly that length; a shorter/longer ID breaks PKG install.
+- `make all-flavors` builds all five PKGs (Q3/TA/OA/Classic/EF) in sequence.
 - `make clean` wipes all build dirs. Append `pkg` (installable PKG), `self`
   (raw SELF), or `install` (FTP-ready dir).
 - `make DEBUG=1` adds `-DPS3_DEBUG -g`, enables the `ps3_log()` file and
   `com_logfile 2`. Release writes no log file.
-- Icons come from `icons/<q3|oa|ta|qc>/ICON0.PNG`.
+- Icons come from `icons/<q3|oa|ta|qc|ef>/ICON0.PNG`.
 
 ---
 
@@ -269,7 +272,7 @@ the PS3 block in `q_platform.h` does **not** define `HAVE_VM_COMPILED`.
 
 ---
 
-## Four-variant invariants (Q3 / OA / TA / Classic)
+## Five-variant invariants (Q3 / OA / TA / Classic / EF)
 
 Getting these wrong causes networking or boot failures:
 
@@ -284,8 +287,8 @@ Getting these wrong causes networking or boot failures:
   `video/idlogo.roq`.
 - TA `BASEGAME` stays `"baseq3"`; it loads `missionpack` via `+set fs_game`.
   Setting `BASEGAME "missionpack"` crashes at `FS_CheckPak0`.
-- `FS_CheckPak0` is guarded off for OA/TA/Classic (their pak checksums don't match
-  Q3's; Classic intentionally has only pak0–pak2).
+- `FS_CheckPak0` is guarded off for OA/TA/Classic/EF (their pak checksums don't
+  match Q3's; Classic intentionally has only pak0–pak2).
 - `md5.c` is compiled into all variants — `cl_guid` must be valid 32-char hex or
   OA's qagame rejects connect with "Invalid GUID".
 - If cvars misbehave after a gamename/protocol change, delete the on-PS3
@@ -298,6 +301,18 @@ Getting these wrong causes networking or boot failures:
   `cl_parse.c`, `sv_client.c`, `sv_snapshot.c`, `msg.c`, `files.c`. Reference for
   the proto-43 logic is the PS4 port (`#ifdef CLASSIC`) and lilium-arena-classic
   (`#ifdef ELITEFORCE`). Full per-file change list is in git (commit `620038a`).
+- **EF = Star Trek Voyager: Elite Force multiplayer** (`BASEGAME "baseEF"`,
+  `PROTOCOL_VERSION 26`, `PROTOCOL_LEGACY_VERSION 24` — 24 is the real retail
+  wire protocol id that actually gets negotiated via `com_legacyprotocol`, 26 is
+  only ioEF's own project id, do not set them equal). Trap ABI (`gameImport_t`/
+  `cgameImport_t`/`uiImport_t` ordinals) and wire structs (`playerState_t`/
+  `entityState_t`/`usercmd_t`) both differ from vanilla Q3 — `sv_game.c`,
+  `cl_cgame.c`, `cl_ui.c` route EF's trap numbers separately, and `msg.c` has a
+  dedicated EF delta-field table, never shared with Classic's. **No fix-pak,
+  no bot support** — EF loads Matt's retail `qagame`/`cgame`/`ui` QVMs as-is;
+  `code/game`/`cgame`/`q3_ui`/`ui` sources are never touched or compiled for any
+  flavor. Reference for the compat wire-framing mechanism (shared with Classic's
+  proto-43 implementation) is ioEF (`E:\…\Voyager\ioef`, `#ifdef ELITEFORCE`).
 
 ---
 
@@ -446,6 +461,8 @@ back correctly. **Leave the Makefile build as-is; do not migrate to CMake.**
 | Networking 128 MB OOB read | PSL1GHT socket fd has bit 30 set; skip `FD_ISSET` when `fdr==NULL` (`net_ip.c`) |
 | UDP send returns ENOENT | PSL1GHT `sockaddr_in` has BSD `sin_len` at offset 0; set it |
 | Classic: "CL_ParseSnapshot invalid size" / garbled net | proto-43 needs `Netchan_(Un)ScramblePacket`; XOR encode must be off (`#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC)`) |
+| EF: retail QVM crashes/corrupts state on a trap call | Trap-number ABI mismatch in `sv_game.c`/`cl_cgame.c`/`cl_ui.c` — `gameImport_t`/`cgameImport_t`/`uiImport_t` ordinals differ from vanilla Q3, must route per ioEF's own enum, not vanilla's |
+| EF build fails on missing `pak9_ps3_embedded.h` | `ps3_main.c`'s embedded-pak `#include` ladder must have its own `#elif defined(ELITEFORCE)` arm (no fix-pak for this flavor) — don't let it fall into the plain-Q3 `#else` |
 
 ---
 
@@ -460,4 +477,4 @@ back correctly. **Leave the Makefile build as-is; do not migrate to CMake.**
 | Sound dispatch | [code/audio/ps3_snd.c](code/audio/ps3_snd.c) |
 | Input / rumble / OSK / kb / mouse | [code/input/](code/input/) |
 | Build logic / variant flags / embedding | [Makefile](Makefile) |
-| References | PS4 port `…\ioQuake3-PS4\` (CLASSIC + sibling fixes); lilium-arena-classic (`ELITEFORCE` = proto-43) |
+| References | PS4 port `…\ioQuake3-PS4\` (CLASSIC + sibling fixes); lilium-arena-classic (`ELITEFORCE` = proto-43); ioEF `…\Voyager\ioef\` (EF's own `#ifdef ELITEFORCE` source) |

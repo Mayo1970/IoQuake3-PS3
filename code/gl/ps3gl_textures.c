@@ -136,11 +136,8 @@ static void convert_pixels(uint8_t *dst, uint32_t dst_stride, const uint8_t *src
                            GLenum src_format)
 {
     if (src_bpp == 4) {
-        /* Fast path: Upload32() always uploads via GL_RGBA/GL_UNSIGNED_BYTE, so this
-         * is the only src_bpp seen in practice -- skip the per-pixel format switch and
-         * do one packed 32-bit store per pixel instead of four byte stores. PS3 is
-         * big-endian, so a native uint32_t store of 0xAARRGGBB lands in memory as bytes
-         * A,R,G,B -- the same order the byte-store path below produces. */
+        /* Fast path: Upload32() is always GL_RGBA/GL_UNSIGNED_BYTE, so one packed
+         * 32-bit store matches PS3's big-endian byte order for free (see below). */
         for (int row = 0; row < height; row++) {
             uint32_t *drow = (uint32_t *)(dst + (uint32_t)row * dst_stride);
             const uint8_t *srow = src + (size_t)row * width * 4;

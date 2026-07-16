@@ -150,12 +150,12 @@ CL_Netchan_Transmit
 ================
 */
 void CL_Netchan_Transmit( netchan_t *chan, msg_t* msg ) {
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(!chan->compat)
 #endif
 	MSG_WriteByte( msg, clc_EOF );
 
-#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC)
+#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC) && !defined(ELITEFORCE)
 	if(chan->compat)
 		CL_Netchan_Encode(msg);
 #endif
@@ -181,7 +181,7 @@ qboolean CL_Netchan_Process( netchan_t *chan, msg_t *msg ) {
 	if (!ret)
 		return qfalse;
 
-#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC)
+#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC) && !defined(ELITEFORCE)
 	if(chan->compat)
 		CL_Netchan_Decode(msg);
 #endif

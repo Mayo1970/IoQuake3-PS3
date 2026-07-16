@@ -2874,13 +2874,19 @@ void BotSetChatGender(int chatstate, int gender)
 // Returns:					-
 // Changes Globals:		-
 //===========================================================================
+#ifdef ELITEFORCE
+void BotSetChatName(int chatstate, char *name)
+#else
 void BotSetChatName(int chatstate, char *name, int client)
+#endif
 {
 	bot_chatstate_t *cs;
 
 	cs = BotChatStateFromHandle(chatstate);
 	if (!cs) return;
+#ifndef ELITEFORCE
 	cs->client = client;
+#endif
 	Q_strncpyz(cs->name, name, sizeof(cs->name));
 } //end of the function BotSetChatName
 //===========================================================================

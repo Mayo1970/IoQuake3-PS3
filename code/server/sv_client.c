@@ -677,7 +677,7 @@ void SV_DropClient( client_t *drop, const char *reason ) {
 	VM_Call( gvm, GAME_CLIENT_DISCONNECT, drop - svs.clients );
 
 	// add the disconnect command
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(drop->compat)
 		SV_SendServerCommand( drop, "disconnect %s", reason);
 	else
@@ -739,19 +739,19 @@ static void SV_SendClientGameState( client_t *client ) {
 	// gamestate message was not just sent, forcing a retransmit
 	client->gamestateMessageNum = client->netchan.outgoingSequence;
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(client->compat)
 		MSG_InitOOB(&msg, msgBuffer, sizeof( msgBuffer ));
 	else
 #endif
 	MSG_Init( &msg, msgBuffer, sizeof( msgBuffer ) );
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	msg.compat = client->compat;
 #endif
 
 	// NOTE, MRE: all server->client messages now acknowledge
 	// let the client know which reliable clientCommands we have received
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(!msg.compat)
 #endif
 	MSG_WriteLong( &msg, client->lastClientCommand );
@@ -794,14 +794,14 @@ static void SV_SendClientGameState( client_t *client ) {
 		MSG_WriteDeltaEntity( &msg, &nullstate, base, qtrue );
 	}
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(msg.compat)
 		MSG_WriteByte( &msg, 0 );
 	else
 #endif
 	MSG_WriteByte( &msg, svc_EOF );
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	if(!msg.compat)
 #endif
 	MSG_WriteLong( &msg, client - svs.clients);
@@ -1074,7 +1074,7 @@ int SV_WriteDownloadToClient(client_t *cl, msg_t *msg)
 			MSG_WriteByte( msg, svc_download );
 			MSG_WriteShort( msg, 0 ); // client is expecting block zero
 			MSG_WriteLong( msg, -1 ); // illegal file size
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 			if(!msg->compat)
 #endif
 			MSG_WriteString( msg, errorMessage );
@@ -1309,7 +1309,7 @@ static void SV_VerifyPaks_f( client_t *cl ) {
 		// start at arg 2 ( skip serverId cl_paks )
 		nCurArg = 1;
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 		if(!cl->compat)
 #endif
 		{
@@ -1797,23 +1797,29 @@ static void SV_UserMove( client_t *cl, msg_t *msg, qboolean delta ) {
 		return;
 	}
 
+#ifndef ELITEFORCE
 	// use the checksum feed in the key
 	key = sv.checksumFeed;
 	// also use the message acknowledge
 	key ^= cl->messageAcknowledge;
 	// also use the last acknowledged server command in the key
 	key ^= MSG_HashKey(cl->reliableCommands[ cl->reliableAcknowledge & (MAX_RELIABLE_COMMANDS-1) ], 32);
+#endif
 
 	Com_Memset( &nullcmd, 0, sizeof(nullcmd) );
 	oldcmd = &nullcmd;
 	for ( i = 0 ; i < cmdCount ; i++ ) {
 		cmd = &cmds[i];
+#ifdef ELITEFORCE
+		MSG_ReadDeltaUsercmd( msg, oldcmd, cmd );
+#else
 #ifdef CLASSIC
 		if(cl->compat)
 			MSG_ReadDeltaUsercmd( msg, oldcmd, cmd );
 		else
 #endif
 		MSG_ReadDeltaUsercmdKey( msg, key, oldcmd, cmd );
+#endif
 		oldcmd = cmd;
 	}
 
@@ -2004,7 +2010,7 @@ void SV_ExecuteClientMessage( client_t *cl, msg_t *msg ) {
 	int			c;
 	int			serverId;
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 	msg->compat = cl->compat;
 	if(msg->compat)
 		msg->bit = msg->readcount << 3;
@@ -2076,7 +2082,7 @@ void SV_ExecuteClientMessage( client_t *cl, msg_t *msg ) {
 	do {
 		c = MSG_ReadByte( msg );
 
-#ifdef CLASSIC
+#if defined(CLASSIC) || defined(ELITEFORCE)
 		if ( msg->compat && c == -1 )
 			c = clc_EOF;
 #endif
