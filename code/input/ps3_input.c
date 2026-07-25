@@ -729,8 +729,13 @@ void IN_Init(void *windowData)
     PS3_SetDefaultBind(K_JOY7,  "+zoom");        /* L2 */
     PS3_SetDefaultBind(K_JOY8,  "+attack");      /* R2 */
     PS3_SetDefaultBind(K_JOY9,  "+speed");       /* L3 */
+#ifdef ELITEFORCE
+    PS3_SetDefaultBind(K_JOY10, "+info");        /* R3 - EF scoreboard cvar */
+    PS3_SetDefaultBind(K_JOY11, "+info");        /* Select - EF scoreboard cvar */
+#else
     PS3_SetDefaultBind(K_JOY10, "+scores");      /* R3 */
     PS3_SetDefaultBind(K_JOY11, "+scores");      /* Select */
+#endif
 
     ps3_rumbleEnable = Cvar_Get("ps3_rumbleEnable", "1",   CVAR_ARCHIVE);
     ps3_rumbleScale  = Cvar_Get("ps3_rumbleScale",  "1.0", CVAR_ARCHIVE);

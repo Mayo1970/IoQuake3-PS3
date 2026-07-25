@@ -26,68 +26,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // q_shared.h -- included first by ALL program modules.
 // A user mod should never modify this file
 
-#if defined(STANDALONEOA)
-  #define PRODUCT_NAME				"OpenArena"
-  #define BASEGAME					"baseoa"
-  #define CLIENT_WINDOW_TITLE		"OpenArena"
-  #define CLIENT_WINDOW_MIN_TITLE	"oa"
-  #define HOMEPATH_NAME_UNIX_LEGACY	".openarena"
-  #define HOMEPATH_NAME				"OpenArena"
-  #define GAMENAME_FOR_MASTER		"Quake3Arena"
-  #define CINEMATICS_LOGO		"idlogo.roq"
-  #define CINEMATICS_INTRO		"intro.roq"
-  #define LEGACY_PROTOCOL
-  #define CONFIG_PREFIX			"oaconfig"
-#elif defined(STANDALONETA)
-  #define STANDALONE
-  #define PRODUCT_NAME				"Team Arena"
-  #define BASEGAME					"baseq3"
-  #define CLIENT_WINDOW_TITLE		"Quake III: Team Arena"
-  #define CLIENT_WINDOW_MIN_TITLE	"teamarena"
-  #define HOMEPATH_NAME_UNIX_LEGACY	".q3a"
-  #define HOMEPATH_NAME				"Quake3"
-  #define GAMENAME_FOR_MASTER		"Quake3Arena"
-  #define CINEMATICS_LOGO		"idlogo.RoQ"
-  #define CINEMATICS_INTRO		"intro.RoQ"
-  #define LEGACY_PROTOCOL
-  #define CONFIG_PREFIX			"q3config"
-#elif defined(ELITEFORCE)
-  #define PRODUCT_NAME				"ioST:V HM"
-  #define BASEGAME					"baseEF"
-  #define CLIENT_WINDOW_TITLE		"iostvoyHM"
-  #define CLIENT_WINDOW_MIN_TITLE	"iostvoyHM"
-  #define HOMEPATH_NAME_UNIX_LEGACY	".stvef"
-  #define HOMEPATH_NAME				"STVEF"
-  #define GAMENAME_FOR_MASTER		"EliteForce"
-  #define LEGACY_PROTOCOL
-  #define CONFIG_PREFIX			"efconfig"
-#elif defined(STANDALONE)
-  #define PRODUCT_NAME				"iofoo3"
-  #define BASEGAME					"foobar"
-  #define CLIENT_WINDOW_TITLE		"changeme"
-  #define CLIENT_WINDOW_MIN_TITLE	"changeme2"
-  #define HOMEPATH_NAME_UNIX_LEGACY	".foo"
-  #define HOMEPATH_NAME				"FooBar"
-  #define GAMENAME_FOR_MASTER		"foobar"	// must NOT contain whitespace
-  #define CINEMATICS_LOGO		"foologo.roq"
-  #define CINEMATICS_INTRO		"intro.roq"
-//  #define LEGACY_PROTOCOL	// You probably don't need this for your standalone game
-//  #define PROTOCOL_HANDLER		"foobar"
-  #define CONFIG_PREFIX			"fooconfig"
-#else
-  #define PRODUCT_NAME				"ioq3"
-  #define BASEGAME					"baseq3"
-  #define CLIENT_WINDOW_TITLE		"ioquake3"
-  #define CLIENT_WINDOW_MIN_TITLE	"ioq3"
-  #define HOMEPATH_NAME_UNIX_LEGACY	".q3a"
-  #define HOMEPATH_NAME				"Quake3"
-  #define GAMENAME_FOR_MASTER		"Quake3Arena"
-  #define CINEMATICS_LOGO		"idlogo.RoQ"
-  #define CINEMATICS_INTRO		"intro.RoQ"
-  #define LEGACY_PROTOCOL
-  #define PROTOCOL_HANDLER		"quake3"
-  #define CONFIG_PREFIX			"q3config"
-#endif
+#include "flavor_defs.h"
 
 // Heartbeat for dpmaster protocol. You shouldn't change this unless you know what you're doing
 #ifdef ELITEFORCE

@@ -37,60 +37,7 @@ endif
 # Flavor selection (q3 is default; `make ta` / `make oa` set TA/OA=1)
 #---------------------------------------------------------------------------------
 
-ifeq ($(MAKECMDGOALS),ta)
-  TA := 1
-endif
-ifeq ($(MAKECMDGOALS),oa)
-  OA := 1
-endif
-ifeq ($(MAKECMDGOALS),classic)
-  CLASSIC := 1
-endif
-ifeq ($(MAKECMDGOALS),ef)
-  EF := 1
-endif
-
-ifeq ($(TA),1)
-  FLAVOR        := ta
-  TITLE         := Team Arena
-  TITLE_ID      := IOTAPS300
-  TARGET        := ioquake3_ta_ps3
-  BUILD         := build_ta
-  DEFINES_EXTRA := -DSTANDALONETA
-  ICON0_SUBDIR  := ta
-else ifeq ($(OA),1)
-  FLAVOR        := oa
-  TITLE         := Open Arena
-  TITLE_ID      := IOOAPS300
-  TARGET        := ioquake3_oa_ps3
-  BUILD         := build_oa
-  DEFINES_EXTRA := -DSTANDALONEOA
-  ICON0_SUBDIR  := oa
-else ifeq ($(CLASSIC),1)
-  FLAVOR        := classic
-  TITLE         := Quake 3 Classic
-  TITLE_ID      := IOQCPS301
-  TARGET        := ioquake3_classic_ps3
-  BUILD         := build_qc
-  DEFINES_EXTRA := -DCLASSIC -DLEGACY_PROTOCOL
-  ICON0_SUBDIR  := qc
-else ifeq ($(EF),1)
-  FLAVOR        := ef
-  TITLE         := Star Trek Voyager: Elite Force
-  TITLE_ID      := IOEFPS300
-  TARGET        := ioquake3_ef_ps3
-  BUILD         := build_ef
-  DEFINES_EXTRA := -DELITEFORCE -DLEGACY_PROTOCOL
-  ICON0_SUBDIR  := ef
-else
-  FLAVOR        := q3
-  TITLE         := ioQuake3
-  TITLE_ID      := IOQ3PS300
-  TARGET        := ioquake3_ps3
-  BUILD         := build
-  DEFINES_EXTRA :=
-  ICON0_SUBDIR  := q3
-endif
+include flavors.mk
 
 CONTENT_ID := UP0001-$(TITLE_ID)_00-0000000000000000
 PORTDIR    := $(CURDIR)
@@ -167,6 +114,7 @@ IOQ3_SRCS := \
   code/client/snd_codec.c \
   code/client/snd_codec_wav.c \
   code/client/snd_codec_ogg.c \
+  code/client/snd_codec_mp3.c \
   code/client/snd_adpcm.c \
   code/client/snd_wavelet.c \
   code/server/sv_bot.c \
@@ -316,7 +264,8 @@ IOQ3_JPEG_SRCS := $(wildcard $(JPEG_DIR)/j*.c)
 #---------------------------------------------------------------------------------
 OGG_DIR    := code/thirdparty/libogg-1.3.6
 VORBIS_DIR := code/thirdparty/libvorbis-1.3.7
-OGG_CFLAGS := -I$(OGG_DIR)/include -I$(VORBIS_DIR)/include -I$(VORBIS_DIR)/lib
+MP3_DIR    := code/thirdparty/minimp3
+OGG_CFLAGS := -I$(OGG_DIR)/include -I$(VORBIS_DIR)/include -I$(VORBIS_DIR)/lib -I$(MP3_DIR)
 IOQ3_OGG_SRCS := \
   $(OGG_DIR)/src/bitwise.c \
   $(OGG_DIR)/src/framing.c \
@@ -358,7 +307,7 @@ CFLAGS := \
   $(DEFINES_EXTRA) \
   -DMAX_CLIENTS=8 \
   -DMAX_RAW_SAMPLES=8192 \
-  -DBOTLIB -DUSE_CODEC_VORBIS=1 -DUSE_CODEC_OPUS=0 -DUSE_OPENAL=0 \
+  -DBOTLIB -DUSE_CODEC_VORBIS=1 -DUSE_CODEC_OPUS=0 -DUSE_CODEC_MP3=1 -DUSE_OPENAL=0 \
   -DUSE_LOCAL_HEADERS \
   -DMIN_DEDICATED_COMHUNKMEGS=16 -DMIN_COMHUNKMEGS=16 \
   $(ZLIB_CFLAGS) \
@@ -406,34 +355,9 @@ ASM_OBJS := $(patsubst %.S,$(BUILD)/%.o,$(PS3_ASM_SRCS))
 #---------------------------------------------------------------------------------
 # Phony targets
 #---------------------------------------------------------------------------------
-.PHONY: all ta oa classic ef all-flavors clean pkg self install prebuild
+.PHONY: all clean pkg self install prebuild
 
 all: $(BUILD)/$(TARGET).elf
-
-ta: $(BUILD)/$(TARGET).elf
-
-oa: $(BUILD)/$(TARGET).elf
-
-classic: $(BUILD)/$(TARGET).elf
-
-ef: $(BUILD)/$(TARGET).elf
-
-#---------------------------------------------------------------------------------
-# Multi-flavor build
-#---------------------------------------------------------------------------------
-all-flavors:
-	@echo "=== Building ioQuake3 ==="
-	$(MAKE) pkg
-	@echo "=== Building Team Arena ==="
-	$(MAKE) TA=1 pkg
-	@echo "=== Building Open Arena ==="
-	$(MAKE) OA=1 pkg
-	@echo "=== Building Quake 3 Classic ==="
-	$(MAKE) CLASSIC=1 pkg
-	@echo "=== Building Elite Force ==="
-	$(MAKE) EF=1 pkg
-	@echo "=== All builds complete ==="
-	@ls -1 build/ioquake3_ps3.pkg build_ta/ioquake3_ta_ps3.pkg build_oa/ioquake3_oa_ps3.pkg build_qc/ioquake3_classic_ps3.pkg build_ef/ioquake3_ef_ps3.pkg 2>/dev/null || true
 
 #---------------------------------------------------------------------------------
 # Prebuild: copy zlib headers next to unzip.h
@@ -487,6 +411,8 @@ PS3_MAIN_EMBEDDED_DEPS := $(BUILD)/pak9_ps3_embedded.h $(BUILD)/pak4_ps3_embedde
 else ifeq ($(CLASSIC),1)
 PS3_MAIN_EMBEDDED_DEPS := $(BUILD)/zpack_classic_embedded.h
 else ifeq ($(EF),1)
+PS3_MAIN_EMBEDDED_DEPS :=
+else ifeq ($(RA),1)
 PS3_MAIN_EMBEDDED_DEPS :=
 else
 PS3_MAIN_EMBEDDED_DEPS := $(BUILD)/pak9_ps3_embedded.h

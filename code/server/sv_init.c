@@ -683,6 +683,12 @@ void SV_Init (void)
 #ifdef CLASSIC
 	sv_master[0] = Cvar_Get("sv_master1", "dc.dreamcast-talk.com", 0);
 	sv_master[1] = Cvar_Get("sv_master2", "", CVAR_ARCHIVE);
+#elif defined(ELITEFORCE)
+	// efmaster.tjps.eu is the community-run EF master ioEF itself defaults to
+	// (directory.ioquake3.org, the vanilla fallback, never has EF servers on
+	// it). Verified against both ioEF upstream and the VoyagerNX EF port.
+	sv_master[0] = Cvar_Get("sv_master1", MASTER_SERVER_NAME, 0);
+	sv_master[1] = Cvar_Get("sv_master2", "efmaster.tjps.eu", CVAR_ARCHIVE);
 #else
 	sv_master[0] = Cvar_Get("sv_master1", MASTER_SERVER_NAME, 0);
 	sv_master[1] = Cvar_Get("sv_master2", "directory.ioquake3.org", 0);

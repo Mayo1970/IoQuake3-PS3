@@ -33,6 +33,8 @@ extern void Com_WriteConfiguration(void);
 #include "zpack_classic_embedded.h"
 #elif defined(ELITEFORCE)
 /* No fix-pak yet for this flavor (v1). */
+#elif defined(STANDALONERA)
+/* Runs on retail assets alone, no fix-pak. */
 #else
 #include "pak9_ps3_embedded.h"
 #ifdef STANDALONETA
@@ -66,23 +68,7 @@ static void ps3_sysutil_callback(u64 status, u64 param, void *userdata)
     }
 }
 
-#if defined(STANDALONEOA)
-#  define PS3_GAMEDIR       "baseoa"
-#  define PS3_LOG_SUFFIX    "log_oa.txt"
-#  define PS3_TITLE         "openarena-PS3"
-#elif defined(STANDALONETA)
-#  define PS3_GAMEDIR       "missionpack"
-#  define PS3_LOG_SUFFIX    "log_ta.txt"
-#  define PS3_TITLE         "teamarena-PS3"
-#elif defined(ELITEFORCE)
-#  define PS3_GAMEDIR       "baseEF"
-#  define PS3_LOG_SUFFIX    "log_ef.txt"
-#  define PS3_TITLE         "eliteforce-PS3"
-#else
-#  define PS3_GAMEDIR       "baseq3"
-#  define PS3_LOG_SUFFIX    "log.txt"
-#  define PS3_TITLE         "ioquake3-PS3"
-#endif
+#include "ps3_gamedir_defs.h"
 
 #ifdef PS3_DEBUG
 static const char *ps3_log_path = "/dev_hdd0/data/ioq3/" PS3_LOG_SUFFIX;
@@ -112,12 +98,23 @@ void ps3_log(const char *msg)
  * on any port depending on how many devices are plugged in). */
 static char ps3_base_path[64] = "/dev_hdd0/data/ioq3";
 
+/* PS3_GAMEDIR doubles as the fs_game value and the boot-presence probe dir --
+ * that coincidence holds for every flavor that ships its own pak0.pk3 in its
+ * game dir (Q3/OA/EF, and TA's "missionpack"). Rocket Arena doesn't: "arena"
+ * holds only mod-numbered paks layered on retail Q3A, no pak0.pk3 of its own.
+ * So its boot proof is baseq3/pak0.pk3, while fs_game still uses PS3_GAMEDIR. */
+#if defined(STANDALONERA)
+#define PS3_BOOT_PROBE_DIR "baseq3"
+#else
+#define PS3_BOOT_PROBE_DIR PS3_GAMEDIR
+#endif
+
 static qboolean PS3_SetupFilesystem(void)
 {
     char probe[128];
     char usb_path[64];
 
-    snprintf(probe, sizeof(probe), "/dev_hdd0/data/ioq3/" PS3_GAMEDIR "/pak0.pk3");
+    snprintf(probe, sizeof(probe), "/dev_hdd0/data/ioq3/" PS3_BOOT_PROBE_DIR "/pak0.pk3");
     FILE *f = fopen(probe, "rb");
     if (f) {
         fclose(f);
@@ -128,7 +125,7 @@ static qboolean PS3_SetupFilesystem(void)
 
     for (int usb = 0; usb < 7; usb++) {
         snprintf(usb_path, sizeof(usb_path), "/dev_usb%03d/quake3", usb);
-        snprintf(probe, sizeof(probe), "%s/" PS3_GAMEDIR "/pak0.pk3", usb_path);
+        snprintf(probe, sizeof(probe), "%s/" PS3_BOOT_PROBE_DIR "/pak0.pk3", usb_path);
 
         f = fopen(probe, "rb");
         if (f) {
@@ -140,8 +137,8 @@ static qboolean PS3_SetupFilesystem(void)
         }
     }
 
-    printf("FATAL: " PS3_GAMEDIR "/pak0.pk3 not found on HDD or USB\n");
-    PS3LOG("FATAL: " PS3_GAMEDIR "/pak0.pk3 not found");
+    printf("FATAL: " PS3_BOOT_PROBE_DIR "/pak0.pk3 not found on HDD or USB\n");
+    PS3LOG("FATAL: " PS3_BOOT_PROBE_DIR "/pak0.pk3 not found");
     return qfalse;
 }
 
@@ -159,7 +156,7 @@ static unsigned int PS3_FileChecksum(const char *path)
     return csum;
 }
 
-#if !defined(STANDALONEOA) && !defined(CLASSIC) && !defined(ELITEFORCE)
+#if !defined(STANDALONEOA) && !defined(CLASSIC) && !defined(ELITEFORCE) && !defined(STANDALONERA)
 static void PS3_ExtractBundledPak9(void)
 {
     char destpath[256];
@@ -183,7 +180,7 @@ static void PS3_ExtractBundledPak9(void)
         printf("[ps3] WARNING: pak9-ps3.pk3 write incomplete (%u/%u)\n",
                (unsigned)written, pak9_ps3_data_len);
 }
-#endif /* !STANDALONEOA && !CLASSIC && !ELITEFORCE */
+#endif /* !STANDALONEOA && !CLASSIC && !ELITEFORCE && !STANDALONERA */
 
 #ifdef STANDALONETA
 static void PS3_ExtractBundledPak4(void)
@@ -260,7 +257,7 @@ int main(int argc, char *argv[])
     }
     PS3LOG("Filesystem ready");
 
-#if !defined(STANDALONEOA) && !defined(CLASSIC) && !defined(ELITEFORCE)
+#if !defined(STANDALONEOA) && !defined(CLASSIC) && !defined(ELITEFORCE) && !defined(STANDALONERA)
     PS3_ExtractBundledPak9();
 #endif
 #ifdef STANDALONETA

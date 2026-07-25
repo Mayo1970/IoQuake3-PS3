@@ -308,11 +308,16 @@ Getting these wrong causes networking or boot failures:
   `cgameImport_t`/`uiImport_t` ordinals) and wire structs (`playerState_t`/
   `entityState_t`/`usercmd_t`) both differ from vanilla Q3 — `sv_game.c`,
   `cl_cgame.c`, `cl_ui.c` route EF's trap numbers separately, and `msg.c` has a
-  dedicated EF delta-field table, never shared with Classic's. **No fix-pak,
-  no bot support** — EF loads Matt's retail `qagame`/`cgame`/`ui` QVMs as-is;
-  `code/game`/`cgame`/`q3_ui`/`ui` sources are never touched or compiled for any
-  flavor. Reference for the compat wire-framing mechanism (shared with Classic's
-  proto-43 implementation) is ioEF (`E:\…\Voyager\ioef`, `#ifdef ELITEFORCE`).
+  dedicated EF delta-field table, never shared with Classic's. **No fix-pak**
+  — EF loads Matt's retail `qagame`/`cgame`/`ui` QVMs as-is; `code/game`/`cgame`/
+  `q3_ui`/`ui` sources are never touched or compiled for any flavor (this repo's
+  Makefile has no QVM-compile step at all — those dirs are reference/mirror
+  source only). Bots work, but retail EF's `qagame.qvm` bot AI only checks
+  `ACTION_ATTACK`, never `ACTION_RESPAWN` — `code/botlib/be_ea.c`'s `EA_Respawn()`
+  must set `ACTION_ATTACK` under `#ifdef ELITEFORCE` (matches ioEF), or EF bots
+  never respawn. Reference for the compat wire-framing mechanism (shared with
+  Classic's proto-43 implementation) is ioEF (`E:\…\Voyager\ioef`,
+  `#ifdef ELITEFORCE`).
 
 ---
 
@@ -463,6 +468,7 @@ back correctly. **Leave the Makefile build as-is; do not migrate to CMake.**
 | Classic: "CL_ParseSnapshot invalid size" / garbled net | proto-43 needs `Netchan_(Un)ScramblePacket`; XOR encode must be off (`#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC)`) |
 | EF: retail QVM crashes/corrupts state on a trap call | Trap-number ABI mismatch in `sv_game.c`/`cl_cgame.c`/`cl_ui.c` — `gameImport_t`/`cgameImport_t`/`uiImport_t` ordinals differ from vanilla Q3, must route per ioEF's own enum, not vanilla's |
 | EF build fails on missing `pak9_ps3_embedded.h` | `ps3_main.c`'s embedded-pak `#include` ladder must have its own `#elif defined(ELITEFORCE)` arm (no fix-pak for this flavor) — don't let it fall into the plain-Q3 `#else` |
+| EF: bots never respawn after death | `EA_Respawn()` (`code/botlib/be_ea.c`) sets `ACTION_RESPAWN`, but retail EF's `qagame.qvm` bot AI only tests `ACTION_ATTACK` — must set `ACTION_ATTACK` under `#ifdef ELITEFORCE` instead (Q3/OA/TA/Classic keep `ACTION_RESPAWN`) |
 
 ---
 

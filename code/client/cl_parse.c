@@ -665,6 +665,46 @@ void CL_ParseDownload ( msg_t *msg ) {
 	}
 }
 
+#ifndef USE_VOIP
+/*
+=====================
+CL_DiscardVoip
+
+This build has no VOIP support (no USE_VOIP -- no mic/opus wiring), but a
+server with VOIP enabled (e.g. an ioef-cmod EF server) still sends
+svc_voipSpeex/svc_voipOpus messages unconditionally. Without consuming the
+sender/generation/sequence/frames/packetsize/flags and encoded payload that
+follow the cmd byte, the rest of the server message desyncs ("Illegible
+server message"). Mirrors CL_ParseVoip's read order exactly, just without
+decoding.
+=====================
+*/
+static void CL_DiscardVoip( msg_t *msg ) {
+	unsigned char discard[4000];
+	int packetsize;
+	int bytesleft;
+
+	MSG_ReadShort(msg);            // sender
+	MSG_ReadByte(msg);             // generation
+	MSG_ReadLong(msg);             // sequence
+	MSG_ReadByte(msg);             // frames
+	packetsize = MSG_ReadShort(msg);
+	MSG_ReadBits(msg, VOIP_FLAGCNT);
+
+	if (packetsize < 0)
+		return;
+
+	bytesleft = packetsize;
+	while (bytesleft) {
+		int br = bytesleft;
+		if (br > (int)sizeof(discard))
+			br = sizeof(discard);
+		MSG_ReadData(msg, discard, br);
+		bytesleft -= br;
+	}
+}
+#endif
+
 #ifdef USE_VOIP
 static
 qboolean CL_ShouldIgnoreVoipSender(int sender)
@@ -953,11 +993,15 @@ void CL_ParseServerMessage( msg_t *msg ) {
 		case svc_voipSpeex:
 #ifdef USE_VOIP
 			CL_ParseVoip( msg, qtrue );
+#else
+			CL_DiscardVoip( msg );
 #endif
 			break;
 		case svc_voipOpus:
 #ifdef USE_VOIP
 			CL_ParseVoip( msg, !clc.voipEnabled );
+#else
+			CL_DiscardVoip( msg );
 #endif
 			break;
 		}
