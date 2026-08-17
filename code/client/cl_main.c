@@ -27,6 +27,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../sys/sys_local.h"
 #include "../sys/sys_loadlib.h"
 
+#ifdef __PS3__
+#include "../sys/ps3_account.h"
+#endif
+
 #ifdef USE_MUMBLE
 #include "libmumblelink.h"
 #endif
@@ -3825,7 +3829,13 @@ void CL_Init( void ) {
 	cl_consoleKeys = Cvar_Get( "cl_consoleKeys", "~ ` 0x7e 0x60", CVAR_ARCHIVE);
 
 	// userinfo
+#ifdef __PS3__
+	// XMB user / PSN nickname is the platform's notion of a player name -- make it
+	// the actual default so "Defaults" in the setup menu (cvar_restart) restores it.
+	Cvar_Get ("name", PS3_DefaultPlayerName(), CVAR_USERINFO | CVAR_ARCHIVE );
+#else
 	Cvar_Get ("name", "UnnamedPlayer", CVAR_USERINFO | CVAR_ARCHIVE );
+#endif
 	cl_rate = Cvar_Get ("rate", "25000", CVAR_USERINFO | CVAR_ARCHIVE );
 	Cvar_Get ("snaps", "20", CVAR_USERINFO | CVAR_ARCHIVE );
 #ifdef ELITEFORCE

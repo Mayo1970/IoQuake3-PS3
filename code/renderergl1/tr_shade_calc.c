@@ -54,9 +54,13 @@ static float *TableForFunc( genFunc_t func )
 **
 ** Evaluates a given waveForm_t, referencing backEnd.refdef.time directly
 */
-static float EvalWaveForm( const waveForm_t *wf ) 
+static float EvalWaveForm( const waveForm_t *wf )
 {
 	float	*table;
+
+	if ( wf->func == GF_NOISE ) {
+		return wf->base + R_NoiseGet4f( 0, 0, 0, ( tess.shaderTime + wf->phase ) * wf->frequency ) * wf->amplitude;
+	}
 
 	table = TableForFunc( wf->func );
 
@@ -137,6 +141,23 @@ void RB_CalcDeformVertexes( deformStage_t *ds )
 			xyz[2] += offset[2];
 		}
 	}
+	else if ( ds->deformationWave.func == GF_NOISE )
+	{
+		for ( i = 0; i < tess.numVertexes; i++, xyz += 4, normal += 4 )
+		{
+			float off = ( xyz[0] + xyz[1] + xyz[2] ) * ds->deformationSpread;
+
+			scale = ds->deformationWave.base + R_NoiseGet4f( 0, 0, 0,
+				( tess.shaderTime + ds->deformationWave.phase + off ) * ds->deformationWave.frequency )
+				* ds->deformationWave.amplitude;
+
+			VectorScale( normal, scale, offset );
+
+			xyz[0] += offset[0];
+			xyz[1] += offset[1];
+			xyz[2] += offset[2];
+		}
+	}
 	else
 	{
 		table = TableForFunc( ds->deformationWave.func );
@@ -145,13 +166,13 @@ void RB_CalcDeformVertexes( deformStage_t *ds )
 		{
 			float off = ( xyz[0] + xyz[1] + xyz[2] ) * ds->deformationSpread;
 
-			scale = WAVEVALUE( table, ds->deformationWave.base, 
+			scale = WAVEVALUE( table, ds->deformationWave.base,
 				ds->deformationWave.amplitude,
 				ds->deformationWave.phase + off,
 				ds->deformationWave.frequency );
 
 			VectorScale( normal, scale, offset );
-			
+
 			xyz[0] += offset[0];
 			xyz[1] += offset[1];
 			xyz[2] += offset[2];
@@ -236,12 +257,21 @@ void RB_CalcMoveVertexes( deformStage_t *ds ) {
 	float		scale;
 	vec3_t		offset;
 
-	table = TableForFunc( ds->deformationWave.func );
+	if ( ds->deformationWave.func == GF_NOISE )
+	{
+		scale = ds->deformationWave.base + R_NoiseGet4f( 0, 0, 0,
+			( tess.shaderTime + ds->deformationWave.phase ) * ds->deformationWave.frequency )
+			* ds->deformationWave.amplitude;
+	}
+	else
+	{
+		table = TableForFunc( ds->deformationWave.func );
 
-	scale = WAVEVALUE( table, ds->deformationWave.base, 
-		ds->deformationWave.amplitude,
-		ds->deformationWave.phase,
-		ds->deformationWave.frequency );
+		scale = WAVEVALUE( table, ds->deformationWave.base,
+			ds->deformationWave.amplitude,
+			ds->deformationWave.phase,
+			ds->deformationWave.frequency );
+	}
 
 	VectorScale( ds->moveVector, scale, offset );
 

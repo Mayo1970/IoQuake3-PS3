@@ -18,6 +18,7 @@
 #include "qcommon/q_shared.h"
 #include "qcommon/qcommon.h"
 
+#include "../sys/ps3_account.h"
 #include "../sys/ps3_glimp.h"
 #include "../input/ps3_input.h"
 #include "../input/ps3_osk.h"
@@ -234,6 +235,36 @@ static void PS3_ExtractBundledZpackClassic(void)
 }
 #endif
 
+/* See ps3_account.h: this feeds Cvar_Get's default so cvar_restart keeps it.
+ * Strip quotes/ctrl chars so the name can't break userinfo/cvar parsing. */
+static char ps3_nick[64];
+
+void PS3_InitDefaultPlayerName(void)
+{
+    extern char *Sys_GetCurrentUser(void);
+    const char *src = Sys_GetCurrentUser();
+    size_t o = 0;
+
+    if (src) {
+        for (size_t i = 0; src[i] && o < sizeof(ps3_nick) - 1; i++) {
+            unsigned char c = (unsigned char)src[i];
+            if (c == '"' || c == '\\' || c == ';' || c < 0x20) continue;
+            ps3_nick[o++] = (char)c;
+        }
+    }
+    ps3_nick[o] = '\0';
+    if (ps3_nick[0] == '\0')
+        snprintf(ps3_nick, sizeof(ps3_nick), "%s", "player");
+    PS3LOG("[user] default nick='%s'", ps3_nick);
+}
+
+const char *PS3_DefaultPlayerName(void)
+{
+    if (ps3_nick[0] == '\0')
+        return "player";
+    return ps3_nick;
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -284,25 +315,9 @@ int main(int argc, char *argv[])
     extern void Sys_PlatformInit(void);
     Sys_PlatformInit();
 
-    /* Cmdline wins over Cvar_Get defaults. Cvar_Set in Sys_Init gets clobbered
-     * by config load, so don't bother. Strip quotes/ctrl so we don't break parsing. */
-    extern char *Sys_GetCurrentUser(void);
-    static char ps3_nick[64];
-    {
-        const char *src = Sys_GetCurrentUser();
-        size_t o = 0;
-        if (src) {
-            for (size_t i = 0; src[i] && o < sizeof(ps3_nick) - 1; i++) {
-                unsigned char c = (unsigned char)src[i];
-                if (c == '"' || c == '\\' || c == ';' || c < 0x20) continue;
-                ps3_nick[o++] = (char)c;
-            }
-        }
-        ps3_nick[o] = '\0';
-        if (ps3_nick[0] == '\0')
-            snprintf(ps3_nick, sizeof(ps3_nick), "%s", "player");
-        PS3LOG("[user] cmdline nick='%s'", ps3_nick);
-    }
+    /* Must run before Com_Init: CL_Init uses it as the "name" cvar's compiled-in
+     * default, which is what makes it survive cvar_restart (setup menu Defaults). */
+    PS3_InitDefaultPlayerName();
 
     static char cmdline[2048];
     snprintf(cmdline, sizeof(cmdline),
@@ -371,15 +386,6 @@ int main(int argc, char *argv[])
     printf("[ps3] Calling Com_Init...\n");
     Com_Init(cmdline);
     printf("[ps3] Com_Init done\n");
-
-    /* Only apply the XMB nick if name is still the hardcoded default —
-       otherwise we'd stomp an in-game rename. */
-    {
-        cvar_t *cv = Cvar_Get("name", "UnnamedPlayer", CVAR_USERINFO | CVAR_ARCHIVE);
-        if (Q_stricmp(cv->string, "UnnamedPlayer") == 0) {
-            Cvar_Set("name", ps3_nick);
-        }
-    }
 
     /* PSL1GHT net module must load before ioq3's NET_Init. */
     {
