@@ -293,7 +293,11 @@ extern int demo_protocols[];
   #endif
   // override on command line, config files etc.
   #ifndef MASTER_SERVER_NAME
-  #define MASTER_SERVER_NAME	"master.quake3arena.com"
+    #ifdef STANDALONEOA
+    #define MASTER_SERVER_NAME	"dpmaster.deathmask.net"
+    #else
+    #define MASTER_SERVER_NAME	"master.quake3arena.com"
+    #endif
   #endif
 #endif
 

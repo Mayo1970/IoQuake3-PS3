@@ -689,6 +689,10 @@ void SV_Init (void)
 	// it). Verified against both ioEF upstream and the VoyagerNX EF port.
 	sv_master[0] = Cvar_Get("sv_master1", MASTER_SERVER_NAME, 0);
 	sv_master[1] = Cvar_Get("sv_master2", "efmaster.tjps.eu", CVAR_ARCHIVE);
+#elif defined(STANDALONEOA)
+	// Match stock OpenArena: single dpmaster, no Q3 directory.
+	sv_master[0] = Cvar_Get("sv_master1", MASTER_SERVER_NAME, 0);
+	sv_master[1] = Cvar_Get("sv_master2", "", 0);
 #else
 	sv_master[0] = Cvar_Get("sv_master1", MASTER_SERVER_NAME, 0);
 	sv_master[1] = Cvar_Get("sv_master2", "directory.ioquake3.org", 0);
