@@ -6,6 +6,25 @@
 extern void ps3gl_inc_draw_count(void);
 extern const float *ps3gl_get_mvp(void);
 
+/* ps3_glimp.c's rsxInit IO window. */
+extern const void *ps3_rsx_io_base;
+extern size_t      ps3_rsx_io_size;
+
+/* gcmAddressToOffset is undefined for main memory outside the RSX IO window: it
+ * can report success with a bogus offset, which wedges the RSX vertex fetch.
+ * Q3's tess arrays are plain .bss, so prove the span is mapped before asking. */
+static int ps3gl_io_mapped(const void *ptr, size_t len)
+{
+    uintptr_t base = (uintptr_t)ps3_rsx_io_base;
+    uintptr_t p    = (uintptr_t)ptr;
+
+    if (!base || !ps3_rsx_io_size || !p)
+        return 0;
+    if (p < base || (p - base) >= ps3_rsx_io_size)
+        return 0;
+    return (ps3_rsx_io_size - (p - base)) >= len;
+}
+
 /* GL vertex array functions */
 
 void ps3gl_VertexPointer(GLint size, GLenum type, GLsizei stride,
@@ -125,6 +144,10 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
         uint32_t off_col  = 0;
 
         int direct =
+            ps3gl_io_mapped(vp, (size_t)num_verts * vs) &&
+            (!tp0 || ps3gl_io_mapped(tp0, (size_t)num_verts * ts0)) &&
+            (!tp1 || ps3gl_io_mapped(tp1, (size_t)num_verts * ts1)) &&
+            (!cp  || ps3gl_io_mapped(cp,  (size_t)num_verts * cs))  &&
             (rsxAddressToOffset((void *)vp,  &off_pos) == 0) &&
             (!tp0 || rsxAddressToOffset((void *)tp0, &off_tc0) == 0) &&
             (!tp1 || rsxAddressToOffset((void *)tp1, &off_tc1) == 0) &&

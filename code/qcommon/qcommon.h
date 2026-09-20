@@ -692,6 +692,9 @@ qboolean FS_FileExists_HomeData( const char *file );
 qboolean FS_CreatePath (const char *OSPath);
 
 int FS_FindVM(void **startSearch, char *found, int foundlen, const char *name, int enableDll);
+#ifdef __PS3__
+const char *FS_SearchPathGameDir(void *startSearch);
+#endif
 
 char	*FS_BaseDir_BuildOSPath( const char *base, const char *qpath );
 char	*FS_BuildOSPath( const char *base, const char *game, const char *qpath );

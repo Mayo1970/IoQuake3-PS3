@@ -630,6 +630,27 @@ vm_t *VM_Create( const char *module, intptr_t (*systemCalls)(intptr_t *),
 		}
 		else if(retval == VMI_COMPILED)
 		{
+#ifdef PS3_NATIVE_GAME
+// Which gamedir's qagame.qvm the linked-in code is allowed to stand in for. TA's
+// game ships in missionpack (loaded via fs_game), not in BASEGAME's baseq3.
+#ifdef STANDALONETA
+#define PS3_NATIVE_GAME_DIR "missionpack"
+#else
+#define PS3_NATIVE_GAME_DIR BASEGAME
+#endif
+			// PS3 has no dll loader: qagame is linked into the EBOOT and only replaces that gamedir's qvm, so mods stay interpreted.
+			if(interpret == VMI_NATIVE && !Q_stricmp(module, "qagame") &&
+			   !Q_stricmp(FS_SearchPathGameDir(startSearch), PS3_NATIVE_GAME_DIR))
+			{
+				vm->dllHandle = Sys_LoadGameDll(module, &vm->entryPoint, VM_DllSyscall);
+				if(vm->dllHandle)
+				{
+					Com_Printf("%s: using linked-in native code\n", module);
+					vm->systemCall = systemCalls;
+					return vm;
+				}
+			}
+#endif
 			vm->searchPath = startSearch;
 			if((header = VM_LoadQVM(vm, qtrue, qfalse)))
 				break;

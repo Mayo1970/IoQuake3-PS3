@@ -333,7 +333,125 @@ CFLAGS_VMX := $(filter-out -mno-altivec,$(CFLAGS)) -maltivec
 
 CXXFLAGS := $(CFLAGS)
 
+#---------------------------------------------------------------------------------
+# Linked-in native qagame (vm_game 0). Q3/TA build upstream ioq3 code/game (TA via
+# -DMISSIONPACK); OA builds its own vendored gamecode under code/oa/. EF is NOT
+# possible -- no Holomatch game source exists, ioEF ships Q3's game code. Classic
+# is proto-43 and does not match either.
+#---------------------------------------------------------------------------------
+ifneq ($(filter $(FLAVOR),q3 ta oa),)
+  NATIVE_GAME ?= 1
+endif
+
+ifeq ($(NATIVE_GAME),1)
+ifeq ($(FLAVOR),oa)
+# OA gamecode from the gamecode repo's oa-0.8.8 BRANCH, vendored verbatim. Not
+# master: master is OAX, whose 48-entry animNumber_t makes the retail 0.8.8
+# cgame.qvm abort with "bad animation number". This branch has 34, like the paks.
+# The code/oa/code/{game,qcommon,botlib} + code/oa/ui layout exists so its own
+# relative includes ("../qcommon/q_shared.h", "../../ui/menudef.h") resolve inside
+# the vendored tree, not into the engine's. List is its Q3GOBJ_ + g_syscalls.o;
+# bg_lib.c is Q3_VM-only, g_mem.c and g_rankings.c are not in its game build.
+GAME_SRCS := \
+  code/oa/code/game/g_main.c \
+  code/oa/code/game/g_syscalls.c \
+  code/oa/code/game/ai_chat.c \
+  code/oa/code/game/ai_cmd.c \
+  code/oa/code/game/ai_dmnet.c \
+  code/oa/code/game/ai_dmq3.c \
+  code/oa/code/game/ai_main.c \
+  code/oa/code/game/ai_team.c \
+  code/oa/code/game/ai_vcmd.c \
+  code/oa/code/game/bg_alloc.c \
+  code/oa/code/game/bg_misc.c \
+  code/oa/code/game/bg_pmove.c \
+  code/oa/code/game/bg_slidemove.c \
+  code/oa/code/game/g_active.c \
+  code/oa/code/game/g_admin.c \
+  code/oa/code/game/g_arenas.c \
+  code/oa/code/game/g_bot.c \
+  code/oa/code/game/g_client.c \
+  code/oa/code/game/g_cmds.c \
+  code/oa/code/game/g_cmds_ext.c \
+  code/oa/code/game/g_combat.c \
+  code/oa/code/game/g_fileops.c \
+  code/oa/code/game/g_items.c \
+  code/oa/code/game/g_killspree.c \
+  code/oa/code/game/g_misc.c \
+  code/oa/code/game/g_missile.c \
+  code/oa/code/game/g_mover.c \
+  code/oa/code/game/g_playerstore.c \
+  code/oa/code/game/g_session.c \
+  code/oa/code/game/g_spawn.c \
+  code/oa/code/game/g_svcmds.c \
+  code/oa/code/game/g_svcmds_ext.c \
+  code/oa/code/game/g_target.c \
+  code/oa/code/game/g_team.c \
+  code/oa/code/game/g_trigger.c \
+  code/oa/code/game/g_unlagged.c \
+  code/oa/code/game/g_utils.c \
+  code/oa/code/game/g_vote.c \
+  code/oa/code/game/g_weapon.c \
+  code/oa/code/qcommon/q_math.c \
+  code/oa/code/qcommon/q_shared.c
+else
+GAME_SRCS := \
+  code/game/g_main.c \
+  code/game/g_syscalls.c \
+  code/game/ai_chat.c \
+  code/game/ai_cmd.c \
+  code/game/ai_dmnet.c \
+  code/game/ai_dmq3.c \
+  code/game/ai_main.c \
+  code/game/ai_team.c \
+  code/game/ai_vcmd.c \
+  code/game/bg_misc.c \
+  code/game/bg_pmove.c \
+  code/game/bg_slidemove.c \
+  code/game/g_active.c \
+  code/game/g_arenas.c \
+  code/game/g_bot.c \
+  code/game/g_client.c \
+  code/game/g_cmds.c \
+  code/game/g_combat.c \
+  code/game/g_items.c \
+  code/game/g_mem.c \
+  code/game/g_misc.c \
+  code/game/g_missile.c \
+  code/game/g_mover.c \
+  code/game/g_session.c \
+  code/game/g_spawn.c \
+  code/game/g_svcmds.c \
+  code/game/g_target.c \
+  code/game/g_team.c \
+  code/game/g_trigger.c \
+  code/game/g_utils.c \
+  code/game/g_weapon.c \
+  code/qcommon/q_math.c \
+  code/qcommon/q_shared.c
+endif
+
+CFLAGS     += -DPS3_NATIVE_GAME
+CFLAGS_VMX += -DPS3_NATIVE_GAME
+# -fno-common: every global must land in .bss so the ld script can bracket it.
+# -mminimal-toc: the engine alone sits ~3 KB under the 64 KB single-TOC limit and
+# these objects push it over -- see --no-multi-toc in LDFLAGS.
+GAME_CFLAGS := $(CFLAGS) -DQAGAME -fno-common -mminimal-toc
+# MISSIONPACK selects TA's game rules inside code/game, exactly as the Q3 SDK
+# builds missionpack/vm/qagame.qvm. Engine objects must NOT get this define.
+ifeq ($(FLAVOR),ta)
+GAME_CFLAGS += -DMISSIONPACK
+endif
+GAME_OBJS   := $(patsubst %.c,$(BUILD)/qagame/%.o,$(GAME_SRCS))
+GAME_LDS    := code/sys/ps3_qagame.ld
+GAME_NATIVE_OBJ := $(BUILD)/qagame_native.o
+endif
+
+# --no-multi-toc: this toolchain is -mcmodel=small only, so a .got over 64 KB makes ld
+# split the TOC and emit r2off stubs, which hang the PS3 at boot. Fail the link instead;
+# if it fires, shrink TOC use (-mminimal-toc) rather than dropping the flag.
 LDFLAGS := \
+  -Wl,--no-multi-toc \
   -L$(PSL1GHT_LIB) \
   -L$(PORTLIBS_LIB) \
   -Wl,--wrap,CL_GenerateQKey \
@@ -369,9 +487,28 @@ prebuild:
 #---------------------------------------------------------------------------------
 # Link
 #---------------------------------------------------------------------------------
-$(BUILD)/$(TARGET).elf: prebuild $(ASM_OBJS) $(OBJS)
+$(BUILD)/$(TARGET).elf: prebuild $(ASM_OBJS) $(OBJS) $(GAME_NATIVE_OBJ)
 	@echo "Linking $@"
 	$(LD) $(CFLAGS) $(LDFLAGS) $(filter %.o,$^) $(LIBS) -o $@
+
+ifeq ($(NATIVE_GAME),1)
+$(BUILD)/qagame/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "CC $< [qagame]"
+	@$(CC) $(GAME_CFLAGS) -c $< -o $@
+
+# Plain ld, not gcc: the PSL1GHT gcc specs inject lv2.ld, which swallows the bracket script.
+# Then hide all game symbols but the entry points/brackets, so q_shared/Com_Printf can't clash.
+$(GAME_NATIVE_OBJ): $(GAME_OBJS) $(GAME_LDS)
+	@echo "LD $@ [qagame]"
+	@$(PREFIX)ld -r -T $(GAME_LDS) $(GAME_OBJS) -o $(BUILD)/qagame_partial.o
+	@$(OBJCOPY) --redefine-sym dllEntry=qagame_dllEntry --redefine-sym vmMain=qagame_vmMain \
+	  $(BUILD)/qagame_partial.o $(BUILD)/qagame_renamed.o
+	@$(OBJCOPY) -G qagame_dllEntry -G qagame_vmMain \
+	  -G __qagame_data_start -G __qagame_data_end \
+	  -G __qagame_bss_start -G __qagame_bss_end \
+	  $(BUILD)/qagame_renamed.o $@
+endif
 
 #---------------------------------------------------------------------------------
 # Assembly files: must NOT use $(CFLAGS)

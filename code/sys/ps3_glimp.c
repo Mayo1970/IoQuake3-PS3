@@ -35,6 +35,11 @@ static u32 *ps3_depth_buffer = NULL;
 static int ps3_current_fb = 0;
 static int ps3_current_rt = -1;
 
+/* RSX IO window, published for ps3gl_draw.c: gcmAddressToOffset does not
+ * validate an unmapped main-memory address, so callers must range-check. */
+const void *ps3_rsx_io_base = NULL;
+size_t      ps3_rsx_io_size = 0;
+
 static volatile u32 ps3_flip_queued    = 0;
 static volatile u32 ps3_flip_completed = 0;
 
@@ -132,6 +137,9 @@ void PS3_RSX_Init(void)
                  host_addr, RSX_CB_SIZE, RSX_HOST_SIZE);
         ps3_log(dbg);
     }
+
+    ps3_rsx_io_base = host_addr;
+    ps3_rsx_io_size = RSX_HOST_SIZE;
 
     s32 ret = rsxInit(&ps3_gcm_context, RSX_CB_SIZE, RSX_HOST_SIZE, host_addr);
     {

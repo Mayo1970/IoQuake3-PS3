@@ -534,6 +534,43 @@ void *Sys_LoadDll(const char *name, qboolean useSystemLib)
     return NULL;
 }
 
+#ifdef PS3_NATIVE_GAME
+/* Provided by the localized qagame_native.o (see Makefile + ps3_qagame.ld). */
+extern void qagame_dllEntry(intptr_t (QDECL *syscallptr)(intptr_t arg, ...));
+extern intptr_t qagame_vmMain(int command, int arg0, int arg1, int arg2, int arg3,
+                              int arg4, int arg5, int arg6, int arg7, int arg8,
+                              int arg9, int arg10, int arg11);
+extern char __qagame_data_start[], __qagame_data_end[];
+extern char __qagame_bss_start[], __qagame_bss_end[];
+
+static char *qagame_data_pristine;
+
+void * QDECL Sys_LoadGameDll(const char *name,
+                              vmMainProc *entryPoint,
+                              intptr_t (*systemcalls)(intptr_t, ...))
+{
+    size_t dataLen = (size_t)(__qagame_data_end - __qagame_data_start);
+
+    if (Q_stricmp(name, "qagame"))
+        return NULL;
+
+    /* A dll reload starts from pristine globals; the game relies on that
+     * (e.g. ai_main.c botstates[] point into the reset G_Alloc pool). */
+    if (!qagame_data_pristine) {
+        qagame_data_pristine = malloc(dataLen ? dataLen : 1);
+        if (!qagame_data_pristine)
+            return NULL;
+        memcpy(qagame_data_pristine, __qagame_data_start, dataLen);
+    } else {
+        memcpy(__qagame_data_start, qagame_data_pristine, dataLen);
+    }
+    memset(__qagame_bss_start, 0, (size_t)(__qagame_bss_end - __qagame_bss_start));
+
+    qagame_dllEntry(systemcalls);
+    *entryPoint = qagame_vmMain;
+    return qagame_data_pristine;
+}
+#else
 void * QDECL Sys_LoadGameDll(const char *name,
                               vmMainProc *entryPoint,
                               intptr_t (*systemcalls)(intptr_t, ...))
@@ -541,6 +578,7 @@ void * QDECL Sys_LoadGameDll(const char *name,
     (void)name; (void)entryPoint; (void)systemcalls;
     return NULL;
 }
+#endif
 
 void Sys_UnloadDll(void *dllHandle)
 {

@@ -83,7 +83,26 @@ void SND_setup(void) {
 
 	scs = (cv->integer*1536);
 
+#ifdef __PS3__
+	/* Hard cap, not a default: com_soundMegs is CVAR_ARCHIVE, so a stale
+	 * q3config.cfg beats the boot cmdline. This malloc is the largest single
+	 * one in the boot and lv2 HANGS instead of returning NULL when it cannot
+	 * be satisfied -- see the memory ledger in CLAUDE.md. */
+	if (cv->integer > PS3_MAX_COMSOUNDMEGS)
+		scs = PS3_MAX_COMSOUNDMEGS*1536;
+
+	Com_Printf("SND_setup: requesting %i KB (com_soundMegs %i, PS3 cap %i)\n",
+	           (int)((scs*sizeof(sndBuffer))/1024), cv->integer,
+	           PS3_MAX_COMSOUNDMEGS);
+#endif
+
 	buffer = malloc(scs*sizeof(sndBuffer) );
+#ifdef __PS3__
+	/* Upstream walks the list unconditionally; a NULL here is a wild write. */
+	if (!buffer)
+		Com_Error(ERR_FATAL, "SND_setup: out of memory for %i KB sound cache",
+		          (int)((scs*sizeof(sndBuffer))/1024));
+#endif
 	// allocate the stack based hunk allocator
 	sfxScratchBuffer = malloc(SND_CHUNK_SIZE * sizeof(short) * 4);	//Hunk_Alloc(SND_CHUNK_SIZE * sizeof(short) * 4);
 	sfxScratchPointer = NULL;

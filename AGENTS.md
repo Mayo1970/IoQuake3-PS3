@@ -52,9 +52,15 @@ USB keyboard/mouse, cinematics, and OGG music.
 ## Build
 
 - Requires `PS3DEV` set and the **devkitPro MSYS2** shell (`ppu-gcc`, GCC 7.2,
-  LP64). You probably cannot build on the dev host — reason from source when the
-  toolchain is unavailable. Matt builds and tests on hardware himself.
-- Run all `make` from MSYS2 bash with `PS3DEV` set.
+  LP64). Matt tests on hardware himself.
+- **The toolchain IS installed on the dev host**, at
+  `C:\devkitPro\msys2\opt\ps3dev` (`ppu-gcc` 7.2, `ppu-ld`, `ppu-objcopy`,
+  `ppu-nm`, plus `sprxlinker`/`make_self_npdrm` in `bin/`). Build and inspect
+  the ELF locally before asking for a hardware run — guessing from source when
+  a link-level answer was one `ppu-readelf` away wastes a test cycle.
+- Run all `make` from MSYS2 bash with `PS3DEV` set. Outside that shell `make`
+  may not inherit `PSL1GHT`, which only the final link needs; export both
+  `PS3DEV` and `PSL1GHT`, or run the link command by hand.
 
 | Goal | Variant | `-D` flags | Build dir | TITLE_ID |
 |---|---|---|---|---|
@@ -70,7 +76,13 @@ USB keyboard/mouse, cinematics, and OGG music.
 - `make clean` wipes all build dirs. Append `pkg` (installable PKG), `self`
   (raw SELF), or `install` (FTP-ready dir).
 - `make DEBUG=1` adds `-DPS3_DEBUG -g`, enables the `ps3_log()` file and
-  `com_logfile 2`. Release writes no log file.
+  `com_logfile 2`. Release writes no log file. **`make` keys off timestamps, not
+  flags, and both configs share `$(BUILD)`** — going from `DEBUG=1` back to
+  release without `make clean` (or a separate `BUILD=`) leaves debug objects in
+  the PKG. Check with
+  `ppu-readelf -p .rodata build/…elf | grep -c 'boot: '` (release must be 0).
+- `NATIVE_GAME=1` is the default for `FLAVOR=q3` and `FLAVOR=ta` and links
+  `code/game` into the EBOOT (see §QVM). `NATIVE_GAME=0` forces the QVM back.
 - Icons come from `icons/<q3|oa|ta|qc|ef>/ICON0.PNG`.
 
 ---
@@ -98,9 +110,47 @@ USB keyboard/mouse, cinematics, and OGG music.
 
 ## Memory budget — hard constraint
 
-- **~145 MB free user RAM** at boot (GameOS reserves ~88 MB of the 256 MB XDR).
-  Logged at boot as `[mem] free user memory at Sys_PlatformInit: ~N MB`.
-- Hunk = **96 MB**, Zone = **24 MB** → 120 MB, ~25 MB margin for QVM/sound/caches.
+- **~145 MB free user RAM** at boot, ~143 MB with the native qagame linked in
+  (GameOS reserves ~88 MB of the 256 MB XDR; the RSX 32 MB IO buffer and the
+  EBOOT's own segments are already subtracted, because `PS3_RSX_Init` runs
+  before the probe). Logged as
+  `[mem] free user memory at Sys_PlatformInit: ~N MB`.
+- Hunk = **96 MB**, Zone = **24 MB** → 120 MB. **The remaining ~23 MB is not
+  slack** — read the ledger below before spending any of it.
+
+### The ~23 MB pool is almost entirely the sound cache
+
+`SND_setup` (`snd_mem.c`) does the single largest malloc of the whole boot:
+`com_soundMegs * 1536 * sizeof(sndBuffer)`, and `sizeof(sndBuffer)` is
+**2064 B** on this ABI (1024 shorts + next ptr + size + pad). So:
+
+| `com_soundMegs` | malloc |
+|---|---|
+| 8 (ioq3 default) | **24.19 MB** |
+| 6 (PS3 cap) | 18.14 MB |
+| 5 | 15.12 MB |
+
+At 8 that malloc needed 24.19 MB of a 23 MB pool. **lv2 hangs instead of
+returning NULL**, so the console froze with no XMB return and the log stopped
+dead on the line before it. Stock Q3 survived only because it had ~25 MB and
+cleared 24.19 MB by ~0.8 MB; the native qagame's ~1.9 MB of extra loaded
+segments ate that margin. This is also the real reason "+8 MB of static memory
+hangs at boot despite the ~25 MB margin" — the margin was never free.
+
+- `PS3_MAX_COMSOUNDMEGS` (**6**, `ps3_platform.h`) is a **hard cap applied in
+  `SND_setup`**, not a default. `com_soundMegs` is `CVAR_ARCHIVE`, so a stale
+  `q3config.cfg` beats the boot cmdline — a cmdline-only change does nothing on
+  a console that already has a config. Set both, as the tree does now.
+- Anything that grows the EBOOT's loaded segments, the hunk, or the zone comes
+  out of this pool. Budget it against the table above, not against "~23 MB free".
+- Measured loaded-segment totals with the native qagame: **Q3 24.59 MB**,
+  **OA 24.87 MB**, **TA 25.13 MB**. TA is the tightest flavor — ~142 MB free, so a ~22 MB pool
+  against an 18.14 MB sound cache, leaving **~3.9 MB**. If TA ever freezes on the
+  `SND_setup:` log line, drop `PS3_MAX_COMSOUNDMEGS` to 5 (15.12 MB) rather than
+  cutting the hunk.
+- `SND_setup` logs the request under `__PS3__` and `Com_Error`s on a NULL
+  instead of walking the list through it. Keep both; they are what turn this
+  failure from a console freeze into a message.
 - **Do not raise hunk above 112 MB** without re-measuring. **zone = 32 MB hangs at
   boot** — keep `DEF_COMZONEMEGS = 24`.
 - Constants live in [code/sys/ps3_platform.h](code/sys/ps3_platform.h) as
@@ -134,6 +184,34 @@ USB keyboard/mouse, cinematics, and OGG music.
 
 ---
 
+## TOC budget — hard constraint
+
+`ppu-gcc` 7.2 has **no `-mcmodel` option**: every object is small-model and
+reaches its globals through `R_PPC64_TOC16_*` relocations, which are a signed
+16-bit displacement off `r2`. The whole EBOOT therefore gets **one TOC, capped
+at 64 KB** (`.got` in the linked ELF holds `*(.got .toc)`).
+
+- Measured: the engine alone is **0x0F230 (60.5 KB)**. That is only ~3 KB of
+  headroom. Assume every new translation unit spends some of it.
+- Past 64 KB, `ld` does **not** fail. It silently splits the TOC into groups and
+  emits `*.long_branch_r2off.*` trampolines that swap `r2` per call. On PS3 that
+  binary **hangs at boot with no XMB return** — a linked-in native qagame did
+  exactly this (`.got` went to 0x12B28 / 74.8 KB, 95 r2off stubs).
+- `-Wl,--no-multi-toc` is in `LDFLAGS` to make that a **link error** instead
+  (`relocation truncated to fit: R_PPC64_TOC16_DS`). **Never remove it.** If it
+  fires, shrink TOC use; do not silence it.
+- The cure is `-mminimal-toc` on the offending objects (each gets its own
+  indirect TOC block). `GAME_CFLAGS` uses it for the native qagame, which keeps
+  the total at 0x0F388.
+- Verify after any link that adds code:
+  `ppu-nm build/ioquake3_ps3.elf | grep -c r2off` must be **0**, and
+  `ppu-readelf -SW build/ioquake3_ps3.elf | grep ' \.got '` must be < 0x10000.
+- Current `.got` per flavor, with the native qagame where it applies: Q3 0x0F398
+  (3176 B left), TA 0x0F0B0 (3920), OA 0x0F2E0 (3360), Classic 0x0F1F0 (3600),
+  EF 0x0F140 (3776). **Every flavor has under 4 KB left.** A new translation unit
+  anywhere will trip the link guard.
+
+---
 ## Source layout
 
 ```
@@ -141,6 +219,8 @@ code/
 ├── qcommon/ client/ server/ botlib/ game/ cgame/ q3_ui/ ui/
 │   renderercommon/ renderergl1/ renderergl2/ null/ asm/ sdl/ thirdparty/
 │        ← VENDORED upstream ioq3, patched in place.
+├── oa/       ← VENDORED OA 0.8.8 gamecode (native OA qagame only). Nested as
+│              oa/code/{game,qcommon,botlib} + oa/ui/ on purpose -- see §QVM.
 ├── gl/       ← PS3-ORIGINAL. GL-1.1 → RSX/GCM translation layer (hot path).
 ├── audio/    ← PS3-ORIGINAL. ps3_snd.c is the sole sound dispatcher.
 ├── input/    ← PS3-ORIGINAL. DS3 pad, rumble, OSK, USB kb/mouse.
@@ -164,7 +244,8 @@ code/
 ps3_main.c::main()
   ├─ PS3_Input_Init()      ← BEFORE Com_Init. Must NOT call Cvar_Get here.
   │                          Input cvars register in IN_Init (after Com_Init).
-  ├─ Sys_GetCurrentUser()  ← XMB nickname (see below)
+  ├─ PS3_InitDefaultPlayerName() ← caches XMB nickname (see below). Safe here:
+  │                          sysUtil only, no Cvar_Get.
   ├─ PS3_SetupFilesystem() ← probes /dev_hdd0/data/<gamedir>/pak0.pk3
   ├─ Sys_PlatformInit()    ← free-mem probe + FPU setup (NOT auto-called by
   │                          upstream sys_main.c; ps3_main.c calls it explicitly)
@@ -177,8 +258,16 @@ ps3_main.c::main()
   via `+set name` or `Cvar_Set` in `Sys_Init` — both overwrite the saved config.
 - **XMB nickname**: `Sys_GetCurrentUser` tries `CURRENT_USERNAME` (0x0131, 64 B,
   offline) then `NICKNAME` (0x0113, 128 B, needs sign-in) then `"player"`. Buffer
-  sizes matter. `ps3_main.c` applies it after `Com_Init` only if `name` is still
-  `"UnnamedPlayer"`, so in-game renames persist.
+  sizes matter. `PS3_InitDefaultPlayerName()` (`ps3_main.c`, decl in
+  `code/sys/ps3_account.h`) caches it before `Com_Init`; `CL_Init` then passes it
+  to `Cvar_Get("name", …)` under `#ifdef __PS3__` as the **compiled-in default**.
+  In-game renames still persist (config exec beats a `Cvar_Get` default, which
+  only sets `resetString`).
+- That is deliberate and must stay a `Cvar_Get` default. The old code did a
+  post-`Com_Init` `Cvar_Set("name", nick)` guarded on the value still being
+  `"UnnamedPlayer"` — `Cvar_Set` never touches `resetString`, so the setup menu's
+  Defaults button (`exec default.cfg` + `cvar_restart`, `q3_ui/ui_setup.c`) reset
+  the player name to `"UnnamedPlayer"`. Same class of bug as a `+set name`.
 
 ---
 
@@ -196,10 +285,73 @@ ps3_main.c::main()
 
 ---
 
-## QVM execution — INTERPRETER (no JIT)
+## QVM execution — INTERPRETER (no JIT) + linked-in qagame (Q3 + TA + OA)
 
-**All QVMs run on the bytecode interpreter.** The Makefile builds `vm_none.c`;
+**QVMs run on the bytecode interpreter.** The Makefile builds `vm_none.c`;
 the PS3 block in `q_platform.h` does **not** define `HAVE_VM_COMPILED`.
+
+**Q3's, TA's and OA's qagame is native, linked into the EBOOT**
+(`NATIVE_GAME=1`, default for `FLAVOR=q3`/`ta`/`oa` → `-DPS3_NATIVE_GAME`,
+cmdline `+set vm_game 0`). `NATIVE_GAME=0` forces any flavor back to its QVM, and
+`\vm_game 1` + a `map` does the same at runtime without a rebuild.
+Native code is fine because it is in the signed SELF, which lv2 maps executable
+at load; only runtime-generated code (JIT) is blocked. There is no dll loader.
+- `code/game` + its own `q_shared.c`/`q_math.c` are built with `-DQAGAME
+  -fno-common`, partially linked with **plain `ppu-ld -r -T code/sys/ps3_qagame.ld`**
+  (gcc's PSL1GHT specs inject lv2.ld and break the script), then `objcopy -G`
+  localizes everything except `qagame_dllEntry`/`qagame_vmMain` and the
+  `__qagame_{data,bss}_{start,end}` brackets. Without that, game symbols clash
+  with the engine and `--wrap,Com_Printf` hijacks the game's `Com_Printf`.
+- `Sys_LoadGameDll` (`ps3_sys.c`) restores `.data` from a first-load snapshot and
+  zeroes `.bss` on every load. The game needs dll-reload-fresh globals
+  (`ai_main.c` `botstates[]` point into the reset `G_Alloc` pool).
+- **TA builds the same `code/game` with `-DMISSIONPACK`**, exactly as the Q3 SDK
+  builds `missionpack/vm/qagame.qvm`. The define goes on `GAME_CFLAGS` only —
+  never on the engine objects. Verify it took: the TA blob has ~40
+  kamikaze/harvester/proxmine/obelisk symbols, the Q3 blob has 3.
+- `VM_Create` uses the native game only when the found `qagame.qvm` comes from
+  `PS3_NATIVE_GAME_DIR` (`FS_SearchPathGameDir`), so a mod's qvm still runs
+  interpreted. That dir is **`"missionpack"` for TA** and `BASEGAME` otherwise —
+  TA's game ships in the fs_game dir, not in baseq3, and fs_game dirs are
+  searched first. Using `BASEGAME` for TA silently runs baseq3's qagame.
+- `fixes/missionpack/pak4-ps3.pk3` still ships `vm/qagame.qvm` and must keep it:
+  it is the fallback if the native path declines, and the pak also carries
+  `cgame.qvm`, `ui.qvm` and the `.menu` files.
+- **OA builds its own vendored gamecode, NOT `code/game`.** OA's game is a fork:
+  40 sources, 9 with no Q3 counterpart (`g_unlagged.c`, `g_admin.c`, `g_vote.c`,
+  `g_killspree.c`, `g_playerstore.c`, `g_fileops.c`, `g_cmds_ext.c`,
+  `g_svcmds_ext.c`, `bg_alloc.c`), and gametypes through `GT_DOMINATION`. It lives
+  at **`code/oa/`** in the layout `code/oa/code/{game,qcommon,botlib}` +
+  `code/oa/ui/menudef.h` — that shape is deliberate, so OA's own relative includes
+  (`"../qcommon/q_shared.h"`, `"../botlib/…"`, `"../../ui/menudef.h"`) resolve
+  **inside** the vendored tree instead of reaching the engine's copies. Do not
+  flatten it, and do not edit the sources. The build list is its own `Q3GOBJ_`
+  plus `g_syscalls.c`; `bg_lib.c` is `Q3_VM`-only, and `g_mem.c`/`g_rankings.c`
+  sit in the dir but are not in its game build.
+- **The revision is the gamecode repo's `oa-0.8.8` branch, and that is not
+  optional.** The repo's `main` is **OAX** (OpenArena Expanded, a mod, 2016+): its
+  `animNumber_t` has **48** entries against retail 0.8.8's **34**, so a native OAX
+  qagame feeds animation indices the retail `cgame.qvm` rejects with
+  `bad animation number: 38`. Hardware-confirmed. The native game and the
+  interpreted retail cgame share `animNumber_t`, the item list and `playerState_t`
+  — the vendored revision must be the one the paks were built from.
+- **`openarena-ioq3` is the OA *engine* fork and cannot supply the game.** Its
+  `code/game` is Q3's stock game code: no OA gametypes, no OA-only sources, and a
+  34-entry animation enum identical to Q3's. Useful as an engine reference only.
+- OA game↔engine ABI was checked: `MAX_CLIENTS` 64, `GENTITYNUM_BITS` 10,
+  `MAX_GENTITIES` 1024 and `MAX_PS_EVENTS` 2 all agree (the engine's
+  `MAX_PS_EVENTS 4` is `ELITEFORCE`-only). OA's botlib headers differ from the
+  engine's only in `ELITEFORCE`-guarded declarations and one comment; all
+  `ACTION_*` values are identical (OA writes them with 7 hex digits, not 8).
+- **EF is NOT possible and must not be attempted.** `ioef/code/game` is Q3's game
+  code, not Raven's: 0 of its 33 `.c` files carry an `ELITEFORCE` guard, it has no
+  assimilation/borg/tricorder/imod symbols, its file list is Q3's and its gametype
+  enum stops at `GT_HARVESTER`. Only `bg_public.h`/`g_public.h` are EF-aware, and
+  those are the engine-side trap/struct headers this repo already has. There is no
+  Holomatch game source; linking `code/game` as EF's qagame would give Q3 rules,
+  items and weapons and disagree with the retail EF `cgame.qvm`.
+- Classic keeps its QVM: proto-43, and `code/game` does not match it.
+- `ui/menudef.h` at the repo root is required by `code/game` (`../../ui/menudef.h`).
 
 - A PPC JIT was investigated and is a **hard NO-GO**: lv2 enforces per-page NX
   and exposes no exec flag in the user API, so instruction fetch from a heap/JIT
@@ -217,12 +369,18 @@ the PS3 block in `q_platform.h` does **not** define `HAVE_VM_COMPILED`.
 
 - Hot path: upstream `tr_*` (renderergl1) → `code/renderer/` qgl glue →
   `code/gl/ps3gl_*.c` → RSX. `ps3gl_draw.c::ps3gl_DrawElements` is the critical loop.
-- **Vertex data is zero-copy from a tess arena.** The tess vertex arrays live in
-  the top 16 MB of the 32 MB `rsxInit` IO buffer (XDR, RSX-snooped); the GPU
-  fetches them directly via `rsxAddressToOffset` + `GCM_LOCATION_CELL`. Streams
-  not in the arena (dlights, showtris) fall back to a copy into the vring. There
-  is no per-vertex interleave repack anymore. (`rsxMemalign` would be VRAM and
-  starve CPU reads — keep the arena in XDR.)
+- **There is no tess arena.** Q3's `tess` is a plain `.bss` global
+  (`tr_shade.c`), so it is never inside the `rsxInit` IO window and the
+  direct-bind path in `ps3gl_DrawElements` can never fire for it — every draw
+  takes the interleave-copy into the vring. Keep it that way: an attribute
+  pointer must pass `ps3gl_io_mapped()` (range check against
+  `ps3_rsx_io_base`/`ps3_rsx_io_size`, published by `ps3_glimp.c`) *before*
+  `rsxAddressToOffset`. **`gcmAddressToOffset` does not validate an unmapped
+  main-memory address** — it can report success with a garbage offset, and the
+  RSX then fetches vertices from nowhere, which is a whole-console freeze on the
+  first frame. Trusting its return value alone made the boot survive only by
+  luck of where `.bss` landed; linking anything new into the EBOOT moved those
+  addresses and froze the console.
 - **Do not split the vertex interleaving loop** in the copy fallback — the RSX
   ring is write-combined; multiple passes per attribute thrash the WC hardware.
 - **Every carve from a ring/arena must self-align its own start** (streams 16 B,
@@ -235,10 +393,10 @@ the PS3 block in `q_platform.h` does **not** define `HAVE_VM_COMPILED`.
   reserved), `ps3gl_begin_frame` swaps segments and waits only on the one it's
   about to reuse. A same-frame overflow refuses to wrap (drops that batch with a
   warning) rather than clobbering earlier draws still in flight — never make it
-  silently wrap again. The tess-arena zero-copy path (`ps3gl_draw.c`'s direct
-  `rsxAddressToOffset` bind onto Q3's own `tess.xyz`) has **no fence at all** —
-  do not assume one exists; this is a known, deferred gap, not yet hardware-
-  validated. `gcmGetLabelAddress` returns `u32*` — cast to `volatile u32*`.
+  silently wrap again. `ps3gl_draw.c`'s direct-bind path has **no fence at
+  all**; it is currently unreachable (see the tess note above), so any future
+  work that makes it reachable must add one first.
+  `gcmGetLabelAddress` returns `u32*` — cast to `volatile u32*`.
 - **Dual-texture lightmap**: `RB_StageIteratorLightmappedMultitexture` needs the
   `PS3GL_TENV_MODULATE2` key (tex0×tex1). If lightmaps render flat-lit,
   `ps3gl_shader_key()` is only looking at TMU0.
@@ -310,9 +468,9 @@ Getting these wrong causes networking or boot failures:
   `cl_cgame.c`, `cl_ui.c` route EF's trap numbers separately, and `msg.c` has a
   dedicated EF delta-field table, never shared with Classic's. **No fix-pak**
   — EF loads Matt's retail `qagame`/`cgame`/`ui` QVMs as-is; `code/game`/`cgame`/
-  `q3_ui`/`ui` sources are never touched or compiled for any flavor (this repo's
-  Makefile has no QVM-compile step at all — those dirs are reference/mirror
-  source only). Bots work, but retail EF's `qagame.qvm` bot AI only checks
+  `q3_ui`/`ui` sources are never compiled for EF (this repo's Makefile has no
+  QVM-compile step; `code/game` is only built natively for the Q3 flavor, see
+  §QVM). Bots work, but retail EF's `qagame.qvm` bot AI only checks
   `ACTION_ATTACK`, never `ACTION_RESPAWN` — `code/botlib/be_ea.c`'s `EA_Respawn()`
   must set `ACTION_ATTACK` under `#ifdef ELITEFORCE` (matches ioEF), or EF bots
   never respawn. Reference for the compat wire-framing mechanism (shared with
@@ -395,7 +553,7 @@ Two historical bottlenecks, both fixed:
 2. **GPU/fill rate** — addressed by the renderer work below (and 480p was the
    blunt fallback).
 
-Wins that are live: zero-copy tess arena (§Rendering), swizzled textures + mips,
+Wins that are live: swizzled textures + mips,
 `glIndex_t`→`uint16`, indices in an RSX index ring (`rsxDrawIndexArray`), VMX
 int16→float32 audio in `ps3_snd.c` (8/iter, `aligned(16)`, `-maltivec` per-file,
 `vec_madd` not `vec_mul`), `rsxSetSurface` dedup, MVP upload dedup, frame cap 60.
@@ -448,8 +606,9 @@ back correctly. **Leave the Makefile build as-is; do not migrate to CMake.**
 | Symptom | Root cause & fix |
 |---|---|
 | Boot crash / OOM | Hunk/zone too big (§Memory); `Cvar_Get` before `Com_Init`; missing `#ifndef` guard on `DEF_COMHUNKMEGS` |
-| Boot hang | zone = 32 MB; `-O3` |
-| Whole-console freeze mid-render | Misaligned ring/arena carve → bad F32 attribute offset; or a ring fence using a command label instead of a backend label |
+| Boot freeze right after `SNDDMA_Init: OK`, no XMB return | `SND_setup`'s sound-cache malloc exceeds the ~23 MB post-hunk/zone pool and lv2 hangs on it. Cap `com_soundMegs` (`PS3_MAX_COMSOUNDMEGS`) — a stale `q3config.cfg` overrides the cmdline (§Memory) |
+| Boot hang | zone = 32 MB; `-O3`; or a multi-TOC split — `.got` over 64 KB makes ld emit `r2off` stubs (§TOC budget) |
+| Whole-console freeze mid-render or on the first frame | Misaligned ring/arena carve → bad F32 attribute offset; a ring fence using a command label instead of a backend label; or an attribute bound from `rsxAddressToOffset` without the `ps3gl_io_mapped()` range check |
 | Menu cursor freezes | `PS3_Input_Frame` early-returning on `padData.len==0`; squared stick curve (use linear) (`ps3_input.c`) |
 | Menu confirm/back double-fires | Cross/Circle emitting both `K_JOY*` and `K_ENTER`/`K_ESCAPE`; suppress `K_JOY*` when `in_menu` |
 | OSK command broadcast as chat | `Console_Key` con_autochat; `PS3_OSK_Open` must inject leading `/` in console context |
@@ -468,6 +627,10 @@ back correctly. **Leave the Makefile build as-is; do not migrate to CMake.**
 | Classic: "CL_ParseSnapshot invalid size" / garbled net | proto-43 needs `Netchan_(Un)ScramblePacket`; XOR encode must be off (`#if defined(LEGACY_PROTOCOL) && !defined(CLASSIC)`) |
 | EF: retail QVM crashes/corrupts state on a trap call | Trap-number ABI mismatch in `sv_game.c`/`cl_cgame.c`/`cl_ui.c` — `gameImport_t`/`cgameImport_t`/`uiImport_t` ordinals differ from vanilla Q3, must route per ioEF's own enum, not vanilla's |
 | EF build fails on missing `pak9_ps3_embedded.h` | `ps3_main.c`'s embedded-pak `#include` ladder must have its own `#elif defined(ELITEFORCE)` arm (no fix-pak for this flavor) — don't let it fall into the plain-Q3 `#else` |
+| OA: `bad animation number: N` from cgame | Native qagame built from the wrong gamecode revision — the gamecode repo's `main` is OAX with 48 animations, retail 0.8.8 has 34. Vendor the `oa-0.8.8` branch (§QVM) |
+| OA: wrong pickups, mispredicted movement, or missing gametypes after going native | The vendored `code/oa/` gamecode revision does not match the retail 0.8.8 `cgame.qvm` it still runs interpreted. Confirm with `\vm_game 1` + `map` — if the QVM behaves, it is a revision mismatch, not the native plumbing (§QVM) |
+| TA: baseq3 rules in a missionpack match, or "qagame: using linked-in native code" never prints | `PS3_NATIVE_GAME_DIR` (`vm.c`) left at `BASEGAME` for TA, or `-DMISSIONPACK` missing from `GAME_CFLAGS` (§QVM) |
+| Debug logging in a release PKG, or no log in a `DEBUG=1` PKG | `make` does not track flag changes and both share `$(BUILD)`. Switching `DEBUG` needs `make clean` or a separate `BUILD=` (§Build) |
 | EF: bots never respawn after death | `EA_Respawn()` (`code/botlib/be_ea.c`) sets `ACTION_RESPAWN`, but retail EF's `qagame.qvm` bot AI only tests `ACTION_ATTACK` — must set `ACTION_ATTACK` under `#ifdef ELITEFORCE` instead (Q3/OA/TA/Classic keep `ACTION_RESPAWN`) |
 
 ---

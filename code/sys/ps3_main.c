@@ -298,26 +298,33 @@ int main(int argc, char *argv[])
     PS3_ExtractBundledZpackClassic();
 #endif
 
+    PS3LOG("boot: pak extract done");
     PS3_Input_Init();
     printf("[ps3] Input OK\n");
+    PS3LOG("boot: PS3_Input_Init done");
     PS3_OSK_Init();
+    PS3LOG("boot: PS3_OSK_Init done");
 
     /* RSX must be up before Com_Init -- CL_Init issues BeginFrame immediately. */
     PS3_RSX_Init();
     printf("[ps3] RSX init done\n");
+    PS3LOG("boot: PS3_RSX_Init done");
 
     /* Pre-init renderer so Com_Printf -> SCR_UpdateScreen is safe. */
     extern refexport_t re;
     refexport_t *ref = GetRefAPI(REF_API_VERSION, NULL);
     if (ref) re = *ref;
+    PS3LOG("boot: GetRefAPI done");
 
     /* Upstream sys_main.c's main() is replaced, so do this ourselves. */
     extern void Sys_PlatformInit(void);
     Sys_PlatformInit();
+    PS3LOG("boot: Sys_PlatformInit done");
 
     /* Must run before Com_Init: CL_Init uses it as the "name" cvar's compiled-in
      * default, which is what makes it survive cvar_restart (setup menu Defaults). */
     PS3_InitDefaultPlayerName();
+    PS3LOG("boot: PS3_InitDefaultPlayerName done");
 
     static char cmdline[2048];
     snprintf(cmdline, sizeof(cmdline),
@@ -343,10 +350,13 @@ int main(int argc, char *argv[])
         "+set com_maxfps 60 "         /* uncapped floods the GCM buffer and stalls mid-frame, keep the cap */
         "+set pmove_fixed 1 "
         "+set s_khz 48 "
-        "+set com_soundMegs 8 "
+        "+set com_soundMegs 6 "       /* 8 needs 24.2 MB and lv2 hangs; capped anyway in SND_setup */
         "+set sv_pure 0 "
         "+set cl_allowDownload 1 "
         "+set g_doWarmup 0 "          /* warmup map_restart on slow cgame reload = serverId race, don't turn this on */
+#ifdef PS3_NATIVE_GAME
+        "+set vm_game 0 "             /* linked-in qagame; beats the archived ioq3 default of 2 */
+#endif
         "+set sv_maxclients 8 "
         "+set in_joystick 1 "
         "+set in_joystickUseAnalog 1 "
@@ -384,8 +394,10 @@ int main(int argc, char *argv[])
     }
 
     printf("[ps3] Calling Com_Init...\n");
+    PS3LOG("boot: entering Com_Init");
     Com_Init(cmdline);
     printf("[ps3] Com_Init done\n");
+    PS3LOG("boot: Com_Init done");
 
     /* PSL1GHT net module must load before ioq3's NET_Init. */
     {
@@ -395,7 +407,11 @@ int main(int argc, char *argv[])
 
     NET_Init();
     printf("[ps3] NET_Init done\n");
+    PS3LOG("boot: NET_Init done, entering frame loop");
 
+#ifdef PS3_DEBUG
+    int boot_frames = 0;
+#endif
     while (ps3_running) {
         sysUtilCheckCallback();
         PS3_Input_Frame();
@@ -405,6 +421,17 @@ int main(int argc, char *argv[])
             break;
         }
 
+#ifdef PS3_DEBUG
+        /* Bracket the first frames only: a freeze inside frame 1 must be
+         * distinguishable from one before the loop was ever reached. */
+        if (boot_frames < 5) {
+            PS3LOG("boot: Com_Frame enter");
+            Com_Frame();
+            PS3LOG("boot: Com_Frame exit");
+            boot_frames++;
+            continue;
+        }
+#endif
         Com_Frame();
     }
 

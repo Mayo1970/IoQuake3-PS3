@@ -102,6 +102,11 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #define DEF_COMHUNKMEGS           96
 #define DEF_COMZONEMEGS           24
 
+/* Ceiling on com_soundMegs, enforced in SND_setup (snd_mem.c), because the cvar
+ * is CVAR_ARCHIVE and a stale config outranks the boot cmdline. 6 => 18.1 MB of
+ * the ~23 MB left after hunk+zone; 8 wants 24.2 MB and hangs lv2. See CLAUDE.md. */
+#define PS3_MAX_COMSOUNDMEGS      6
+
 #ifndef MAX_RELIABLE_COMMANDS
 #define MAX_RELIABLE_COMMANDS   32      /* stock: 64 */
 #endif

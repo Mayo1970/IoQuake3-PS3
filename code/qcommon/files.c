@@ -1483,6 +1483,22 @@ int FS_FindVM(void **startSearch, char *found, int foundlen, const char *name, i
 	return -1;
 }
 
+#ifdef __PS3__
+// Gamedir of the search path FS_FindVM returned, so the linked-in qagame never replaces a mod's qvm.
+const char *FS_SearchPathGameDir(void *startSearch)
+{
+	searchpath_t *search = startSearch;
+
+	if(!search)
+		return NULL;
+	if(search->dir)
+		return search->dir->gamedir;
+	if(search->pack)
+		return search->pack->pakGamename;
+	return NULL;
+}
+#endif
+
 /*
 =================
 FS_Read
