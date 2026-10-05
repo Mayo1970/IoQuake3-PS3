@@ -7,6 +7,7 @@
 #include <malloc.h>
 
 #include <ppu-types.h>
+#include <ppu-asm.h>
 #include <rsx/rsx.h>
 #include <sysutil/sysutil.h>
 #include <sysmodule/sysmodule.h>
@@ -99,11 +100,8 @@ void ps3_log(const char *msg)
  * on any port depending on how many devices are plugged in). */
 static char ps3_base_path[64] = "/dev_hdd0/data/ioq3";
 
-/* PS3_GAMEDIR doubles as the fs_game value and the boot-presence probe dir --
- * that coincidence holds for every flavor that ships its own pak0.pk3 in its
- * game dir (Q3/OA/EF, and TA's "missionpack"). Rocket Arena doesn't: "arena"
- * holds only mod-numbered paks layered on retail Q3A, no pak0.pk3 of its own.
- * So its boot proof is baseq3/pak0.pk3, while fs_game still uses PS3_GAMEDIR. */
+/* PS3_GAMEDIR is also the boot probe dir, as each flavor ships pak0.pk3 there. Rocket Arena's
+ * "arena" has only mod paks on retail Q3A, so it probes baseq3; fs_game stays PS3_GAMEDIR. */
 #if defined(STANDALONERA)
 #define PS3_BOOT_PROBE_DIR "baseq3"
 #else
@@ -263,6 +261,16 @@ const char *PS3_DefaultPlayerName(void)
     if (ps3_nick[0] == '\0')
         return "player";
     return ps3_nick;
+}
+
+/* ps3_prof frame probe: VM_ProfFrame (vm.c) also needs the frame time. */
+static void PS3_RunFrame(void)
+{
+    extern void VM_ProfFrame(unsigned long long frameTicks);
+    unsigned long long start = __gettime();
+
+    Com_Frame();
+    VM_ProfFrame(__gettime() - start);
 }
 
 int main(int argc, char *argv[])
@@ -426,13 +434,13 @@ int main(int argc, char *argv[])
          * distinguishable from one before the loop was ever reached. */
         if (boot_frames < 5) {
             PS3LOG("boot: Com_Frame enter");
-            Com_Frame();
+            PS3_RunFrame();
             PS3LOG("boot: Com_Frame exit");
             boot_frames++;
             continue;
         }
 #endif
-        Com_Frame();
+        PS3_RunFrame();
     }
 
     /* XMB exit path: sysutil callback set ps3_running=0, Com_Quit_f never ran,

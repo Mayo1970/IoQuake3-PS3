@@ -1,15 +1,12 @@
-/*
- * Stock newlib setjmp.S is -mcpu=cell and blows 448 bytes into our -mno-altivec 256-byte
- * jmp_buf (192B of silent stack corruption per call) plus truncates 64-bit GPRs via stw/lwz.
- * Fixed here with std/ld + no AltiVec, sized for the 512-byte _JBLEN=64 override -- don't "simplify" this back toward stock newlib, it WILL corrupt the stack again.
- */
+/* newlib's -mcpu=cell setjmp writes 448 B of AltiVec state into a 256 B jmp_buf and truncates GPRs with
+ * stw/lwz. This one is std/ld, no AltiVec, 328 B of the 512 B shim jmp_buf: never go back to newlib's. */
 
 #include "ppc-asm.h"
 
 FUNC_START(setjmp)
 	/* Align buffer to 8-byte boundary (jmp_buf is double[], already aligned) */
 	addi	3,3,7
-	rldicr	3,3,0,59	/* clear low 3 bits (PPC64 8-byte align) */
+	rldicr	3,3,0,60	/* clear low 3 bits; 59 rounded to 16, below a buffer at 8 mod 16 */
 
 	/* Save GPRs (64-bit) -- r1, r2, r13-r31 = 21 registers */
 	std	1,0(3)		/* offset   0: SP */
@@ -68,9 +65,9 @@ FUNC_END(setjmp)
 
 
 FUNC_START(longjmp)
-	/* Align buffer to 8-byte boundary */
+	/* Align buffer to 8-byte boundary, exactly as setjmp does */
 	addi	3,3,7
-	rldicr	3,3,0,59
+	rldicr	3,3,0,60
 
 	/* Restore GPRs (64-bit) */
 	ld	1,0(3)		/* SP */

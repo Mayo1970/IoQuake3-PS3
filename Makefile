@@ -1,30 +1,5 @@
-#---------------------------------------------------------------------------------
-# ioquake3-PS3 Unified Makefile
-# Requires ps3toolchain (ps3dev/PSL1GHT) to be built and installed.
-#
-# Environment variables required:
-#   PS3DEV  = /usr/local/ps3dev   (or wherever ps3toolchain installed)
-#   PSL1GHT = $PS3DEV             (PSL1GHT SDK root; defaults to PS3DEV)
-#
-# Usage:
-#   make              - Build Q3A ELF
-#   make pkg          - Build Q3A PKG
-#   make ta           - Build Team Arena ELF
-#   make TA=1 pkg     - Build Team Arena PKG
-#   make oa           - Build Open Arena ELF
-#   make OA=1 pkg     - Build Open Arena PKG
-#   make classic      - Build CLASSIC (proto-43 Dreamcast crossplay) ELF
-#   make CLASSIC=1 pkg- Build CLASSIC PKG
-#   make ef           - Build Elite Force (proto-26) ELF
-#   make EF=1 pkg     - Build Elite Force PKG
-#   make all-flavors  - Build all five flavors' PKGs in sequence
-#   make clean        - Remove build artifacts for all flavors
-#   make DEBUG=1      - Enable debug logging (any flavor)
-#
-# Each flavor uses a separate build directory so they never stomp each other:
-#   Q3A -> build/    OA -> build_oa/    TA -> build_ta/    Classic -> build_qc/
-#   Elite Force -> build_ef/
-#---------------------------------------------------------------------------------
+# ioquake3-PS3 Makefile, needs PS3DEV (and PSL1GHT, default PS3DEV). make [pkg|self|install|clean|all-flavors];
+# flavor: ta/oa/classic/ef or TA=1 OA=1 CLASSIC=1 EF=1, DEBUG=1 for logs; dirs build/ build_ta/ build_oa/ build_qc/ build_ef/
 
 ifeq ($(strip $(PS3DEV)),)
   $(error "Set PS3DEV in your environment. export PS3DEV=/usr/local/ps3dev")
@@ -33,9 +8,7 @@ ifeq ($(strip $(PSL1GHT)),)
   PSL1GHT := $(PS3DEV)
 endif
 
-#---------------------------------------------------------------------------------
-# Flavor selection (q3 is default; `make ta` / `make oa` set TA/OA=1)
-#---------------------------------------------------------------------------------
+#--- Flavor selection (q3 is default; `make ta` / `make oa` set TA/OA=1) ----------
 
 include flavors.mk
 
@@ -50,9 +23,7 @@ else
   ICON0 ?= $(PS3DEV)/bin/ICON0.PNG
 endif
 
-#---------------------------------------------------------------------------------
-# Toolchain
-#---------------------------------------------------------------------------------
+#--- Toolchain --------------------------------------------------------------------
 PREFIX  := $(PS3DEV)/ppu/bin/ppu-
 CC      := $(PREFIX)gcc
 CXX     := $(PREFIX)g++
@@ -65,17 +36,13 @@ FSELF    := $(PS3DEV)/bin/fself
 MAKE_SELF_NPDRM := $(PS3DEV)/bin/make_self_npdrm
 
 
-#---------------------------------------------------------------------------------
-# PSL1GHT SDK paths
-#---------------------------------------------------------------------------------
+#--- PSL1GHT SDK paths ------------------------------------------------------------
 PSL1GHT_INC  := $(PSL1GHT)/ppu/include
 PSL1GHT_LIB  := $(PSL1GHT)/ppu/lib
 PORTLIBS_INC  := $(PS3DEV)/portlibs/ppu/include
 PORTLIBS_LIB  := $(PS3DEV)/portlibs/ppu/lib
 
-#---------------------------------------------------------------------------------
-# ioq3 sources (same for all three flavors)
-#---------------------------------------------------------------------------------
+#--- ioq3 sources (same for all three flavors) ------------------------------------
 IOQ3_SRCS := \
   code/qcommon/cmd.c \
   code/qcommon/cm_load.c \
@@ -97,7 +64,7 @@ IOQ3_SRCS := \
   code/qcommon/unzip.c \
   code/qcommon/vm.c \
   code/qcommon/vm_interpreted.c \
-  code/qcommon/vm_none.c \
+  code/qcommon/vm_powerpc.c \
   code/client/cl_cgame.c \
   code/client/cl_cin.c \
   code/client/cl_console.c \
@@ -186,9 +153,7 @@ IOQ3_SRCS := \
   code/renderercommon/tr_image_tga.c \
   code/renderercommon/tr_noise.c
 
-#---------------------------------------------------------------------------------
-# PS3 port source files
-#---------------------------------------------------------------------------------
+#--- PS3 port source files --------------------------------------------------------
 PS3_SRCS := \
   code/sys/ps3_main.c \
   code/sys/ps3_sys.c \
@@ -208,15 +173,11 @@ PS3_SRCS := \
   code/gl/ps3gl_draw.c \
   code/gl/ps3gl_shaders.c
 
-#---------------------------------------------------------------------------------
-# PPC64-correct setjmp/longjmp replacement
+#--- PPC64-correct setjmp/longjmp replacement -------------------------------------
 # Must be linked before libc.a for symbol override to work.
-#---------------------------------------------------------------------------------
 PS3_ASM_SRCS := code/sys/ps3_setjmp.S
 
-#---------------------------------------------------------------------------------
-# zlib detection
-#---------------------------------------------------------------------------------
+#--- zlib detection ---------------------------------------------------------------
 IOQ3_ZLIB_A := code/libs/zlib/zlib.h
 IOQ3_ZLIB_B := code/zlib/zlib.h
 IOQ3_ZLIB_C := code/thirdparty/zlib-1.3.1/zlib.h
@@ -252,16 +213,12 @@ endif
 ZLIB_H_COPY  := code/qcommon/zlib.h
 ZCONF_H_COPY := code/qcommon/zconf.h
 
-#---------------------------------------------------------------------------------
-# Internal libjpeg (jpeg-9f)
-#---------------------------------------------------------------------------------
+#--- Internal libjpeg (jpeg-9f) ---------------------------------------------------
 JPEG_DIR      := code/thirdparty/jpeg-9f
 JPEG_CFLAGS   := -DUSE_INTERNAL_JPEG -DXMD_H -I$(JPEG_DIR)
 IOQ3_JPEG_SRCS := $(wildcard $(JPEG_DIR)/j*.c)
 
-#---------------------------------------------------------------------------------
-# Vendored OGG + Vorbis
-#---------------------------------------------------------------------------------
+#--- Vendored OGG + Vorbis --------------------------------------------------------
 OGG_DIR    := code/thirdparty/libogg-1.3.6
 VORBIS_DIR := code/thirdparty/libvorbis-1.3.7
 MP3_DIR    := code/thirdparty/minimp3
@@ -290,9 +247,7 @@ IOQ3_OGG_SRCS := \
   $(VORBIS_DIR)/lib/lsp.c \
   $(VORBIS_DIR)/lib/psy.c
 
-#---------------------------------------------------------------------------------
-# Compiler flags
-#---------------------------------------------------------------------------------
+#--- Compiler flags ---------------------------------------------------------------
 ifeq ($(DEBUG),1)
   DEBUG_FLAG := -DPS3_DEBUG -g
 else
@@ -333,25 +288,39 @@ CFLAGS_VMX := $(filter-out -mno-altivec,$(CFLAGS)) -maltivec
 
 CXXFLAGS := $(CFLAGS)
 
-#---------------------------------------------------------------------------------
-# Linked-in native qagame (vm_game 0). Q3/TA build upstream ioq3 code/game (TA via
-# -DMISSIONPACK); OA builds its own vendored gamecode under code/oa/. EF is NOT
-# possible -- no Holomatch game source exists, ioEF ships Q3's game code. Classic
-# is proto-43 and does not match either.
-#---------------------------------------------------------------------------------
+#--- QVM JIT (vm_powerpc.c, cvar ps3_vmjit): .text code slot per VM in KB, "ui cgame qagame" ----
+# 0 = no slot, that VM stays interpreted. The slots are loaded EBOOT image: they come out of the free pool.
+ifeq ($(FLAVOR),ta)
+  VMJIT_KB := 768 1280 0
+  VMJIT_DEFAULT := 2
+else ifeq ($(FLAVOR),oa)
+  VMJIT_KB := 768 1024 0
+  VMJIT_DEFAULT := 2
+else ifeq ($(FLAVOR),classic)
+  VMJIT_KB := 768 768 1024
+  VMJIT_DEFAULT := 2
+else ifeq ($(FLAVOR),ef)
+  VMJIT_KB := 1024 1024 1280
+  VMJIT_DEFAULT := 2
+else
+  VMJIT_KB := 768 768 0
+  VMJIT_DEFAULT := 2
+endif
+VMJIT_CFLAGS := -DVMJIT_UI_KB=$(word 1,$(VMJIT_KB)) -DVMJIT_CGAME_KB=$(word 2,$(VMJIT_KB)) \
+  -DVMJIT_GAME_KB=$(word 3,$(VMJIT_KB))
+# ps3_vmjit's default (vm.c) per flavor; 0 puts that flavor back on the interpreter
+CFLAGS += -DPS3_VMJIT_DEFAULT=$(VMJIT_DEFAULT)
+
+#--- Linked-in native qagame (vm_game 0): Q3/TA build code/game (TA -DMISSIONPACK), OA its code/oa/.
+# Not EF (no Holomatch game source; ioEF ships Q3's) or Classic (proto-43 matches neither).
 ifneq ($(filter $(FLAVOR),q3 ta oa),)
   NATIVE_GAME ?= 1
 endif
 
 ifeq ($(NATIVE_GAME),1)
 ifeq ($(FLAVOR),oa)
-# OA gamecode from the gamecode repo's oa-0.8.8 BRANCH, vendored verbatim. Not
-# master: master is OAX, whose 48-entry animNumber_t makes the retail 0.8.8
-# cgame.qvm abort with "bad animation number". This branch has 34, like the paks.
-# The code/oa/code/{game,qcommon,botlib} + code/oa/ui layout exists so its own
-# relative includes ("../qcommon/q_shared.h", "../../ui/menudef.h") resolve inside
-# the vendored tree, not into the engine's. List is its Q3GOBJ_ + g_syscalls.o;
-# bg_lib.c is Q3_VM-only, g_mem.c and g_rankings.c are not in its game build.
+# OA gamecode: oa-0.8.8 branch verbatim, not master (OAX: 48 animations, retail cgame wants 34); the code/oa/code/*
+# + code/oa/ui layout keeps its includes inside. List = Q3GOBJ_ + g_syscalls.o (bg_lib.c is Q3_VM-only; no g_mem/g_rankings).
 GAME_SRCS := \
   code/oa/code/game/g_main.c \
   code/oa/code/game/g_syscalls.c \
@@ -433,9 +402,8 @@ endif
 
 CFLAGS     += -DPS3_NATIVE_GAME
 CFLAGS_VMX += -DPS3_NATIVE_GAME
-# -fno-common: every global must land in .bss so the ld script can bracket it.
-# -mminimal-toc: the engine alone sits ~3 KB under the 64 KB single-TOC limit and
-# these objects push it over -- see --no-multi-toc in LDFLAGS.
+# -fno-common: every global must land in .bss so the ld script can bracket it. -mminimal-toc: the
+# engine alone sits ~3 KB under the 64 KB single-TOC limit, these objects push it over (--no-multi-toc).
 GAME_CFLAGS := $(CFLAGS) -DQAGAME -fno-common -mminimal-toc
 # MISSIONPACK selects TA's game rules inside code/game, exactly as the Q3 SDK
 # builds missionpack/vm/qagame.qvm. Engine objects must NOT get this define.
@@ -447,9 +415,8 @@ GAME_LDS    := code/sys/ps3_qagame.ld
 GAME_NATIVE_OBJ := $(BUILD)/qagame_native.o
 endif
 
-# --no-multi-toc: this toolchain is -mcmodel=small only, so a .got over 64 KB makes ld
-# split the TOC and emit r2off stubs, which hang the PS3 at boot. Fail the link instead;
-# if it fires, shrink TOC use (-mminimal-toc) rather than dropping the flag.
+# --no-multi-toc: small-model only, so a .got over 64 KB makes ld split the TOC with r2off stubs, which
+# hang the PS3 at boot. Fail the link instead; if it fires, shrink TOC use (-mminimal-toc), keep the flag.
 LDFLAGS := \
   -Wl,--no-multi-toc \
   -L$(PSL1GHT_LIB) \
@@ -462,31 +429,23 @@ LIBS := \
   -lrt -llv2 -lnet -lnetctl -lsysmodule \
   $(ZLIB_LIBS) -lpng -lz -lm
 
-#---------------------------------------------------------------------------------
-# Source collection
-#---------------------------------------------------------------------------------
+#--- Source collection ------------------------------------------------------------
 ALL_SRCS := $(PS3_SRCS) $(IOQ3_SRCS) $(IOQ3_ZLIB_SRCS) $(IOQ3_JPEG_SRCS) $(IOQ3_OGG_SRCS)
 
 OBJS     := $(patsubst %.c,$(BUILD)/%.o,$(ALL_SRCS))
 ASM_OBJS := $(patsubst %.S,$(BUILD)/%.o,$(PS3_ASM_SRCS))
 
-#---------------------------------------------------------------------------------
-# Phony targets
-#---------------------------------------------------------------------------------
+#--- Phony targets ----------------------------------------------------------------
 .PHONY: all clean pkg self install prebuild
 
 all: $(BUILD)/$(TARGET).elf
 
-#---------------------------------------------------------------------------------
-# Prebuild: copy zlib headers next to unzip.h
-#---------------------------------------------------------------------------------
+#--- Prebuild: copy zlib headers next to unzip.h ----------------------------------
 prebuild:
 	@cp $(ZLIB_DIR)/zlib.h $(ZLIB_H_COPY) 2>/dev/null || true
 	@test -f $(ZLIB_DIR)/zconf.h && cp $(ZLIB_DIR)/zconf.h $(ZCONF_H_COPY) || true
 
-#---------------------------------------------------------------------------------
-# Link
-#---------------------------------------------------------------------------------
+#--- Link -------------------------------------------------------------------------
 $(BUILD)/$(TARGET).elf: prebuild $(ASM_OBJS) $(OBJS) $(GAME_NATIVE_OBJ)
 	@echo "Linking $@"
 	$(LD) $(CFLAGS) $(LDFLAGS) $(filter %.o,$^) $(LIBS) -o $@
@@ -510,9 +469,7 @@ $(GAME_NATIVE_OBJ): $(GAME_OBJS) $(GAME_LDS)
 	  $(BUILD)/qagame_renamed.o $@
 endif
 
-#---------------------------------------------------------------------------------
-# Assembly files: must NOT use $(CFLAGS)
-#---------------------------------------------------------------------------------
+#--- Assembly files: must NOT use $(CFLAGS) ---------------------------------------
 ASFLAGS := -mno-altivec
 
 $(BUILD)/%.o: %.S
@@ -571,6 +528,12 @@ $(BUILD)/code/audio/ps3_snd.o: code/audio/ps3_snd.c
 	@echo "CC $< [vmx]"
 	@$(CC) $(CFLAGS_VMX) -c $< -o $@
 
+# QVM JIT: its own TOC block (-mminimal-toc, see --no-multi-toc) and the code slot sizes
+$(BUILD)/code/qcommon/vm_powerpc.o: code/qcommon/vm_powerpc.c
+	@mkdir -p $(dir $@)
+	@echo "CC $< [jit]"
+	@$(CC) $(CFLAGS) -mminimal-toc $(VMJIT_CFLAGS) -c $< -o $@
+
 
 # common.c with overridden memory constants
 $(BUILD)/code/qcommon/common.o: code/qcommon/common.c
@@ -581,9 +544,7 @@ $(BUILD)/code/qcommon/common.o: code/qcommon/common.c
 	       -UMIN_DEDICATED_COMHUNKMEGS -DMIN_DEDICATED_COMHUNKMEGS=16 \
 	       -c $< -o $@
 
-#---------------------------------------------------------------------------------
-# self / install / pkg
-#---------------------------------------------------------------------------------
+#--- self / install / pkg ---------------------------------------------------------
 self: $(BUILD)/$(TARGET).elf
 	@echo "Running sprxlinker..."
 	$(SPRXLINK) $(BUILD)/$(TARGET).elf
@@ -615,9 +576,7 @@ pkg: $(BUILD)/$(TARGET).elf
 	python3 $(PS3DEV)/bin/pkg.py --contentid $(CONTENT_ID) $(BUILD)/pkg/ $(BUILD)/$(TARGET).pkg
 	@echo "Done: $(BUILD)/$(TARGET).pkg"
 
-#---------------------------------------------------------------------------------
-# Clean -- wipes all flavor build dirs
-#---------------------------------------------------------------------------------
+#--- Clean -- wipes all flavor build dirs -----------------------------------------
 clean:
 	@rm -rf build/ build_oa/ build_ta/ build_qc/ build_ef/
 	@rm -f $(ZLIB_H_COPY) $(ZCONF_H_COPY)

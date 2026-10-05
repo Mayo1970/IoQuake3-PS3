@@ -183,14 +183,30 @@ struct vm_s {
 
 	byte		*jumpTableTargets;
 	int			numJumpTableTargets;
+
+#ifdef __PS3__
+	// ps3_prof timebase ticks: outermost VM_Call, and the syscalls made at that level
+	unsigned long long	profVm;
+	unsigned long long	profSys;
+#endif
 };
 
 
 extern	vm_t	*currentVM;
 extern	int		vm_debugLevel;
 
+#ifdef __PS3__
+intptr_t VM_ProfSystemCall( vm_t *vm, intptr_t *args );
+#define VM_SYSCALL( vm, args )	VM_ProfSystemCall( vm, args )
+#else
+#define VM_SYSCALL( vm, args )	(vm)->systemCall( args )
+#endif
+
 void VM_Compile( vm_t *vm, vmHeader_t *header );
 int	VM_CallCompiled( vm_t *vm, int *args );
+#ifdef __PS3__
+qboolean VM_JitSelfTest( void );
+#endif
 
 void VM_PrepareInterpreter( vm_t *vm, vmHeader_t *header );
 int	VM_CallInterpreted( vm_t *vm, int *args );

@@ -1,4 +1,4 @@
-/* ps3_sys.c -- Sys_* / CON_* / mmap / minizip / linker wraps for PS3. */
+/* ps3_sys.c -- Sys_* / CON_* / minizip / linker wraps for PS3. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -617,23 +617,6 @@ void Sys_SigHandler(int signal)
 /* Real RSX bring-up is in PS3_RSX_Init() called from ps3_main.c. */
 void Sys_GLimpInit(void) {}
 void Sys_GLimpSafeInit(void) {}
-
-/* PS3 homebrew has no mmap; back QVM/hunk allocations with memalign. */
-void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
-{
-    (void)addr; (void)prot; (void)flags; (void)fd; (void)offset;
-    void *p = memalign(16, length);
-    if (p) memset(p, 0, length);
-    return p ? p : (void *)(intptr_t)-1;
-}
-
-int munmap(void *addr, size_t length)
-{
-    (void)length;
-    if (addr && addr != (void *)(intptr_t)-1)
-        free(addr);
-    return 0;
-}
 
 #include "qcommon/unzip.h"
 

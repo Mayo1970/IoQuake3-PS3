@@ -344,9 +344,9 @@ Output is embedded into `code/gl/ps3gl_shader_data.h` as C arrays.
 
 ## Memory budget
 
-GameOS reserves ~88 MB of the 256 MB XDR, leaving ~145 MB free user
-memory at `Sys_PlatformInit` (probed and logged on every boot in debug
-builds).
+About 167 MB of the 256 MB XDR is free user memory at `Sys_PlatformInit`
+(probed and logged on every boot in debug builds). GameOS, the EBOOT itself,
+the RSX IO buffer and the OSK container use the rest.
 
 | Region | Size | Notes |
 |---|---|---|
@@ -354,12 +354,12 @@ builds).
 | Zone (`com_zoneMegs`) | 24 MB | Dynamic allocs, zlib inflate |
 | Sound (`com_soundMegs`) | 8 MB | Audio buffers |
 | Vorbis decoder + ring | a few MB | OGG music |
-| RSX IO buffer | 32 MB | GCM command buffer + control |
+| RSX IO buffer | 8 MB | GCM command buffer + control |
 | Framebuffers | ~7 MB (VRAM) | Two 1280x720 ARGB + Z24S8 |
 | Vertex ring | 4 MB (VRAM) | Per-frame vertex data |
 | Textures | ~40 MB (VRAM) | RSX texture heap |
 
-~25 MB margin above hunk+zone for QVM loads / scratch malloc.
+~47 MB margin above hunk+zone for QVM loads / scratch malloc.
 Don't raise `DEF_COMHUNKMEGS` above 112 without re-measuring.
 
 ---

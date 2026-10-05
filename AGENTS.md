@@ -110,15 +110,20 @@ USB keyboard/mouse, cinematics, and OGG music.
 
 ## Memory budget — hard constraint
 
-- **~145 MB free user RAM** at boot, ~143 MB with the native qagame linked in
-  (GameOS reserves ~88 MB of the 256 MB XDR; the RSX 32 MB IO buffer and the
-  EBOOT's own segments are already subtracted, because `PS3_RSX_Init` runs
-  before the probe). Logged as
+- **~169 MB free user RAM** at boot, ~167 MB with the native qagame linked in,
+  **~166 MB** with the 1.5 MB JIT arena too (measured on Q3; the arena takes
+  its size off the pool in every flavor, §QVM). The EBOOT's own segments, the
+  8 MB RSX IO buffer and the 4 MB OSK container are already subtracted,
+  because they all exist before the probe. Logged as
   `[mem] free user memory at Sys_PlatformInit: ~N MB`.
-- Hunk = **96 MB**, Zone = **24 MB** → 120 MB. **The remaining ~23 MB is not
+- Hunk = **96 MB**, Zone = **24 MB** → 120 MB. **The remaining ~47 MB is not
   slack** — read the ledger below before spending any of it.
+- The RSX IO buffer (`RSX_HOST_SIZE`, `ps3_glimp.c`) is **8 MB**. `rsxInit` keeps
+  only the 1 MB command buffer there; every other RSX buffer is in VRAM. The
+  PSL1GHT samples' 32 MB costs 24 MB of this pool. Never go below 8 MB: rsx.h's
+  64 KB/1 MB defaults failed on HW.
 
-### The ~23 MB pool is almost entirely the sound cache
+### The sound cache is the largest single bite of the ~47 MB pool
 
 `SND_setup` (`snd_mem.c`) does the single largest malloc of the whole boot:
 `com_soundMegs * 1536 * sizeof(sndBuffer)`, and `sizeof(sndBuffer)` is
@@ -130,29 +135,34 @@ USB keyboard/mouse, cinematics, and OGG music.
 | 6 (PS3 cap) | 18.14 MB |
 | 5 | 15.12 MB |
 
-At 8 that malloc needed 24.19 MB of a 23 MB pool. **lv2 hangs instead of
-returning NULL**, so the console froze with no XMB return and the log stopped
-dead on the line before it. Stock Q3 survived only because it had ~25 MB and
-cleared 24.19 MB by ~0.8 MB; the native qagame's ~1.9 MB of extra loaded
-segments ate that margin. This is also the real reason "+8 MB of static memory
-hangs at boot despite the ~25 MB margin" — the margin was never free.
+With the old 32 MB IO buffer the pool was ~23 MB, and at 8 that malloc needed
+24.19 MB of it. **lv2 hangs instead of returning NULL**, so the console froze
+with no XMB return and the log stopped dead on the line before it. Stock Q3
+survived only because it had ~25 MB and cleared 24.19 MB by ~0.8 MB; the native
+qagame's ~1.9 MB of extra loaded segments ate that margin. This is also the real
+reason "+8 MB of static memory hangs at boot despite the ~25 MB margin" — the
+margin was never free.
 
 - `PS3_MAX_COMSOUNDMEGS` (**6**, `ps3_platform.h`) is a **hard cap applied in
   `SND_setup`**, not a default. `com_soundMegs` is `CVAR_ARCHIVE`, so a stale
   `q3config.cfg` beats the boot cmdline — a cmdline-only change does nothing on
   a console that already has a config. Set both, as the tree does now.
 - Anything that grows the EBOOT's loaded segments, the hunk, or the zone comes
-  out of this pool. Budget it against the table above, not against "~23 MB free".
-- Measured loaded-segment totals with the native qagame: **Q3 24.59 MB**,
-  **OA 24.87 MB**, **TA 25.13 MB**. TA is the tightest flavor — ~142 MB free, so a ~22 MB pool
-  against an 18.14 MB sound cache, leaving **~3.9 MB**. If TA ever freezes on the
+  out of this pool. Budget it against the table above, not against "~47 MB free".
+- Measured loaded-segment totals with the native qagame and the JIT arena:
+  **Q3 26.13 MB**, **OA 26.66 MB**, **TA 27.17 MB** (1.5 / 1.75 / 2.0 MB of it is
+  the arena). TA is the tightest flavor — ~164 MB free, so a ~44 MB pool
+  against an 18.14 MB sound cache, leaving **~25.9 MB**. If TA ever freezes on the
   `SND_setup:` log line, drop `PS3_MAX_COMSOUNDMEGS` to 5 (15.12 MB) rather than
   cutting the hunk.
 - `SND_setup` logs the request under `__PS3__` and `Com_Error`s on a NULL
   instead of walking the list through it. Keep both; they are what turn this
   failure from a console freeze into a message.
-- **Do not raise hunk above 112 MB** without re-measuring. **zone = 32 MB hangs at
-  boot** — keep `DEF_COMZONEMEGS = 24`.
+- **Do not raise hunk above 112 MB** without re-measuring. **zone = 32 MB hung at
+  boot** when this pool was ~23 MB: 96 + 32 MB left ~17 MB, less than the
+  24.19 MB sound cache of that time. With ~167 MB free it would leave ~21 MB after
+  today's 18.14 MB cache, but no HW boot has tested it — keep
+  `DEF_COMZONEMEGS = 24` until one does.
 - Constants live in [code/sys/ps3_platform.h](code/sys/ps3_platform.h) as
   **integers, not strings** (`common.c` does arithmetic on them).
 - `common.c`'s `DEF_COMHUNKMEGS` / `DEF_COMZONEMEGS` are `#ifndef`-guarded so the
@@ -201,15 +211,16 @@ at 64 KB** (`.got` in the linked ELF holds `*(.got .toc)`).
   (`relocation truncated to fit: R_PPC64_TOC16_DS`). **Never remove it.** If it
   fires, shrink TOC use; do not silence it.
 - The cure is `-mminimal-toc` on the offending objects (each gets its own
-  indirect TOC block). `GAME_CFLAGS` uses it for the native qagame, which keeps
-  the total at 0x0F388.
+  indirect TOC block). `GAME_CFLAGS` uses it for the native qagame, and the
+  `vm_powerpc.o` rule for the JIT (8 B of main TOC instead of 440 B).
 - Verify after any link that adds code:
   `ppu-nm build/ioquake3_ps3.elf | grep -c r2off` must be **0**, and
   `ppu-readelf -SW build/ioquake3_ps3.elf | grep ' \.got '` must be < 0x10000.
-- Current `.got` per flavor, with the native qagame where it applies: Q3 0x0F398
-  (3176 B left), TA 0x0F0B0 (3920), OA 0x0F2E0 (3360), Classic 0x0F1F0 (3600),
-  EF 0x0F140 (3776). **Every flavor has under 4 KB left.** A new translation unit
-  anywhere will trip the link guard.
+- Current `.got` per flavor (release), with the native qagame where it applies:
+  Q3 0x0F3D0 (3120 B left), TA 0x0F0E8 (3864), OA 0x0F318 (3304), Classic
+  0x0F230 (3536), EF 0x0F178 (3720); `DEBUG=1` Q3 0x0F498 (2920). **Every
+  flavor has under 4 KB left.** A new translation unit anywhere will trip the
+  link guard.
 
 ---
 ## Source layout
@@ -285,10 +296,20 @@ ps3_main.c::main()
 
 ---
 
-## QVM execution — INTERPRETER (no JIT) + linked-in qagame (Q3 + TA + OA)
+## QVM execution — interpreter, JIT behind `ps3_vmjit`, linked-in qagame (Q3 + TA + OA)
 
-**QVMs run on the bytecode interpreter.** The Makefile builds `vm_none.c`;
-the PS3 block in `q_platform.h` does **not** define `HAVE_VM_COMPILED`.
+**QVMs run on the bytecode interpreter unless `ps3_vmjit` is 2** (not
+archived; 1 = compile and log only, 2 = run). Its default comes per flavor from
+`VMJIT_DEFAULT` in the Makefile, and it is 2 in all five. `q_platform.h` defines
+`HAVE_VM_COMPILED` and the Makefile builds `vm_powerpc.c`, but `VM_Create`
+forces `VMI_BYTECODE` while `ps3_vmjit` is 0: `vm_cgame`/`vm_game`/`vm_ui` are
+archived at 2, so they alone must never turn the JIT on. Work plan and state
+per flavor and VM: `QVM_JIT_TODO.md`. All five flavors run `ui` and `cgame` on
+the JIT on hardware, and Classic and EF run qagame on it too (`vm_game 2`). The
+full S6-S8 test lists and the frame probe have run on Q3 only.
+- Keep that default in `vm.c` (`PS3_VMJIT_DEFAULT`), never on the boot cmdline:
+  `Com_StartupVariable` applies cmdline `set`s after `autoexec.cfg`, which would
+  take away `set ps3_vmjit 0` as the kill switch.
 
 **Q3's, TA's and OA's qagame is native, linked into the EBOOT**
 (`NATIVE_GAME=1`, default for `FLAVOR=q3`/`ta`/`oa` → `-DPS3_NATIVE_GAME`,
@@ -353,15 +374,49 @@ at load; only runtime-generated code (JIT) is blocked. There is no dll loader.
 - Classic keeps its QVM: proto-43, and `code/game` does not match it.
 - `ui/menudef.h` at the repo root is required by `code/game` (`../../ui/menudef.h`).
 
-- A PPC JIT was investigated and is a **hard NO-GO**: lv2 enforces per-page NX
-  and exposes no exec flag in the user API, so instruction fetch from a heap/JIT
-  page faults — and the failure is a **console freeze, not an error**, so it
-  can't even be runtime-probed. No PS3 homebrew ships a dynarec for this reason.
-- `code/qcommon/vm_powerpc.c` is kept in-tree **unbuilt** (with PS3 patches) only
-  in case lv2-level executable memory ever appears. Do not add it to the Makefile.
-- `vm_none.c`'s `VM_Compile`/`VM_CallCompiled` call `exit(99)` — they are
-  unreachable because `HAVE_VM_COMPILED` is undefined and stale `vm_* 2` configs
-  are downgraded to the interpreter by `vm.c`.
+- **A JIT is possible, but only from a `.text` array.** Heap, `.bss`,
+  `malloc` and `sysMemoryAllocate` pages are NX; fetching from them kills the
+  thread (the app looks frozen, no error). lv2 does not enforce W^X on the
+  loaded image, so an array declared `__attribute__((aligned(128),
+  section(".text"), used))` is writable and executable. Hardware-proven on
+  Matt's PS3 by the flycastPS3 SH4 and ARM7 JITs (`flycastPS3/Dynarec.MD` 3.1).
+  `vm_powerpc.c` uses one, `vmjit_arena`, cut into a slot per VM.
+- Flush generated code with `dcbst` + `sync` + `icbi` + `isync` over
+  **128-byte** Cell lines. Call it through an ELFv1 OPD; never write `r2`.
+  Sign-extend (`extsw`) every `int` that generated code hands to C, and
+  zero-extend (`clrldi`) every `unsigned`: ELFv1 makes the producer extend it,
+  `lwz` zero-extends and an `add` can carry into the high word, so -1 can arrive
+  as 4294967295 (flycastPS3 `Dynarec.MD` 6.2, bug 4).
+- The `.text` array is part of the EBOOT's loaded segments, so its size comes
+  out of the ~47 MB pool (§Memory) even with `ps3_vmjit 0`. Slot sizes per
+  flavor are `VMJIT_KB` ("ui cgame qagame", KB) in the Makefile: Q3 1.5 MB, TA
+  2.0, OA 1.75, Classic 2.5, EF 3.25 in total. Code is ~6 B per QVM op; a VM
+  whose code does not fit its slot stays interpreted. A compiled VM skips the
+  interpreter's `codeLength*4` hunk copy (2.2–4.9 MB per flavor).
+- `vm_powerpc.c` is built with `-mminimal-toc` (8 B of main TOC). It emits
+  straight into the slot with four `Z_Malloc` scratch blocks (<0.5 MB). Never
+  go back to upstream's one `Z_Malloc` per op: 12–20 MB of scratch per VM
+  against the 24 MB zone (`ZONE_DEBUG` headers, `NDEBUG` is never set) →
+  `Z_Malloc: failed`; `VM_SYSTEM_MALLOC` is worse (pool `malloc`, lv2 hangs).
+  Any compile error, a full slot included, longjmps back to `PPC_Compile` and
+  leaves the VM to the interpreter — never `Com_Error` out of `VM_Create`.
+- `ps3_vmjit 2` runs generated code only after `VM_JitSelfTest` passes (small
+  QVM programs must give the same result and data on the interpreter and the
+  JIT). It runs at `VM_Init`, or before the first compile that may run; a
+  failure keeps every VM interpreted for the session.
+- Guards replace the interpreter's checks, and `cl_allowDownload 1` lets
+  server-supplied QVMs reach them: indirect `OP_CALL`/`OP_JUMP` need an index
+  below `instructionCount`, and every `OP_ENTER` needs `programStack` above
+  `stackBottom`. A failed guard does `bl` to an error stub, which calls
+  `VM_JitError` (`Com_Error(ERR_DROP)`). `OPTIMIZE_COPY` is 0, so every
+  `OP_BLOCK_COPY` goes through the checked `VM_BlockCopy`.
+- A guard's `bl` goes through the jump list (`emitStubCall`), never inline:
+  `PPC_FinishFunction` moves code back when it drops the second word of each
+  conditional branch, which breaks any raw displacement out of the function.
+- `OP_CVFI` is `fctiw` (rounds to nearest, FPSCR from `Sys_SetFloatEnv`), not
+  `fctiwz`: the PS3 interpreter's `Q_ftol` is `lrintf`, and the JIT must match it.
+- There is no `mmap` or `mprotect`. Never add a shim that pretends heap memory is
+  executable: code that "succeeds" with it runs from NX heap (silent hang).
 
 ---
 
@@ -558,13 +613,21 @@ Wins that are live: swizzled textures + mips,
 int16→float32 audio in `ps3_snd.c` (8/iter, `aligned(16)`, `-maltivec` per-file,
 `vec_madd` not `vec_mul`), `rsxSetSurface` dedup, MVP upload dedup, frame cap 60.
 
+The QVM JIT (§QVM), on by default in every flavor. On Q3 with 4-6 bots it cuts
+cgame's own time from 5.1 to 0.74 ms per frame, and the frame holds the 60 fps
+cap (17.1 ms against 18.8 ms on the interpreter).
+
 **Dead ends — do not retry:**
-- PPC JIT — lv2 NX, see §QVM.
-- **SPU vertex offload** (`code/spu/`, `ps3gl_spu.*`, still in-tree, unbuilt): the
-  SPU MFC DMA only reaches the 32 MB RSX IO aperture (`0x50100000–0x70100000`);
-  game data lives at `~0x10000000` and the SPU faults silently on `mfc_get`. Do
-  not reattempt without pre-staging all source data in `rsxMemalign`'d buffers
-  inside the aperture.
+- PPC JIT from heap memory — NX. A `.text`-array code cache works, see §QVM.
+- **SPU vertex offload** (`code/spu/`, `ps3gl_spu.*`, still in-tree, unbuilt).
+  Per-draw SPU jobs cost more in mailbox round trips than they save; Q3 sends
+  hundreds of small draws per frame. Only whole-frame batches can pay off.
+  - SPU threads **can** DMA any user main-memory address (PSL1GHT `spudma`
+    sample). They cannot reach RSX local memory (VRAM). The old claim that
+    SPU DMA only reaches the RSX IO aperture was a misdiagnosis.
+  - The silent SPU fault was `spu_vtx.c` breaking MFC rules: one `mfc_put` of
+    up to 36000 B. **One MFC command moves at most 16 KB**, EA and LS address
+    must be 16-byte aligned with equal low 4 bits. Split larger transfers.
 - VMX vertex loop / VMX sound mixer (`snd_altivec.c`) — unaligned vector loads
   cause ~40-cycle load-hit-store stalls on the PPE's in-order pipe. Reverted; do
   not re-enable `snd_altivec.c`.
@@ -574,7 +637,9 @@ int16→float32 audio in `ps3_snd.c` (8/iter, `aligned(16)`, `-maltivec` per-fil
 The historical .bss-corruption class is **dead**: it was newlib's AltiVec
 `setjmp` overflowing the .bss `abortframe` 192 B every `Com_Frame`. Fixed by
 `code/sys/ps3_setjmp.S` + the 512 B `jmp_buf` shim in `code/sys/include/setjmp.h`.
-Don't re-add sentinels/canaries.
+Don't re-add sentinels/canaries. `ps3_setjmp.S` rounds the buffer to 8 bytes
+(`rldicr 3,3,0,60`); rounding to 16 (`,59`) stored `r1` 8 bytes below any
+`jmp_buf` at 8 mod 16, so the variable before it took the stack pointer.
 
 ---
 
@@ -606,9 +671,14 @@ back correctly. **Leave the Makefile build as-is; do not migrate to CMake.**
 | Symptom | Root cause & fix |
 |---|---|
 | Boot crash / OOM | Hunk/zone too big (§Memory); `Cvar_Get` before `Com_Init`; missing `#ifndef` guard on `DEF_COMHUNKMEGS` |
-| Boot freeze right after `SNDDMA_Init: OK`, no XMB return | `SND_setup`'s sound-cache malloc exceeds the ~23 MB post-hunk/zone pool and lv2 hangs on it. Cap `com_soundMegs` (`PS3_MAX_COMSOUNDMEGS`) — a stale `q3config.cfg` overrides the cmdline (§Memory) |
-| Boot hang | zone = 32 MB; `-O3`; or a multi-TOC split — `.got` over 64 KB makes ld emit `r2off` stubs (§TOC budget) |
+| Boot freeze right after `SNDDMA_Init: OK`, no XMB return | `SND_setup`'s sound-cache malloc exceeds the ~47 MB post-hunk/zone pool and lv2 hangs on it. Cap `com_soundMegs` (`PS3_MAX_COMSOUNDMEGS`) — a stale `q3config.cfg` overrides the cmdline (§Memory) |
+| Boot hang | hunk + zone + sound cache over the free pool (§Memory); `-O3`; or a multi-TOC split — `.got` over 64 KB makes ld emit `r2off` stubs (§TOC budget) |
 | Whole-console freeze mid-render or on the first frame | Misaligned ring/arena carve → bad F32 attribute offset; a ring fence using a command label instead of a backend label; or an attribute bound from `rsxAddressToOffset` without the `ps3gl_io_mapped()` range check |
+| App frozen with no message, audio still running, right after a QVM goes through the JIT | A fault in generated code killed the main thread: code outside the `.text` array, a missing I-cache flush, or an unguarded indirect jump (§QVM) |
+| Freeze right after `[vmjit] <vm>: compiling`, before its size line | The compile itself faulted: a store into the `.text` slot (W^X may differ on another CFW/HEN) or a compiler bug. `ps3_vmjit 0` gives back the interpreter |
+| `[vmjit] self-test FAIL k/11` | The JIT and the interpreter disagree; the line before names the program and the difference. Every VM stays interpreted for the session (§QVM) |
+| `Error during initialization` right after the `[vmjit] self-test` lines | A guard error got past the test's catch: `VM_JitError` saw `vmjit_testing` 0. Check that `ps3_setjmp.S` rounds the `jmp_buf` to 8 bytes, not 16 (§Performance) |
+| `VM program counter out of range in OP_CALL`/`OP_JUMP`, or `VM stack overflow` | With `ps3_vmjit 2` it can be a JIT guard (`VM_JitError`), which prints the interpreter's own messages. `ps3_vmjit 0` tells the two apart (§QVM) |
 | Menu cursor freezes | `PS3_Input_Frame` early-returning on `padData.len==0`; squared stick curve (use linear) (`ps3_input.c`) |
 | Menu confirm/back double-fires | Cross/Circle emitting both `K_JOY*` and `K_ENTER`/`K_ESCAPE`; suppress `K_JOY*` when `in_menu` |
 | OSK command broadcast as chat | `Console_Key` con_autochat; `PS3_OSK_Open` must inject leading `/` in console context |
@@ -643,6 +713,7 @@ back correctly. **Leave the Makefile build as-is; do not migrate to CMake.**
 | Engine entry point | [code/sys/ps3_main.c](code/sys/ps3_main.c) |
 | PS3 tuning constants | [code/sys/ps3_platform.h](code/sys/ps3_platform.h) |
 | GL→RSX hot path | [code/gl/ps3gl_draw.c](code/gl/ps3gl_draw.c) |
+| QVM JIT / `ps3_prof` frame probe | [code/qcommon/vm_powerpc.c](code/qcommon/vm_powerpc.c), [code/qcommon/vm.c](code/qcommon/vm.c), [QVM_JIT_TODO.md](QVM_JIT_TODO.md) |
 | Sound dispatch | [code/audio/ps3_snd.c](code/audio/ps3_snd.c) |
 | Input / rumble / OSK / kb / mouse | [code/input/](code/input/) |
 | Build logic / variant flags / embedding | [Makefile](Makefile) |

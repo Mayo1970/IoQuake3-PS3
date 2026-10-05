@@ -59,7 +59,7 @@
 #  define MAP_FAILED ((void *)-1)
 #endif
 
-/* PS3 has no mmap; all memory is RWX. */
+/* No mmap or mprotect: heap pages are NX, and generated code runs only from vm_powerpc.c's .text array. */
 #ifndef PROT_READ
 #  define PROT_READ     1
 #  define PROT_WRITE    2
@@ -68,10 +68,6 @@
 #  define MAP_ANONYMOUS 2
 #  define MAP_ANON      MAP_ANONYMOUS
 #endif
-
-static inline int mprotect(void *addr, size_t len, int prot) {
-    (void)addr; (void)len; (void)prot; return 0;
-}
 
 /* newlib on PS3 has no 64-bit file offsets for unzip.c. */
 #define IOAPI_NO_64BIT
@@ -102,9 +98,8 @@ static inline int mprotect(void *addr, size_t len, int prot) {
 #define DEF_COMHUNKMEGS           96
 #define DEF_COMZONEMEGS           24
 
-/* Ceiling on com_soundMegs, enforced in SND_setup (snd_mem.c), because the cvar
- * is CVAR_ARCHIVE and a stale config outranks the boot cmdline. 6 => 18.1 MB of
- * the ~23 MB left after hunk+zone; 8 wants 24.2 MB and hangs lv2. See CLAUDE.md. */
+/* Ceiling on com_soundMegs, enforced in SND_setup (snd_mem.c): the cvar is CVAR_ARCHIVE, so a stale
+ * config outranks the boot cmdline. 6 => 18.1 MB, 8 => 24.2 MB, which hung lv2. See CLAUDE.md §Memory. */
 #define PS3_MAX_COMSOUNDMEGS      6
 
 #ifndef MAX_RELIABLE_COMMANDS

@@ -25,25 +25,32 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 	defined(ppc) || defined(__ppc) || defined(__ppc__) || \
 	defined(__powerpc64__) || defined(__ppc64__)
 
-#include <sys/types.h> /* needed by sys/mman.h on OSX */
-#include <sys/mman.h>
-#include <sys/time.h>
-#include <time.h>
+#include <sys/types.h>
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
-
-#ifndef MAP_ANONYMOUS
-# define MAP_ANONYMOUS MAP_ANON
-#endif
+#include <setjmp.h>
 
 #include "vm_local.h"
 
-/*
- * Register information according to:
- * http://refspecs.freestandards.org/elf/elfspec_ppc.pdf
- */
+// A compile error longjmps back to VM_Compile, which then leaves the VM to the interpreter.
+static jmp_buf vmjit_abort;
+static const char *vmjit_error;
+static char vmjit_errbuf[ 128 ];
+
+static void PPC_Die( const char *reason ) __attribute__((noreturn));
+static void
+PPC_Die( const char *reason )
+{
+	vmjit_error = reason;
+	longjmp( vmjit_abort, 1 );
+	__builtin_unreachable();
+}
+#define DIE( reason ) PPC_Die( reason )
+
+// Register information according to:
+// http://refspecs.freestandards.org/elf/elfspec_ppc.pdf
 
 #define r0	0	// volatile
 #define r1	1	// caller safe ( stack pointer )
@@ -135,17 +142,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define branchExtLink	0x0001
 
 
-/*
- * This list must match exactly the powerpc_opcodes list from vm_powerpc_asm.c
- * If you're changing the original list remember to regenerate this one. You
- * may do so using this perl script:
-   perl -p -e 'BEGIN{%t=("-"=>m=>"+"=>p=>"."=>d=>);$l=""}$o=0 if/^}/;
-	if($o && s/^{ "(.*?)([\.+-])?".+/i\U$1\E$t{$2}/s){$_.="_" while$l{$_};
-	$l{$_}=1;if(length $l.$_ > 70){$s=$_;$_="\t$l\n";$l="$s,"}else
-	{$l.=" $_,";$_=undef}}else{$o=1 if/powerpc_opcodes.*=/;$_=undef};
-	END{print "\t$l\n"}' < vm_powerpc_asm.c
- */
-
+// Must match powerpc_opcodes below entry for entry (upstream generated it from
+// vm_powerpc_asm.c with a perl one-liner).
 typedef enum powerpc_iname {
 	iCMPLWI, iCMPWI, iCMPW, iCMPLW, iFCMPU, iLI, iLIS, iADDI, iADDIS,
 	iBLTm, iBC, iBCL, iB, iBL, iBLR, iBCTR, iBCTRL, iRLWINM, iNOP, iORI,
@@ -153,7 +151,7 @@ typedef enum powerpc_iname {
 	iMULLW, iADD, iLHZX, iXOR, iMFLR, iSTHX, iMR, iOR, iDIVWU, iMTLR,
 	iMTCTR, iDIVW, iLFSX, iSRW, iSTFSX, iSRAW, iEXTSH, iEXTSB, iLWZ, iLBZ,
 	iSTW, iSTWU, iSTB, iLHZ, iSTH, iLFS, iLFD, iSTFS, iSTFD, iLD, iFDIVS,
-	iFSUBS, iFADDS, iFMULS, iSTD, iSTDU, iFRSP, iFCTIWZ, iFSUB, iFNEG,
+	iFSUBS, iFADDS, iFMULS, iSTD, iSTDU, iFRSP, iFCTIW, iFSUB, iFNEG,
 } powerpc_iname_t;
 
 #include <stdint.h>
@@ -170,12 +168,11 @@ asm_instruction( powerpc_iname_t, const int, const long int * );
 	asm_instruction( inst, argc, argv );\
 })
 
-/* return nop on error */
-#define ASM_ERROR_OPC (0x60000000)
+// 64-bit forms the table lacks: extsw rA,rS and clrldi rA,rS,32 (rldicl rA,rS,0,32)
+#define PPC_EXTSW( ra, rs )	( 0x7C0007B4 | ( (ppc_instruction_t)(rs) << 21 ) | ( (ppc_instruction_t)(ra) << 16 ) )
+#define PPC_CLRLDI32( ra, rs )	( 0x78000020 | ( (ppc_instruction_t)(rs) << 21 ) | ( (ppc_instruction_t)(ra) << 16 ) )
 
-/*
- * BEGIN OF ppc.h
- */
+// BEGIN OF ppc.h
 
 #define ppc_cpu_t int
 
@@ -258,11 +255,18 @@ static const struct powerpc_operand powerpc_operands[];
 #define PPC_OPERAND_UDI (0x80000)
 #define PPC_OPERAND_VSR (0x100000)
 
-/*
- * END OF ppc.h
- */
+// END OF ppc.h
 
 #define PPC_DEST_ARCH PPC_OPCODE_PPC
+
+// An encoding error is a compile error: upstream printed it and emitted a broken instruction.
+static void
+PPC_DieAsm( const char *name, const char *what, int argi, unsigned long int op )
+{
+	Com_sprintf( vmjit_errbuf, sizeof( vmjit_errbuf ), "%s: %s (operand %d, 0x%lx)",
+		name, what, argi, op );
+	DIE( vmjit_errbuf );
+}
 
 ppc_instruction_t
 asm_instruction( powerpc_iname_t sname, const int argc, const long int *argv )
@@ -276,14 +280,8 @@ asm_instruction( powerpc_iname_t sname, const int argc, const long int *argv )
 	opcode = &powerpc_opcodes[ sname ];
 	name = opcode->name;
 
-	if ( ! opcode ) {
-		printf( "Can't find opcode %d\n", sname );
-		return ASM_ERROR_OPC;
-	}
-	if ( ( opcode->flags & PPC_DEST_ARCH ) != PPC_DEST_ARCH ) {
-		printf( "opcode %s not defined for this arch\n", name );
-		return ASM_ERROR_OPC;
-	}
+	if ( ( opcode->flags & PPC_DEST_ARCH ) != PPC_DEST_ARCH )
+		PPC_DieAsm( name, "opcode not defined for this arch", 0, 0 );
 
 	ret = opcode->opcode;
 
@@ -293,10 +291,8 @@ asm_instruction( powerpc_iname_t sname, const int argc, const long int *argv )
 		const struct powerpc_operand *operand = &powerpc_operands[ opcode->operands[ argi ] ];
 
 		if ( ! (operand->flags & PPC_OPERAND_FAKE) ) {
-			if ( argj >= argc ) {
-				printf( "Not enough arguments for %s, got %d\n", name, argc );
-				return ASM_ERROR_OPC;
-			}
+			if ( argj >= argc )
+				PPC_DieAsm( name, "not enough arguments", argi, argc );
 
 			op = argv[ argj++ ];
 		}
@@ -304,10 +300,8 @@ asm_instruction( powerpc_iname_t sname, const int argc, const long int *argv )
 		if ( operand->insert ) {
 			errmsg = NULL;
 			ret = operand->insert( ret, op, PPC_DEST_ARCH, &errmsg );
-			if ( errmsg ) {
-				printf( "%s: error while inserting operand %d (0x%.2lx): %s\n",
-					name, argi, op, errmsg );
-			}
+			if ( errmsg )
+				PPC_DieAsm( name, errmsg, argi, op );
 		} else {
 			unsigned long int opu = *(unsigned long int *)&op;
 			unsigned long int bitm = operand->bitm;
@@ -317,35 +311,28 @@ asm_instruction( powerpc_iname_t sname, const int argc, const long int *argv )
 				bitm_full >>= 1;
 
 				if ( ( opu & ~bitm_full ) != 0 && ( opu | bitm_full ) != -1 )
-					printf( "%s: signed operand nr.%d to wide. op: %.8lx, mask: %.8lx\n",
-						name, argi, opu, bitm );
+					PPC_DieAsm( name, "signed operand too wide", argi, opu );
 			} else {
 				if ( ( opu & ~bitm_full ) != 0 )
-					printf( "%s: unsigned operand nr.%d to wide. op: %.8lx, mask: %.8lx\n",
-						name, argi, opu, bitm );
+					PPC_DieAsm( name, "unsigned operand too wide", argi, opu );
 			}
 			if ( (bitm & 1) == 0 ) {
 				if ( opu & 0xf & ~bitm )
-					printf( "%s: operand nr.%d not aligned correctly. op: %.8lx, mask: %.8lx\n",
-						name, argi, opu, bitm );
+					PPC_DieAsm( name, "operand not aligned", argi, opu );
 			}
 
 			ret |= ( op & operand->bitm ) << operand->shift;
 		}
 		argi++;
 	}
-	if ( argc > argj ) {
-		printf( "Too many arguments for %s, got %d\n", name, argc );
-		return ASM_ERROR_OPC;
-	}
+	if ( argc > argj )
+		PPC_DieAsm( name, "too many arguments", argi, argc );
 
 	return ret;
 }
 
 
-/*
- * BEGIN OF ppc-opc.c
- */
+// BEGIN OF ppc-opc.c
 
 #define ATTRIBUTE_UNUSED
 #define _(x) (x)
@@ -357,10 +344,7 @@ static unsigned long insert_bo (unsigned long, long, int, const char **);
 static unsigned long insert_ras (unsigned long, long, int, const char **);
 static unsigned long insert_rbs (unsigned long, long, int, const char **);
 
-/* The operands table.
-
-   The fields are bitm, shift, insert, extract, flags.
-   */
+/* The operands table: bitm, shift, insert, flags. */
 
 static const struct powerpc_operand powerpc_operands[] =
 {
@@ -404,16 +388,13 @@ static const struct powerpc_operand powerpc_operands[] =
 #define BO_MASK (0x1f << 21)
   { 0x1f, 21, insert_bo, 0 },
 
-  /* The condition register number portion of the BI field in a B form
-     or XL form instruction.  This is used for the extended
-     conditional branch mnemonics, which set the lower two bits of the
-     BI field.  This field is optional.  */
+  /* The CR number in the BI field of a B or XL form instruction, used by the extended
+     conditional branch mnemonics, which set the lower two bits of BI. Optional.  */
 #define CR BO + 1
   { 0x7, 18, NULL, PPC_OPERAND_CR | PPC_OPERAND_OPTIONAL },
 
-  /* The D field in a D form instruction.  This is a displacement off
-     a register, and implies that the next operand is a register in
-     parentheses.  */
+  /* The D field in a D form instruction: a displacement off a register, which
+     implies that the next operand is a register in parentheses.  */
 #define D CR + 1
   { 0xffff, 0, NULL, PPC_OPERAND_PARENS | PPC_OPERAND_SIGNED },
 
@@ -454,10 +435,8 @@ static const struct powerpc_operand powerpc_operands[] =
 #define ME_MASK (0x1f << 1)
   { 0x1f, 1, NULL, 0 },
 
-  /* The MB and ME fields in an M form instruction expressed a single
-     operand which is a bitmask indicating which bits to select.  This
-     is a two operand form using PPC_OPERAND_NEXT.  See the
-     description in opcode/ppc.h for what this means.  */
+  /* The MB and ME fields of an M form instruction as one bitmask operand selecting the
+     bits; a two operand form using PPC_OPERAND_NEXT (see opcode/ppc.h).  */
 #define MBE ME + 1
   { 0x1f, 6, NULL, PPC_OPERAND_OPTIONAL | PPC_OPERAND_NEXT },
 
@@ -470,9 +449,8 @@ static const struct powerpc_operand powerpc_operands[] =
 #define RA0 RA + 1
   { 0x1f, 16, NULL, PPC_OPERAND_GPR_0 },
 
-  /* The RA field in a D or X form instruction which is an updating
-     store or an updating floating point load, which means that the RA
-     field may not be zero.  */
+  /* The RA field of an updating store or updating floating point load in D or X form,
+     which means that the RA field may not be zero.  */
 #define RAS RA0 + 1
   { 0x1f, 16, insert_ras, PPC_OPERAND_GPR_0 },
 
@@ -481,15 +459,13 @@ static const struct powerpc_operand powerpc_operands[] =
 #define RB_MASK (0x1f << 11)
   { 0x1f, 11, NULL, PPC_OPERAND_GPR },
 
-  /* The RB field in an X form instruction when it must be the same as
-     the RS field in the instruction.  This is used for extended
-     mnemonics like mr.  */
+  /* The RB field of an X form instruction when it must equal the RS field, for
+     extended mnemonics like mr.  */
 #define RBS RB + 1
   { 0x1f, 11, insert_rbs, PPC_OPERAND_FAKE },
 
-  /* The RS field in a D, DS, X, XFX, XS, M, MD or MDS form
-     instruction or the RT field in a D, DS, X, XFX or XO form
-     instruction.  */
+  /* The RS field in a D, DS, X, XFX, XS, M, MD or MDS form instruction, or the RT
+     field in a D, DS, X, XFX or XO form instruction.  */
 #define RS RBS + 1
 #define RT RS
 #define RT_MASK (0x1f << 21)
@@ -515,22 +491,8 @@ static const struct powerpc_operand powerpc_operands[] =
 
 /* The functions used to insert and extract complicated operands.  */
 
-/* The BD field in a B form instruction when the - modifier is used.
-   This modifier means that the branch is not expected to be taken.
-   For chips built to versions of the architecture prior to version 2
-   (ie. not Power4 compatible), we set the y bit of the BO field to 1
-   if the offset is negative.  When extracting, we require that the y
-   bit be 1 and that the offset be positive, since if the y bit is 0
-   we just want to print the normal form of the instruction.
-   Power4 compatible targets use two bits, "a", and "t", instead of
-   the "y" bit.  "at" == 00 => no hint, "at" == 01 => unpredictable,
-   "at" == 10 => not taken, "at" == 11 => taken.  The "t" bit is 00001
-   in BO field, the "a" bit is 00010 for branch on CR(BI) and 01000
-   for branch on CTR.  We only handle the taken/not-taken hint here.
-   Note that we don't relax the conditions tested here when
-   disassembling with -Many because insns using extract_bdm and
-   extract_bdp always occur in pairs.  One or the other will always
-   be valid.  */
+/* BD field with the - (not taken) modifier. Before Power4 it sets the y bit of BO when the
+   offset is negative; Power4 sets the "at" bits to 10 (not taken) instead.  */
 
 static unsigned long
 insert_bdm (unsigned long insn,
@@ -562,14 +524,8 @@ valid_bo (long value, int dialect, int extract)
   if ((dialect & PPC_OPCODE_POWER4) == 0)
     {
       int valid;
-      /* Certain encodings have bits that are required to be zero.
-	 These are (z must be zero, y may be anything):
-	     001zy
-	     011zy
-	     1z00y
-	     1z01y
-	     1z1zz
-      */
+      /* Encodings with bits that must be zero (z must be zero, y may be anything):
+	 001zy 011zy 1z00y 1z01y 1z1zz  */
       switch (value & 0x14)
 	{
 	default:
@@ -593,18 +549,8 @@ valid_bo (long value, int dialect, int extract)
 	return valid;
     }
 
-  /* Certain encodings have bits that are required to be zero.
-     These are (z must be zero, a & t may be anything):
-	 0000z
-	 0001z
-	 0100z
-	 0101z
-	 001at
-	 011at
-	 1a00t
-	 1a01t
-	 1z1zz
-  */
+  /* Power4 encodings with bits that must be zero (z must be zero, a & t may be anything):
+     0000z 0001z 0100z 0101z 001at 011at 1a00t 1a01t 1z1zz  */
   if ((value & 0x14) == 0)
     return (value & 0x1) == 0;
   else if ((value & 0x14) == 0x14)
@@ -627,9 +573,8 @@ insert_bo (unsigned long insn,
   return insn | ((value & 0x1f) << 21);
 }
 
-/* The RA field in a D or X form instruction which is an updating
-   store or an updating floating point load, which means that the RA
-   field may not be zero.  */
+/* The RA field of an updating store or updating floating point load in D or X form,
+   which means that the RA field may not be zero.  */
 
 static unsigned long
 insert_ras (unsigned long insn,
@@ -642,11 +587,8 @@ insert_ras (unsigned long insn,
   return insn | ((value & 0x1f) << 16);
 }
 
-/* The RB field in an X form instruction when it must be the same as
-   the RS field in the instruction.  This is used for extended
-   mnemonics like mr.  This operand is marked FAKE.  The insertion
-   function just copies the BT field into the BA field, and the
-   extraction function just checks that the fields are the same.  */
+/* The RB field when it must equal RS, for extended mnemonics like mr: this FAKE operand
+   copies the BT field into the BA field.  */
 
 static unsigned long
 insert_rbs (unsigned long insn,
@@ -664,15 +606,13 @@ insert_rbs (unsigned long insn,
 #define OP(x) ((((unsigned long)(x)) & 0x3f) << 26)
 #define OP_MASK OP (0x3f)
 
-/* The main opcode combined with a trap code in the TO field of a D
-   form instruction.  Used for extended mnemonics for the trap
-   instructions.  */
+/* The main opcode combined with a trap code in the TO field of a D form instruction,
+   for the extended trap mnemonics.  */
 #define OPTO(x,to) (OP (x) | ((((unsigned long)(to)) & 0x1f) << 21))
 #define OPTO_MASK (OP_MASK | TO_MASK)
 
-/* The main opcode combined with a comparison size bit in the L field
-   of a D form or X form instruction.  Used for extended mnemonics for
-   the comparison instructions.  */
+/* The main opcode combined with a comparison size bit in the L field of a D or X form
+   instruction, for the extended comparison mnemonics.  */
 #define OPL(x,l) (OP (x) | ((((unsigned long)(l)) & 1) << 21))
 #define OPL_MASK OPL (0x3f,1)
 
@@ -700,9 +640,8 @@ insert_rbs (unsigned long insn,
 #define BBO(op, bo, aa, lk) (B ((op), (aa), (lk)) | ((((unsigned long)(bo)) & 0x1f) << 21))
 #define BBO_MASK BBO (0x3f, 0x1f, 1, 1)
 
-/* A BBO_MASK with the y bit of the BO field removed.  This permits
-   matching a conditional branch regardless of the setting of the y
-   bit.  Similarly for the 'at' bits used for power4 branch hints.  */
+/* A BBO_MASK without the y bit of BO, to match a conditional branch whatever its y bit;
+   likewise for the "at" bits of the power4 branch hints.  */
 #define Y_MASK   (((unsigned long) 1) << 21)
 #define AT1_MASK (((unsigned long) 3) << 21)
 #define AT2_MASK (((unsigned long) 9) << 21)
@@ -1028,23 +967,8 @@ insert_rbs (unsigned long insn,
 #define	COM     PPC_OPCODE_POWER | PPC_OPCODE_PPC | PPC_OPCODE_COMMON
 #define	COM32   PPC_OPCODE_POWER | PPC_OPCODE_PPC | PPC_OPCODE_COMMON | PPC_OPCODE_32
 
-/* The opcode table.
-
-   The format of the opcode table is:
-
-   NAME	     OPCODE	MASK		FLAGS		{ OPERANDS }
-
-   NAME is the name of the instruction.
-   OPCODE is the instruction opcode.
-   MASK is the opcode mask; this is used to tell the disassembler
-     which bits in the actual opcode must match OPCODE.
-   FLAGS are flags indicated what processors support the instruction.
-   OPERANDS is the list of operands.
-
-   The disassembler reads the table in order and prints the first
-   instruction which matches, so this table is sorted to put more
-   specific instructions before more general instructions.  It is also
-   sorted by major opcode.  */
+/* The opcode table: NAME OPCODE MASK FLAGS { OPERANDS }, sorted by major opcode with the more
+   specific entries first, because the disassembler prints the first one that matches.  */
 
 static const struct powerpc_opcode powerpc_opcodes[] = {
 
@@ -1121,15 +1045,12 @@ static const struct powerpc_opcode powerpc_opcodes[] = {
 { "std",     DSO(62,0),	DS_MASK,	PPC64,		{ RS, DS, RA0 } },
 { "stdu",    DSO(62,1),	DS_MASK,	PPC64,		{ RS, DS, RAS } },
 { "frsp",    XRC(63,12,0), XRA_MASK,	COM,		{ FRT, FRB } },
-{ "fctiwz",  XRC(63,15,0), XRA_MASK,	PPCCOM,		{ FRT, FRB } },
+{ "fctiw",   XRC(63,14,0), XRA_MASK,	PPCCOM,		{ FRT, FRB } },
 { "fsub",    A(63,20,0), AFRC_MASK,	PPCCOM,		{ FRT, FRA, FRB } },
 { "fneg",    XRC(63,40,0), XRA_MASK,	COM,		{ FRT, FRB } },
 };
 
-/*
- * VM_TIMES enables showing information about time spent inside
- * and outside generated code
- */
+// VM_TIMES: time spent inside and outside generated code (debug only, needs times())
 //#define VM_TIMES
 #ifdef VM_TIMES
 #include <sys/times.h>
@@ -1137,41 +1058,15 @@ static clock_t time_outside_vm = 0;
 static clock_t time_total_vm = 0;
 #endif
 
-/* exit() won't be called but use it because it is marked with noreturn */
-#define DIE( reason ) Com_Error( ERR_DROP, "vm_powerpc compiler error: " reason )
-
-/*
- * vm_powerpc uses large quantities of memory during compilation,
- * Z_Malloc memory may not be enough for some big qvm files
- */
-
-//#define VM_SYSTEM_MALLOC
-#ifdef VM_SYSTEM_MALLOC
-static inline void *
-PPC_Malloc( size_t size )
-{
-	void *mem = malloc( size );
-	if ( ! mem )
-		DIE( "Not enough memory" );
-
-	return mem;
-}
-# define PPC_Free free
-#else
-# define PPC_Malloc Z_Malloc
-# define PPC_Free Z_Free
-#endif
-
-/*
- * optimizations:
- * - hole: bubble optimization (OP_CONST+instruction)
- * - copy: inline OP_BLOCK_COPY for lengths under 16/32 bytes
- * - mask: use rlwinm instruction as dataMask
- */
-
+// hole: fold OP_CONST into the next op; copy: inline OP_BLOCK_COPY up to 16/32 bytes, off on PS3
+// (its pointers are not masked: every copy goes through the checked VM_BlockCopy); mask: one rlwinm
 #ifdef __OPTIMIZE__
 # define OPTIMIZE_HOLE 1
-# define OPTIMIZE_COPY 1
+# ifdef __PS3__
+#  define OPTIMIZE_COPY 0
+# else
+#  define OPTIMIZE_COPY 1
+# endif
 # define OPTIMIZE_MASK 1
 #else
 # define OPTIMIZE_HOLE 0
@@ -1179,33 +1074,8 @@ PPC_Malloc( size_t size )
 # define OPTIMIZE_MASK 0
 #endif
 
-/*
- * SUPPORTED TARGETS:
- * - Linux 32 bits
- *   ( http://refspecs.freestandards.org/elf/elfspec_ppc.pdf )
- *   * LR at r0 + 4
- *   * Local variable space not needed
- *     -> store caller safe regs at 16+
- *
- * - Linux 64 bits (not fully conformant)
- *   ( http://www.ibm.com/developerworks/linux/library/l-powasm4.html )
- *   * needs "official procedure descriptors" (only first function has one)
- *   * LR at r0 + 16
- *   * local variable space required, min 64 bytes, starts at 48
- *     -> store caller safe regs at 128+
- *
- * - OS X 32 bits
- *   ( http://developer.apple.com/documentation/DeveloperTools/Conceptual/LowLevelABI/Articles/32bitPowerPC.html )
- *   * LR at r0 + 8
- *   * local variable space required, min 32 bytes (?), starts at 24
- *     -> store caller safe regs at 64+
- *
- * - OS X 64 bits (completely untested)
- *   ( http://developer.apple.com/documentation/DeveloperTools/Conceptual/LowLevelABI/Articles/64bitPowerPC.html )
- *   * LR at r0 + 16
- *   * local variable space required, min 64 bytes (?), starts at 48
- *     -> store caller safe regs at 128+
- */
+// ABIs: ELF32 (LR at r0+4), ELF64 (OPDs, LR at r0+16, locals from 48, saves at 128+), OS X 32
+// (LR at r0+8, locals from 24, saves at 64+), OS X 64 (untested). PS3 is ELF64.
 
 /* Select Length - first value on 32 bits, second on 64 */
 #ifdef __PPC64__
@@ -1249,11 +1119,7 @@ PPC_Malloc( size_t size )
 #define STACK_RTEMP	(-16)
 
 #if ELF64
-/*
- * Official Procedure Descriptor
- *  we need to prepare one for generated code if we want to call it
- * as function
- */
+// Official Procedure Descriptor: the generated code needs one to be called as a function
 typedef struct {
 	void *function;
 	void *toc;
@@ -1262,12 +1128,7 @@ typedef struct {
 #endif
 
 
-/*
- * opcode information table:
- * - length of immediate value
- * - returned register type
- * - required register(s) type
- */
+// opcode information: length of the immediate, returned and required register types
 #define opImm0	0x0000 /* no immediate */
 #define opImm1	0x0001 /* 1 byte immadiate value after opcode */
 #define opImm4	0x0002 /* 4 bytes immediate value after opcode */
@@ -1356,9 +1217,7 @@ static const unsigned char vm_opInfo[256] =
 	[OP_CVFI]	= opImm0 | opRetI | opArgF,
 };
 
-/*
- * source instruction data
- */
+// source instruction data
 typedef struct source_instruction_s source_instruction_t;
 struct source_instruction_s {
 	// opcode
@@ -1388,9 +1247,7 @@ struct source_instruction_s {
 
 
 
-/*
- * read-only data needed by the generated code
- */
+// read-only data needed by the generated code, placed after the code in its slot
 typedef struct VM_Data {
 	// length of this struct + data
 	size_t dataLength;
@@ -1401,15 +1258,23 @@ typedef struct VM_Data {
 	// function pointers, no use to waste registers for them
 	long int (* AsmCall)( int, int );
 	void (* BlockCopy )( unsigned int, unsigned int, size_t );
+	void (* Error )( int );
 
 	// instruction pointers, rarely used so don't waste register
 	ppc_instruction_t *iPointers;
+
+	// vm->breakCount, counted by OP_BREAK as in the interpreter
+	int *breakCount;
 
 	// data mask for load and store, not used if optimized
 	unsigned int dataMask;
 
 	// fixed number used to convert from integer to float
 	unsigned int floatBase; // 0x59800004
+
+	// guards: indirect OP_CALL / OP_JUMP need index < instructionCount, OP_ENTER programStack > stackBottom
+	unsigned int instructionCount;
+	int stackBottom;
 
 #if ELF64
 	// official procedure descriptor
@@ -1421,18 +1286,13 @@ typedef struct VM_Data {
 	unsigned int data[0];
 } vm_data_t;
 
-#ifdef offsetof
-# define VM_Data_Offset( field )	offsetof( vm_data_t, field )
-#else
-# define OFFSET( structName, field ) \
-	( (void *)&(((structName *)NULL)->field) - NULL )
-# define VM_Data_Offset( field )	OFFSET( vm_data_t, field )
-#endif
+#define VM_Data_Offset( field )	offsetof( vm_data_t, field )
+
+// lfs reads the float constants through rVMDATA with a signed 16-bit displacement
+#define VM_DATA_MAX	( ( 0x8000 - VM_Data_Offset( data ) ) / sizeof( unsigned int ) )
 
 
-/*
- * functions used by generated code
- */
+// functions used by generated code
 static long int
 VM_AsmCall( int callSyscallInvNum, int callProgramStack )
 {
@@ -1454,7 +1314,7 @@ VM_AsmCall( int callSyscallInvNum, int callProgramStack )
 		// generated code does not invert syscall number
 		argPosition[ 0 ] = -1 - callSyscallInvNum;
 
-		ret = currentVM->systemCall( argPosition );
+		ret = VM_SYSCALL( currentVM, argPosition );
 	} else {
 		intptr_t args[MAX_VMSYSCALL_ARGS];
 
@@ -1465,7 +1325,7 @@ VM_AsmCall( int callSyscallInvNum, int callProgramStack )
 		for( i = 1; i < ARRAY_LEN(args); i++ )
 			args[ i ] = argPosition[ i ];
 
-		ret = currentVM->systemCall( args );
+		ret = VM_SYSCALL( currentVM, args );
 	}
 
 	currentVM = savedVM;
@@ -1478,88 +1338,156 @@ VM_AsmCall( int callSyscallInvNum, int callProgramStack )
 	return ret;
 }
 
-/*
- * code-block descriptors
- */
-typedef struct dest_instruction dest_instruction_t;
-typedef struct symbolic_jump symbolic_jump_t;
+// guard failures, each with its own error stub; the messages are the interpreter's
+#define VMJIT_ERR_CALL	0
+#define VMJIT_ERR_JUMP	1
+#define VMJIT_ERR_STACK	2
+#define VMJIT_ERR_COUNT	3
 
-struct symbolic_jump {
-	// number of source instruction it has to jump to
-	unsigned long int jump_to;
-
-	// jump condition true/false, (4*cr7+(eq|gt..))
-	long int bo, bi;
-
-	// extensions / modifiers (branch-link)
-	unsigned long ext;
-
-	// dest_instruction referring to this jump
-	dest_instruction_t *parent;
-
-	// next jump
-	symbolic_jump_t *nextJump;
+static const char *const vmjit_errmsg[ VMJIT_ERR_COUNT ] = {
+	"VM program counter out of range in OP_CALL",
+	"VM program counter out of range in OP_JUMP",
+	"VM stack overflow",
 };
 
-struct dest_instruction {
-	// position in the output chain
-	unsigned long int count;
+// the self-test catches guard failures instead of dropping the game
+static qboolean vmjit_testing;
+static int vmjit_testcode;
+static jmp_buf vmjit_testjmp;
 
-	// source instruction number
-	unsigned long int i_count;
+// A guard's error stub calls this; it never returns into generated code.
+static void VM_JitError( int code ) __attribute__((noreturn));
+static void
+VM_JitError( int code )
+{
+	if ( vmjit_testing ) {
+		vmjit_testcode = code;
+		longjmp( vmjit_testjmp, 1 );
+	}
+	if ( (unsigned)code >= VMJIT_ERR_COUNT )
+		Com_Error( ERR_DROP, "VM guard %d", code );
+	Com_Error( ERR_DROP, "%s", vmjit_errmsg[ code ] );
+}
 
-	// exact (for instructins), or maximum (for jump) length
-	unsigned short length;
+// flycastPS3 ps3_jit_icache_sync: written code reaches the I-cache through memory, in 128-byte lines
+static void
+ps3_jit_icache_sync( const void *start, size_t size )
+{
+#ifdef __PS3__
+	const uintptr_t line = 128;
+	const unsigned char *a = (const unsigned char *)( (uintptr_t)start & ~( line - 1 ) );
+	const unsigned char *e = (const unsigned char *)start + size;
+	const unsigned char *q;
 
-	dest_instruction_t *next;
+	if ( !size )
+		return;
+	for ( q = a; q < e; q += line )
+		__asm__ volatile( "dcbst 0,%0" :: "r"( q ) : "memory" );
+	__asm__ volatile( "sync" ::: "memory" );
+	for ( q = a; q < e; q += line )
+		__asm__ volatile( "icbi 0,%0" :: "r"( q ) : "memory" );
+	__asm__ volatile( "isync" ::: "memory" );
+#endif
+}
 
-	// if the instruction is a jump than jump will be non NULL
-	symbolic_jump_t *jump;
 
-	// if jump is NULL than all the instructions will be here
-	ppc_instruction_t code[0];
+// Code slots, one per VM, in a .text array: lv2 runs code only from the loaded image, and
+// lets the image be written. Sizes per flavor come from the Makefile; 0 means no JIT.
+#ifndef VMJIT_UI_KB
+#define VMJIT_UI_KB	0
+#endif
+#ifndef VMJIT_CGAME_KB
+#define VMJIT_CGAME_KB	0
+#endif
+#ifndef VMJIT_GAME_KB
+#define VMJIT_GAME_KB	0
+#endif
+#define VMJIT_ARENA_SIZE	( ( VMJIT_UI_KB + VMJIT_CGAME_KB + VMJIT_GAME_KB ) * 1024 )
+
+#ifdef __PS3__
+#define VMJIT_TEXT	__attribute__((aligned(128), section(".text"), used))
+#else
+#define VMJIT_TEXT	__attribute__((aligned(128)))
+#endif
+
+static unsigned char vmjit_arena[ VMJIT_ARENA_SIZE ? VMJIT_ARENA_SIZE : 128 ] VMJIT_TEXT;
+
+typedef struct {
+	const char	*name;
+	unsigned char	*base;
+	size_t		size;
+	qboolean	busy;
+} vmjit_slot_t;
+
+static vmjit_slot_t vmjit_slots[] = {
+	{ "ui",		vmjit_arena,	VMJIT_UI_KB * 1024 },
+	{ "cgame",	vmjit_arena + VMJIT_UI_KB * 1024,	VMJIT_CGAME_KB * 1024 },
+	{ "qagame",	vmjit_arena + ( VMJIT_UI_KB + VMJIT_CGAME_KB ) * 1024,	VMJIT_GAME_KB * 1024 },
 };
 
-// first and last instruction,
-// di_first is a dummy instruction
-static dest_instruction_t *di_first = NULL, *di_last = NULL;
-// number of instructions
-static unsigned long int di_count = 0;
-// pointers needed to compute local jumps, those aren't pointers to
-// actual instructions, just used to check how long the jump is going
-// to be and whether it is positive or negative
-static dest_instruction_t **di_pointers = NULL;
+// ps3_vmjit 2 runs generated code once the boot self-test passed; 0 here makes 2 a dry run like 1.
+#ifndef VMJIT_CAN_RUN
+#define VMJIT_CAN_RUN	1
+#endif
+
+
+// The compile writes straight into the slot; scratch is a few Z_Malloc blocks, not one per op.
+static ppc_instruction_t *out_end;	// end of the slot
+static ppc_instruction_t *out_now;	// write cursor
+static ppc_instruction_t *fn_base;	// first word of the function being compiled
+
+// vm->instructionPointers: code address of each QVM instruction, 0 until it is emitted
+static intptr_t *ip_tab;
+static unsigned long int ip_count;
+
+// a branch slot: conditional ones get two words, for the inverted bc + b long form
+typedef struct {
+	ppc_instruction_t *at;	// first word of the slot
+	ppc_instruction_t *stub;	// a bl to this error stub, else NULL and dest is used
+	unsigned int dest;	// QVM instruction number
+	unsigned char bo, bi, ext;
+} ppc_jump_t;
+
+// error stubs and the entry stub, in front of the first function: their addresses never move
+static ppc_instruction_t *stub_err[ VMJIT_ERR_COUNT ];
+static ppc_instruction_t *stub_entry;
+
+// branches of the current function, written when it ends
+static ppc_jump_t *fn_jumps;
+static long int fn_jumps_num, fn_jumps_max;
+
+// calls and jumps into later functions, written after the last function
+static ppc_jump_t *fixups;
+static long int fixups_num, fixups_max;
+
+// float constants, read by lfs through rVMDATA
+static unsigned int *data_list;
+static long int data_acc;
+
+// one source function, src[0] is the dummy head
+static source_instruction_t *src;
 
 // output instructions which does not come from source code
 // use false i_count value
 #define FALSE_ICOUNT 0xffffffff
 
 
-/*
- * append specified instructions at the end of instruction chain
- */
-static void
-PPC_Append(
-		dest_instruction_t *di_now,
-		unsigned long int i_count
-  	  )
+// Reserves n words for QVM instruction i_count; its first chunk is where jumps to it land.
+static ppc_instruction_t *
+PPC_Reserve( unsigned long int i_count, size_t n )
 {
-	di_now->count = di_count++;
-	di_now->i_count = i_count;
-	di_now->next = NULL;
+	ppc_instruction_t *at = out_now;
 
-	di_last->next = di_now;
-	di_last = di_now;
+	if ( i_count != FALSE_ICOUNT && !ip_tab[ i_count ] )
+		ip_tab[ i_count ] = (intptr_t)at;
 
-	if ( i_count != FALSE_ICOUNT ) {
-		if ( ! di_pointers[ i_count ] )
-			di_pointers[ i_count ] = di_now;
-	}
+	if ( n > (size_t)( out_end - out_now ) )
+		DIE( "code slot is full" );
+	out_now += n;
+	return at;
 }
 
-/*
- * make space for instructions and append
- */
+// append specified instructions at the end of instruction chain
 static void
 PPC_AppendInstructions(
 		unsigned long int i_count,
@@ -1567,24 +1495,13 @@ PPC_AppendInstructions(
 		const ppc_instruction_t *is
 	)
 {
-	if ( num_instructions < 0 )
-		num_instructions = 0;
-	size_t iBytes = sizeof( ppc_instruction_t ) * num_instructions;
-	dest_instruction_t *di_now = PPC_Malloc( sizeof( dest_instruction_t ) + iBytes );
+	ppc_instruction_t *at = PPC_Reserve( i_count, num_instructions );
 
-	di_now->length = num_instructions;
-	di_now->jump = NULL;
-
-	if ( iBytes > 0 )
-		memcpy( &(di_now->code[0]), is, iBytes );
-
-	PPC_Append( di_now, i_count );
+	if ( num_instructions )
+		memcpy( at, is, num_instructions * sizeof( ppc_instruction_t ) );
 }
 
-/*
- * create symbolic jump and append
- */
-static symbolic_jump_t *sj_first = NULL, *sj_last = NULL;
+// Reserves a branch slot of 1 word, or 2 for a conditional branch; see PPC_FinishFunction.
 static void
 PPC_PrepareJump(
 		unsigned long int i_count,
@@ -1594,28 +1511,48 @@ PPC_PrepareJump(
 		unsigned long int ext
 	)
 {
-	dest_instruction_t *di_now = PPC_Malloc( sizeof( dest_instruction_t ) );
-	symbolic_jump_t *sj = PPC_Malloc( sizeof( symbolic_jump_t ) );
+	ppc_jump_t *j;
+	size_t i, n = ( bo == branchAlways ) ? 1 : 2;
+	ppc_instruction_t nop = IN( iNOP );
 
-	sj->jump_to = dest;
-	sj->bo = bo;
-	sj->bi = bi;
-	sj->ext = ext;
-	sj->parent = di_now;
-	sj->nextJump = NULL;
+	if ( dest >= ip_count )
+		DIE( "jump out of range" );
+	if ( fn_jumps_num >= fn_jumps_max )
+		DIE( "too many jumps" );
 
-	sj_last->nextJump = sj;
-	sj_last = sj;
+	j = &fn_jumps[ fn_jumps_num++ ];
+	j->at = PPC_Reserve( i_count, n );
+	j->stub = NULL;
+	j->dest = dest;
+	j->bo = bo;
+	j->bi = bi;
+	j->ext = ext;
 
-	di_now->length = (bo == branchAlways ? 1 : 2);
-	di_now->jump = sj;
-
-	PPC_Append( di_now, i_count );
+	for ( i = 0; i < n; i++ )
+		j->at[ i ] = nop;
 }
 
-/*
- * simplyfy instruction emission
- */
+// Reserves a guard's bl to an error stub. It is a one-word slot like an unconditional jump, so
+// PPC_FinishFunction moves it with the code and writes it once the function is compacted.
+static void
+PPC_PrepareStubCall( unsigned long int i_count, ppc_instruction_t *stub )
+{
+	ppc_jump_t *j;
+
+	if ( fn_jumps_num >= fn_jumps_max )
+		DIE( "too many jumps" );
+
+	j = &fn_jumps[ fn_jumps_num++ ];
+	j->at = PPC_Reserve( i_count, 1 );
+	j->stub = stub;
+	j->dest = 0;
+	j->bo = branchAlways;
+	j->bi = 0;
+	j->ext = branchExtLink;
+	j->at[ 0 ] = IN( iNOP );
+}
+
+// simplyfy instruction emission
 #define emitStart( i_cnt ) \
 	unsigned long int i_count = i_cnt; \
 	size_t num_instructions = 0; \
@@ -1639,77 +1576,32 @@ PPC_PrepareJump(
 		PPC_PrepareJump( i_count, dest, bo, bi, ext ); \
 	} while(0)
 
+#define emitStubCall( err ) \
+	do { \
+		emitEnd(); \
+		PPC_PrepareStubCall( i_count, stub_err[ err ] ); \
+	} while(0)
 
-/*
- * definitions for creating .data section,
- * used in cases where constant float is needed
- */
-#define LOCAL_DATA_CHUNK 50
-typedef struct local_data_s local_data_t;
-struct local_data_s {
-	// number of data in this structure
-	long int count;
 
-	// data placeholder
-	unsigned int data[ LOCAL_DATA_CHUNK ];
-
-	// next chunk, if this one wasn't enough
-	local_data_t *next;
-};
-
-// first data chunk
-static local_data_t *data_first = NULL;
-// total number of data
-static long int data_acc = 0;
-
-/*
- * append the data and return its offset
- */
+// append the data and return its offset
 static size_t
 PPC_PushData( unsigned int datum )
 {
-	local_data_t *d_now = data_first;
-	long int accumulated = 0;
+	long int i;
 
-	// check whether we have this one already
-	do {
-		long int i;
-		for ( i = 0; i < d_now->count; i++ ) {
-			if ( d_now->data[ i ] == datum ) {
-				accumulated += i;
-				return VM_Data_Offset( data[ accumulated ] );
-			}
-		}
-		if ( !d_now->next )
-			break;
-
-		accumulated += d_now->count;
-		d_now = d_now->next;
-	} while (1);
-
-	// not found, need to append
-	accumulated += d_now->count;
-
-	// last chunk is full, create new one
-	if ( d_now->count >= LOCAL_DATA_CHUNK ) {
-		d_now->next = PPC_Malloc( sizeof( local_data_t ) );
-		d_now = d_now->next;
-		d_now->count = 0;
-		d_now->next = NULL;
+	for ( i = 0; i < data_acc; i++ ) {
+		if ( data_list[ i ] == datum )
+			return VM_Data_Offset( data ) + i * sizeof( unsigned int );
 	}
 
-	d_now->data[ d_now->count ] = datum;
-	d_now->count += 1;
+	if ( data_acc >= VM_DATA_MAX )
+		DIE( "too many float constants" );
 
-	data_acc = accumulated + 1;
-
-	return VM_Data_Offset( data[ accumulated ] );
+	data_list[ data_acc ] = datum;
+	return VM_Data_Offset( data ) + data_acc++ * sizeof( unsigned int );
 }
 
-/*
- * find leading zeros in dataMask to implement it with
- * "rotate and mask" instruction
- */
+// find leading zeros in dataMask to implement it with "rotate and mask" instruction
 static long int fastMaskHi = 0, fastMaskLo = 31;
 static void
 PPC_MakeFastMask( int mask )
@@ -1732,11 +1624,7 @@ PPC_MakeFastMask( int mask )
 }
 
 
-/*
- * register definitions
- */
-
-/* registers which are global for generated code */
+// registers which are global for generated code
 
 // pointer to VM_Data (constant)
 #define rVMDATA r14
@@ -1745,13 +1633,8 @@ PPC_MakeFastMask( int mask )
 // programStack (variable)
 #define rPSTACK r16
 
-/*
- * function local registers,
- *
- * normally only volatile registers are used, but if there aren't enough
- * or function has to preserve some value while calling another one
- * then caller safe registers are used as well
- */
+// Function locals live in volatile registers; caller-safe ones are used only when those run
+// out or a value must survive a call.
 static const long int gpr_list[] = {
 	/* caller safe registers, normally only one is used */
 	r24, r23, r22, r21,
@@ -1778,36 +1661,30 @@ static const long int fpr_list[] = {
 static const long int fpr_vstart = 8;
 static const long int fpr_total = ARRAY_LEN( fpr_list );
 
-/*
- * prepare some dummy structures and emit init code
- */
+// Error stubs (li r3,code, then a shared tail to VM_JitError, which never returns), then the entry
+// stub int begin( data, programStack, dataBase ): loads our globals, calls the function right after it.
 static void
 PPC_CompileInit( void )
 {
-	di_first = di_last = PPC_Malloc( sizeof( dest_instruction_t ) );
-	di_first->count = 0;
-	di_first->next = NULL;
-	di_first->jump = NULL;
-
-	sj_first = sj_last = PPC_Malloc( sizeof( symbolic_jump_t ) );
-	sj_first->nextJump = NULL;
-
-	data_first = PPC_Malloc( sizeof( local_data_t ) );
-	data_first->count = 0;
-	data_first->next = NULL;
-
-	/*
-	 * init function:
-	 * saves old values of global registers and sets our values
-	 * function prototype is:
-	 *  int begin( void *data, int programStack, void *vm->dataBase )
-	 */
-
 	/* first instruction must not be placed on instruction list */
 	emitStart( FALSE_ICOUNT );
 
 	long int stack = STACK_SAVE + 4 * GPRLEN;
+	ppc_instruction_t *base = out_now;
+	long int e;
 
+	for ( e = 0; e < VMJIT_ERR_COUNT; e++ ) {
+		stub_err[ e ] = base + num_instructions;
+		in( iLI, r3, e );
+		if ( e < VMJIT_ERR_COUNT - 1 )
+			in( iB, +4*2*( VMJIT_ERR_COUNT - 1 - e ) ); // to the tail | XXX jump !
+	}
+	in( iLL, r0, VM_Data_Offset( Error ), rVMDATA );
+	in( iMTCTR, r0 );
+	in( iBCTRL );
+	emitEnd();
+
+	stub_entry = out_now;
 	in( iMFLR, r0 );
 	in( iSTLU, r1, -stack, r1 );
 	in( iSTL, rVMDATA, STACK_SAVE + 0 * GPRLEN, r1 );
@@ -1817,7 +1694,8 @@ PPC_CompileInit( void )
 	in( iMR, rVMDATA, r3 );
 	in( iMR, rPSTACK, r4 );
 	in( iMR, rDATABASE, r5 );
-	in( iBL, +4*8 ); // LINK JUMP: first generated instruction | XXX jump !
+	in( iBL, +4*9 ); // LINK JUMP: first generated instruction | XXX jump !
+	pushIn( PPC_EXTSW( r3, r3 ) ); // ELFv1: an int result goes to C sign-extended, lwz zero-extends
 	in( iLL, rVMDATA, STACK_SAVE + 0 * GPRLEN, r1 );
 	in( iLL, rPSTACK, STACK_SAVE + 1 * GPRLEN, r1 );
 	in( iLL, rDATABASE, STACK_SAVE + 2 * GPRLEN, r1 );
@@ -1855,9 +1733,7 @@ PPC_CompileInit( void )
 #define ARG2_INT	( ! i_now->regA2 )
 #define ARG2_FLOAT	( i_now->regA2 )
 
-/*
- * emit OP_CONST, called if nothing has used the const value directly
- */
+// emit OP_CONST, called if nothing has used the const value directly
 static void
 PPC_EmitConst( source_instruction_t * const i_const )
 {
@@ -1891,9 +1767,7 @@ PPC_EmitConst( source_instruction_t * const i_const )
 }
 #define MAYBE_EMIT_CONST() if ( i_const ) PPC_EmitConst( i_const )
 
-/*
- * emit empty instruction, just sets the needed pointers
- */
+// emit empty instruction, just sets the needed pointers
 static inline void
 PPC_EmitNull( source_instruction_t * const i_null )
 {
@@ -1902,9 +1776,11 @@ PPC_EmitNull( source_instruction_t * const i_null )
 #define EMIT_FALSE_CONST() PPC_EmitNull( i_const )
 
 
-/*
- * analize function for register usage and whether it needs stack (r1) prepared
- */
+// Upstream asserted these; NDEBUG is never set here, so a failure would abort the game.
+#define VALUE_PROVIDERS	20
+#define CHECK( cond, reason )	do { if ( !( cond ) ) DIE( reason ); } while ( 0 )
+
+// analize function for register usage and whether it needs stack (r1) prepared
 static void
 VM_AnalyzeFunction(
 		source_instruction_t * const i_first,
@@ -1915,29 +1791,24 @@ VM_AnalyzeFunction(
 {
 	source_instruction_t *i_now = i_first;
 
-	source_instruction_t *value_provider[20] = { NULL };
+	source_instruction_t *value_provider[VALUE_PROVIDERS] = { NULL };
 	unsigned long int opstack_depth = 0;
 
-	/*
-	 * first step:
-	 *  remember what codes returned some value and mark the value type
-	 *  when we get to know what it should be
-	 */
+	// first step: remember which codes returned a value, and mark the value type once
+	// we get to know what it should be
 	while ( (i_now = i_now->next) ) {
 		unsigned long int op = i_now->op;
 		unsigned long int opi = vm_opInfo[ op ];
 
 		if ( opi & opArgIF ) {
-			assert( opstack_depth > 0 );
+			CHECK( opstack_depth > 0, "opstack underflow" );
 
 			opstack_depth--;
 			source_instruction_t *vp = value_provider[ opstack_depth ];
 			unsigned long int vpopi = vm_opInfo[ vp->op ];
 
 			if ( (opi & opArgI) && (vpopi & opRetI) ) {
-				// instruction accepts integer, provider returns integer
-				//vp->regR |= rTYPE_INT;
-				//i_now->regA1 = rTYPE_INT;
+				// instruction accepts integer, provider returns integer: nothing to mark
 			} else if ( (opi & opArgF) && (vpopi & opRetF) ) {
 				// instruction accepts float, provider returns float
 				vp->regR |= rTYPE_FLOAT; // use OR here - could be marked as static
@@ -1950,16 +1821,14 @@ VM_AnalyzeFunction(
 
 		}
 		if ( opi & opArg2IF ) {
-			assert( opstack_depth > 0 );
+			CHECK( opstack_depth > 0, "opstack underflow" );
 
 			opstack_depth--;
 			source_instruction_t *vp = value_provider[ opstack_depth ];
 			unsigned long int vpopi = vm_opInfo[ vp->op ];
 
 			if ( (opi & opArg2I) && (vpopi & opRetI) ) {
-				// instruction accepts integer, provider returns integer
-				//vp->regR |= rTYPE_INT;
-				//i_now->regA2 = rTYPE_INT;
+				// instruction accepts integer, provider returns integer: nothing to mark
 			} else if ( (opi & opArg2F) && (vpopi & opRetF) ) {
 				// instruction accepts float, provider returns float
 				vp->regR |= rTYPE_FLOAT; // use OR here - could be marked as static
@@ -1988,17 +1857,14 @@ VM_AnalyzeFunction(
 
 
 		if ( opi & opRetIF ) {
+			CHECK( opstack_depth < VALUE_PROVIDERS, "opstack too deep" );
 			value_provider[ opstack_depth ] = i_now;
 			opstack_depth++;
 		}
 	}
 
-	/*
-	 * second step:
-	 *  now that we know register types; compute exactly how many registers
-	 *  of each type we need
-	 */
-
+	// second step: now that we know the register types, compute exactly how many
+	// registers of each type we need
 	i_now = i_first;
 	long int needed_reg[4] = {0,0,0,0}, max_reg[4] = {0,0,0,0};
 	opstack_depth = 0;
@@ -2007,7 +1873,7 @@ VM_AnalyzeFunction(
 		unsigned long int opi = vm_opInfo[ op ];
 
 		if ( opi & opArgIF ) {
-			assert( opstack_depth > 0 );
+			CHECK( opstack_depth > 0, "opstack underflow" );
 			opstack_depth--;
 			source_instruction_t *vp = value_provider[ opstack_depth ];
 
@@ -2016,7 +1882,7 @@ VM_AnalyzeFunction(
 				needed_reg[ ( vp->regR & 3 ) ] -= 1;
 		}
 		if ( opi & opArg2IF ) {
-			assert( opstack_depth > 0 );
+			CHECK( opstack_depth > 0, "opstack underflow" );
 			opstack_depth--;
 			source_instruction_t *vp = value_provider[ opstack_depth ];
 
@@ -2085,10 +1951,7 @@ VM_AnalyzeFunction(
 	*fpr_start_pos = fpr_start;
 }
 
-/*
- * translate opcodes to ppc instructions,
- * it works on functions, not on whole code at once
- */
+// translate opcodes to ppc instructions, one function at a time
 static void
 VM_CompileFunction( source_instruction_t * const i_first )
 {
@@ -2131,8 +1994,11 @@ VM_CompileFunction( source_instruction_t * const i_first )
 
 			case OP_BREAK:
 				MAYBE_EMIT_CONST();
-				// force SEGV
-				in( iLWZ, r0, 0, r0 );
+				// count it like the interpreter; r0 can't be addi's base, so r11/r12 (not in gpr_list)
+				in( iLL, r11, VM_Data_Offset( breakCount ), rVMDATA );
+				in( iLWZ, r12, 0, r11 );
+				in( iADDI, r12, r12, 1 );
+				in( iSTW, r12, 0, r11 );
 				break;
 
 			case OP_ENTER:
@@ -2162,6 +2028,11 @@ VM_CompileFunction( source_instruction_t * const i_first )
 				}
 
 				in( iADDI, rPSTACK, rPSTACK, - i_now->arg.si );
+				// guard: the interpreter's DEBUG_VM stack check, which also caps recursion on r1
+				in( iLWZ, r0, VM_Data_Offset( stackBottom ), rVMDATA );
+				in( iCMPW, cr7, rPSTACK, r0 );
+				in( iBC, branchTrue, 4*cr7+gt, +4*2 ); // XXX jump !
+				emitStubCall( VMJIT_ERR_STACK );
 				break;
 
 			case OP_LEAVE:
@@ -2220,8 +2091,8 @@ VM_CompileFunction( source_instruction_t * const i_first )
 				}
 				in( iADDI, rPSTACK, rPSTACK, i_now->arg.si);
 				in( iBLR );
-				assert( gpr_pos == gpr_start_pos );
-				assert( fpr_pos == fpr_start_pos );
+				CHECK( gpr_pos == gpr_start_pos, "opstack not empty at OP_LEAVE" );
+				CHECK( fpr_pos == fpr_start_pos, "opstack not empty at OP_LEAVE" );
 				break;
 
 			case OP_CALL:
@@ -2249,21 +2120,24 @@ VM_CompileFunction( source_instruction_t * const i_first )
 					MAYBE_EMIT_CONST();
 
 					in( iCMPWI, cr7, rFIRST, 0 );
-					in( iBLTm, cr7, +4*5 /* syscall */ ); // XXX jump !
-					/* instruction call */
+					in( iBLTm, cr7, +4*9 /* syscall */ ); // XXX jump !
+					/* instruction call, guarded like the interpreter: index < instructionCount */
+					in( iLWZ, r0, VM_Data_Offset( instructionCount ), rVMDATA );
+					in( iCMPLW, cr7, rFIRST, r0 );
+					in( iBC, branchTrue, 4*cr7+lt, +4*2 ); // XXX jump !
+					emitStubCall( VMJIT_ERR_CALL );
 
 					// get instruction address
 					in( iLL, r0, VM_Data_Offset( iPointers ), rVMDATA );
 					in( iRLWINM, rFIRST, rFIRST, GPRLEN_SHIFT, 0, 31-GPRLEN_SHIFT ); // mul * GPRLEN
 					in( iLLX, r0, rFIRST, r0 ); // load pointer
 
-					in( iB, +4*(3 + (rFIRST != r3 ? 1 : 0) ) ); // XXX jump !
+					in( iB, +4*4 ); // XXX jump !
 
 					/* syscall */
 					in( iLL, r0, VM_Data_Offset( AsmCall ), rVMDATA ); // get asmCall pointer
-					/* rFIRST can be r3 or some static register */
-					if ( rFIRST != r3 )
-						in( iMR, r3, rFIRST ); // push OPSTACK top value on argument list
+					/* rFIRST can be r3 or some static register; a loaded value is zero-extended */
+					pushIn( PPC_EXTSW( r3, rFIRST ) ); // push OPSTACK top value on argument list
 					in( iMR, r4, rPSTACK ); // push PSTACK on argument list
 
 					/* common code */
@@ -2330,6 +2204,11 @@ VM_CompileFunction( source_instruction_t * const i_first )
 					);
 				} else {
 					MAYBE_EMIT_CONST();
+
+					in( iLWZ, r0, VM_Data_Offset( instructionCount ), rVMDATA );
+					in( iCMPLW, cr7, rFIRST, r0 );
+					in( iBC, branchTrue, 4*cr7+lt, +4*2 ); // XXX jump !
+					emitStubCall( VMJIT_ERR_JUMP );
 
 					in( iLL, r0, VM_Data_Offset( iPointers ), rVMDATA );
 					in( iRLWINM, rFIRST, rFIRST, GPRLEN_SHIFT, 0, 31-GPRLEN_SHIFT ); // mul * GPRLEN
@@ -2633,10 +2512,9 @@ VM_CompileFunction( source_instruction_t * const i_first )
 
 					in( iMTCTR, r0 );
 
-					if ( rFIRST != r4 )
-						in( iMR, r4, rFIRST );
-					if ( rSECOND != r3 )
-						in( iMR, r3, rSECOND );
+					// ELFv1 wants unsigned int args zero-extended, and an add can carry into the high word
+					pushIn( PPC_CLRLDI32( r4, rFIRST ) );
+					pushIn( PPC_CLRLDI32( r3, rSECOND ) );
 
 					in( iBCTRL );
 				}
@@ -2812,7 +2690,8 @@ VM_CompileFunction( source_instruction_t * const i_first )
 			case OP_CVFI:
 				MAYBE_EMIT_CONST();
 				gpr_pos++;
-				in( iFCTIWZ, fFIRST, fFIRST );
+				// rounds in the FPSCR mode (nearest, Sys_SetFloatEnv) like the interpreter's lrintf Q_ftol
+				in( iFCTIW, fFIRST, fFIRST );
 				in( iSTFD, fFIRST, stack_temp, r1 );
 				in( iLWZ, rFIRST, stack_temp + 4, r1 );
 				fpr_pos--;
@@ -2840,279 +2719,226 @@ VM_CompileFunction( source_instruction_t * const i_first )
 	}
 	if ( i_const )
 		DIE( "left (unused) OP_CONST" );
-
-	{
-		// free opcode information, don't free first dummy one
-		source_instruction_t *i_next = i_first->next;
-		while ( i_next ) {
-			i_now = i_next;
-			i_next = i_now->next;
-			PPC_Free( i_now );
-		}
-	}
 }
 
 
-/*
- * check which jumps are short enough to use signed 16bit immediate branch
- */
+// Writes a branch into its slot. A long slot keeps a nop first when the bc reaches, else it
+// becomes an inverted bc over a b; unconditional ones use bc/bcl when in reach, like upstream.
 static void
-PPC_ShrinkJumps( void )
+PPC_WriteJump( const ppc_jump_t *j, ppc_instruction_t *target, qboolean longSlot )
 {
-	symbolic_jump_t *sj_now = sj_first;
-	while ( (sj_now = sj_now->nextJump) ) {
-		if ( sj_now->bo == branchAlways )
-			// non-conditional branch has 26bit immediate
-			sj_now->parent->length = 1;
+	ppc_instruction_t *at = j->at + ( longSlot ? 1 : 0 );
+	long int disp = target - at;
+	long int bo;
 
-		else {
-			dest_instruction_t *di = di_pointers[ sj_now->jump_to ];
-			dest_instruction_t *ji = sj_now->parent;
-			long int jump_length = 0;
-			if ( ! di )
-				DIE( "No instruction to jump to" );
-			if ( ji->count > di->count ) {
-				do {
-					jump_length += di->length;
-				} while ( ( di = di->next ) != ji );
-			} else {
-				jump_length = 1;
-				while ( ( ji = ji->next ) != di )
-					jump_length += ji->length;
+	if ( disp >= -8192 && disp < 8192 ) {
+		*at = IN( ( j->ext & branchExtLink ) ? iBCL : iBC, j->bo, j->bi, disp * 4 );
+		return;
+	}
+
+	*at = IN( ( j->ext & branchExtLink ) ? iBL : iB, disp * 4 );
+	if ( j->bo == branchAlways )
+		return;
+
+	if ( !longSlot )
+		DIE( "conditional branch out of reach" );
+
+	switch ( j->bo ) {
+		case branchTrue:
+			bo = branchFalse;
+			break;
+		case branchFalse:
+			bo = branchTrue;
+			break;
+		default:
+			DIE( "unrecognized branch type" );
+	}
+	at[ -1 ] = IN( iBC, bo, j->bi, +2*4 );
+}
+
+// Closes the function [i_first, i_last] emitted at fn_base. Its conditional branches got two
+// words each; if the whole function is within bc reach (8192 words), drop the second one.
+static void
+PPC_FinishFunction( unsigned long int i_first, unsigned long int i_last )
+{
+	qboolean longSlots = ( out_now - fn_base ) >= 8192;
+	unsigned long int i;
+	long int k, dropped;
+
+	for ( i = i_first; i <= i_last; i++ ) {
+		if ( !ip_tab[ i ] )
+			DIE( "instruction pointer not set" );
+	}
+
+	if ( !longSlots ) {
+		ppc_instruction_t *dst = fn_base, *from = fn_base;
+
+		// both lists are in address order: an address moves back by the dropped words before it
+		k = 0;
+		dropped = 0;
+		for ( i = i_first; i <= i_last; i++ ) {
+			ppc_instruction_t *a = (ppc_instruction_t *)ip_tab[ i ];
+
+			for ( ; k < fn_jumps_num && fn_jumps[ k ].at + 2 <= a; k++ ) {
+				if ( fn_jumps[ k ].bo != branchAlways )
+					dropped++;
 			}
-			if ( jump_length < 0x2000 )
-				// jump is short, use normal instruction
-				sj_now->parent->length = 1;
+			ip_tab[ i ] = (intptr_t)( a - dropped );
 		}
+
+		dropped = 0;
+		for ( k = 0; k < fn_jumps_num; k++ ) {
+			ppc_jump_t *j = &fn_jumps[ k ];
+			ppc_instruction_t *at = j->at;
+
+			if ( j->bo == branchAlways ) {
+				j->at -= dropped;
+				continue;
+			}
+			memmove( dst, from, ( at + 1 - from ) * sizeof( ppc_instruction_t ) );
+			dst += at + 1 - from;
+			from = at + 2;
+			j->at -= dropped;
+			dropped++;
+		}
+		memmove( dst, from, ( out_now - from ) * sizeof( ppc_instruction_t ) );
+		out_now = dst + ( out_now - from );
 	}
+
+	for ( k = 0; k < fn_jumps_num; k++ ) {
+		ppc_jump_t *j = &fn_jumps[ k ];
+
+		if ( j->stub ) {
+			PPC_WriteJump( j, j->stub, qfalse );
+			continue;
+		}
+		if ( j->dest > i_last ) {
+			// a later function: its address is known only at the end
+			if ( j->bo != branchAlways )
+				DIE( "conditional jump out of its function" );
+			if ( fixups_num >= fixups_max )
+				DIE( "too many fixups" );
+			fixups[ fixups_num++ ] = *j;
+			continue;
+		}
+		if ( j->dest < i_first && j->bo != branchAlways )
+			DIE( "conditional jump out of its function" );
+
+		PPC_WriteJump( j, (ppc_instruction_t *)ip_tab[ j->dest ],
+			( j->bo != branchAlways ) && longSlots );
+	}
+
+	fn_jumps_num = 0;
+	fn_base = out_now;
 }
 
-/*
- * puts all the data in one place, it consists of many different tasks
- */
 static void
-PPC_ComputeCode( vm_t *vm )
+PPC_FreeScratch( void )
 {
-	dest_instruction_t *di_now = di_first;
-
-	unsigned long int codeInstructions = 0;
-	// count total instruciton number
-	while ( (di_now = di_now->next ) )
-		codeInstructions += di_now->length;
-
-	size_t codeLength = sizeof( vm_data_t )
-		+ sizeof( unsigned int ) * data_acc
-		+ sizeof( ppc_instruction_t ) * codeInstructions;
-
-	// get the memory for the generated code, smarter ppcs need the
-	// mem to be marked as executable (whill change later)
-	unsigned char *dataAndCode = mmap( NULL, codeLength,
-		PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0 );
-
-	if (dataAndCode == MAP_FAILED)
-		DIE( "Not enough memory" );
-
-	ppc_instruction_t *codeNow, *codeBegin;
-	codeNow = codeBegin = (ppc_instruction_t *)( dataAndCode + VM_Data_Offset( data[ data_acc ] ) );
-
-	ppc_instruction_t nop = IN( iNOP );
-
-	// copy instructions to the destination
-	// fills the jump instructions with nops
-	// saves pointers of all instructions
-	di_now = di_first;
-	while ( (di_now = di_now->next ) ) {
-		unsigned long int i_count = di_now->i_count;
-		if ( i_count != FALSE_ICOUNT ) {
-			if ( ! di_pointers[ i_count ] )
-				di_pointers[ i_count ] = (void *) codeNow;
-		}
-
-		if ( di_now->jump == NULL ) {
-			memcpy( codeNow, &(di_now->code[0]), di_now->length * sizeof( ppc_instruction_t ) );
-			codeNow += di_now->length;
-		} else {
-			long int i;
-			symbolic_jump_t *sj;
-			for ( i = 0; i < di_now->length; i++ )
-				codeNow[ i ] = nop;
-			codeNow += di_now->length;
-
-			sj = di_now->jump;
-			// save position of jumping instruction
-			sj->parent = (void *)(codeNow - 1);
-		}
-	}
-
-	// compute the jumps and write corresponding instructions
-	symbolic_jump_t *sj_now = sj_first;
-	while ( (sj_now = sj_now->nextJump ) ) {
-		ppc_instruction_t *jumpFrom = (void *) sj_now->parent;
-		ppc_instruction_t *jumpTo = (void *) di_pointers[ sj_now->jump_to ];
-		signed long int jumpLength = jumpTo - jumpFrom;
-
-		// if jump is short, just write it
-		if ( jumpLength >= - 8192 && jumpLength < 8192 ) {
-			powerpc_iname_t branchConditional = sj_now->ext & branchExtLink ? iBCL : iBC;
-			*jumpFrom = IN( branchConditional, sj_now->bo, sj_now->bi, jumpLength * 4 );
-			continue;
-		}
-
-		// jump isn't short so write it as two instructions
-		//
-		// the letter one is a non-conditional branch instruction which
-		// accepts immediate values big enough (26 bits)
-		*jumpFrom = IN( (sj_now->ext & branchExtLink ? iBL : iB), jumpLength * 4 );
-		if ( sj_now->bo == branchAlways )
-			continue;
-
-		// there should have been additional space prepared for this case
-		if ( jumpFrom[ -1 ] != nop )
-			DIE( "additional space for long jump not prepared" );
-
-		// invert instruction condition
-		long int bo = 0;
-		switch ( sj_now->bo ) {
-			case branchTrue:
-				bo = branchFalse;
-				break;
-			case branchFalse:
-				bo = branchTrue;
-				break;
-			default:
-				DIE( "unrecognized branch type" );
-				break;
-		}
-
-		// the former instruction is an inverted conditional branch which
-		// jumps over the non-conditional one
-		jumpFrom[ -1 ] = IN( iBC, bo, sj_now->bi, +2*4 );
-	}
-
-	vm->codeBase = dataAndCode;
-	vm->codeLength = codeLength;
-
-	vm_data_t *data = (vm_data_t *)dataAndCode;
-
-#if ELF64
-	// prepare Official Procedure Descriptor for the generated code
-	// and retrieve real function pointer for helper functions
-
-	opd_t *ac = (void *)VM_AsmCall, *bc = (void *)VM_BlockCopy;
-	data->opd.function = codeBegin;
-	// trick it into using the same TOC
-	// this way we won't have to switch TOC before calling AsmCall or BlockCopy
-	data->opd.toc = ac->toc;
-	data->opd.env = ac->env;
-
-	data->AsmCall = ac->function;
-	data->BlockCopy = bc->function;
-#else
-	data->AsmCall = VM_AsmCall;
-	data->BlockCopy = VM_BlockCopy;
-#endif
-
-	data->dataMask = vm->dataMask;
-	data->iPointers = (ppc_instruction_t *)vm->instructionPointers;
-	data->dataLength = VM_Data_Offset( data[ data_acc ] );
-	data->codeLength = ( codeNow - codeBegin ) * sizeof( ppc_instruction_t );
-	data->floatBase = 0x59800004;
-
-
-	/* write dynamic data (float constants) */
-	{
-		local_data_t *d_next, *d_now = data_first;
-		long int accumulated = 0;
-
-		do {
-			long int i;
-			for ( i = 0; i < d_now->count; i++ )
-				data->data[ accumulated + i ] = d_now->data[ i ];
-
-			accumulated += d_now->count;
-			d_next = d_now->next;
-			PPC_Free( d_now );
-
-			if ( !d_next )
-				break;
-			d_now = d_next;
-		} while (1);
-		data_first = NULL;
-	}
-
-	/* free most of the compilation memory */
-	{
-		di_now = di_first->next;
-		PPC_Free( di_first );
-		PPC_Free( sj_first );
-
-		while ( di_now ) {
-			di_first = di_now->next;
-			if ( di_now->jump )
-				PPC_Free( di_now->jump );
-			PPC_Free( di_now );
-			di_now = di_first;
-		}
-	}
+	if ( src )
+		Z_Free( src );
+	if ( fn_jumps )
+		Z_Free( fn_jumps );
+	if ( fixups )
+		Z_Free( fixups );
+	if ( data_list )
+		Z_Free( data_list );
+	src = NULL;
+	fn_jumps = fixups = NULL;
+	data_list = NULL;
 }
 
 static void
 VM_Destroy_Compiled( vm_t *self )
 {
-	if ( self->codeBase ) {
-		if ( munmap( self->codeBase, self->codeLength ) )
-			Com_Printf( S_COLOR_RED "Memory unmap failed, possible memory leak\n" );
+	int i;
+
+	for ( i = 0; i < ARRAY_LEN( vmjit_slots ); i++ ) {
+		vmjit_slot_t *slot = &vmjit_slots[ i ];
+
+		if ( self->codeBase >= slot->base && self->codeBase < slot->base + slot->size )
+			slot->busy = qfalse;
 	}
 	self->codeBase = NULL;
 }
 
-void
-VM_Compile( vm_t *vm, vmHeader_t *header )
+// Compiles straight into slot. Any failure, a full slot included, returns false with the reason
+// in vmjit_error, and leaves the slot free.
+static qboolean
+PPC_Compile( vm_t *vm, vmHeader_t *header, vmjit_slot_t *slot )
 {
-	long int pc = 0;
-	unsigned long int i_count;
-	char* code;
-	struct timeval tvstart = {0, 0};
-	source_instruction_t *i_first /* dummy */, *i_last = NULL, *i_now;
+	int i;
+	unsigned long int i_count, pc, op, fnOps, maxFnOps, branches, n;
+	unsigned char *code = (unsigned char *)header + header->codeOffset;
+	vm_data_t *data;
+	size_t dataLength;
 
-	vm->compiled = qfalse;
+	if ( setjmp( vmjit_abort ) ) {
+		PPC_FreeScratch();
+		return qfalse;
+	}
 
-	gettimeofday(&tvstart, NULL);
+	// sizes for the scratch blocks: the largest function, and every call/jump that may
+	// leave its function
+	pc = 0;
+	fnOps = maxFnOps = branches = 0;
+	for ( i_count = 0; i_count < header->instructionCount; i_count++ ) {
+		if ( pc >= header->codeLength )
+			DIE( "code shorter than its instruction count" );
+		op = code[ pc++ ];
+		if ( op == OP_ENTER && fnOps ) {
+			if ( fnOps > maxFnOps )
+				maxFnOps = fnOps;
+			fnOps = 0;
+		}
+		fnOps++;
+		if ( op == OP_CALL || op == OP_JUMP )
+			branches++;
+		if ( vm_opInfo[ op ] & opImm4 )
+			pc += 4;
+		else if ( vm_opInfo[ op ] & opImm1 )
+			pc += 1;
+	}
+	if ( fnOps > maxFnOps )
+		maxFnOps = fnOps;
+	if ( pc > header->codeLength )
+		DIE( "code shorter than its instruction count" );
+
+	src = Z_Malloc( ( maxFnOps + 1 ) * sizeof( *src ) );
+	fn_jumps = Z_Malloc( maxFnOps * sizeof( *fn_jumps ) );
+	fn_jumps_max = maxFnOps;
+	fn_jumps_num = 0;
+	fixups = Z_Malloc( ( branches + 1 ) * sizeof( *fixups ) );
+	fixups_max = branches;
+	fixups_num = 0;
+	data_list = Z_Malloc( VM_DATA_MAX * sizeof( *data_list ) );
+	data_acc = 0;
+
+	ip_tab = vm->instructionPointers;
+	ip_count = header->instructionCount;
+	Com_Memset( ip_tab, 0, ip_count * sizeof( *ip_tab ) );
+
+	out_now = (ppc_instruction_t *)slot->base;
+	out_end = (ppc_instruction_t *)( slot->base + slot->size );
 
 	PPC_MakeFastMask( vm->dataMask );
-
-	i_first = PPC_Malloc( sizeof( source_instruction_t ) );
-	i_first->next = NULL;
-
-	// realloc instructionPointers with correct size
-	// use Z_Malloc so vm.c will be able to free the memory
-	if ( sizeof( void * ) != sizeof( int ) ) {
-		Z_Free( vm->instructionPointers );
-		vm->instructionPointers = Z_Malloc( header->instructionCount * sizeof( void * ) );
-	}
-	di_pointers = (void *)vm->instructionPointers;
-	memset( di_pointers, 0, header->instructionCount * sizeof( void * ) );
-
-
 	PPC_CompileInit();
+	fn_base = out_now;
 
-	/*
-	 * read the input program
-	 * divide it into functions and send each function to compiler
-	 */
-	code = (char *)header + header->codeOffset;
-	for ( i_count = 0; i_count < header->instructionCount; ++i_count )
-	{
-		unsigned char op = code[ pc++ ];
+	// read the program and send each function (OP_ENTER to OP_ENTER) to the compiler
+	src[ 0 ].next = NULL;
+	n = 0;
+	for ( i_count = 0, pc = 0; i_count < header->instructionCount; i_count++ ) {
+		source_instruction_t *i_now;
 
-		if ( op == OP_ENTER ) {
-			if ( i_first->next )
-				VM_CompileFunction( i_first );
-			i_first->next = NULL;
-			i_last = i_first;
+		op = code[ pc++ ];
+		if ( op == OP_ENTER && n ) {
+			VM_CompileFunction( &src[ 0 ] );
+			PPC_FinishFunction( src[ 1 ].i_count, src[ n ].i_count );
+			n = 0;
 		}
 
-		i_now = PPC_Malloc( sizeof( source_instruction_t ) );
+		i_now = &src[ ++n ];
 		i_now->op = op;
 		i_now->i_count = i_count;
 		i_now->arg.i = 0;
@@ -3121,58 +2947,621 @@ VM_Compile( vm_t *vm, vmHeader_t *header )
 		i_now->regR = 0;
 		i_now->regPos = 0;
 		i_now->next = NULL;
+		src[ n - 1 ].next = i_now;
 
-		if ( vm_opInfo[op] & opImm4 ) {
-			union {
-				unsigned char b[4];
-				unsigned int i;
-			} c = { { code[ pc + 3 ], code[ pc + 2 ], code[ pc + 1 ], code[ pc + 0 ] }, };
-
-			i_now->arg.i = c.i;
+		if ( vm_opInfo[ op ] & opImm4 ) {
+			// little endian in the file
+			i_now->arg.i = code[ pc ] | ( code[ pc + 1 ] << 8 ) |
+				( code[ pc + 2 ] << 16 ) | ( (unsigned int)code[ pc + 3 ] << 24 );
 			pc += 4;
-		} else if ( vm_opInfo[op] & opImm1 ) {
+		} else if ( vm_opInfo[ op ] & opImm1 ) {
 			i_now->arg.b = code[ pc++ ];
 		}
-
-		i_last->next = i_now;
-		i_last = i_now;
 	}
-	VM_CompileFunction( i_first );
-	PPC_Free( i_first );
-
-	PPC_ShrinkJumps();
-	memset( di_pointers, 0, header->instructionCount * sizeof( void * ) );
-	PPC_ComputeCode( vm );
-
-	/* check for uninitialized pointers */
-#ifdef DEBUG_VM
-	long int i;
-	for ( i = 0; i < header->instructionCount; i++ )
-		if ( di_pointers[ i ] == 0 )
-			Com_Printf( S_COLOR_RED "Pointer %ld not initialized !\n", i );
-#endif
-
-	/* mark memory as executable and not writeable */
-	if ( mprotect( vm->codeBase, vm->codeLength, PROT_READ|PROT_EXEC ) ) {
-
-		// it has failed, make sure memory is unmapped before throwing the error
-		VM_Destroy_Compiled( vm );
-		DIE( "mprotect failed" );
+	if ( n ) {
+		VM_CompileFunction( &src[ 0 ] );
+		PPC_FinishFunction( src[ 1 ].i_count, src[ n ].i_count );
 	}
 
+	for ( i = 0; i < fixups_num; i++ )
+		PPC_WriteJump( &fixups[ i ], (ppc_instruction_t *)ip_tab[ fixups[ i ].dest ], qfalse );
+
+	// vm_data_t and the float constants follow the code
+	data = (vm_data_t *)( ( (intptr_t)out_now + 15 ) & ~(intptr_t)15 );
+	dataLength = VM_Data_Offset( data ) + data_acc * sizeof( unsigned int );
+	if ( (unsigned char *)data + dataLength > (unsigned char *)out_end )
+		DIE( "code slot is full" );
+
+	{
+		opd_t *ac = (void *)VM_AsmCall, *bc = (void *)VM_BlockCopy, *ec = (void *)VM_JitError;
+
+		// same TOC as the engine, so the C helpers are called without switching it
+		data->opd.function = stub_entry;
+		data->opd.toc = ac->toc;
+		data->opd.env = ac->env;
+
+		data->AsmCall = ac->function;
+		data->BlockCopy = bc->function;
+		data->Error = ec->function;
+	}
+	data->dataMask = vm->dataMask;
+	data->iPointers = (ppc_instruction_t *)vm->instructionPointers;
+	data->breakCount = &vm->breakCount;
+	data->instructionCount = header->instructionCount;
+	// VM_Create's vm->stackBottom, which it sets only after the compile
+	data->stackBottom = vm->dataMask + 1 - PROGRAM_STACK_SIZE;
+	data->dataLength = dataLength;
+	data->codeLength = ( out_now - (ppc_instruction_t *)slot->base ) * sizeof( ppc_instruction_t );
+	data->floatBase = 0x59800004;
+	memcpy( data->data, data_list, data_acc * sizeof( unsigned int ) );
+
+	PPC_FreeScratch();
+
+	vm->codeBase = (byte *)data;
+	vm->codeLength = (unsigned char *)data + dataLength - slot->base;
 	vm->destroy = VM_Destroy_Compiled;
 	vm->compiled = qtrue;
 
-	{
-		struct timeval tvdone = {0, 0};
-		struct timeval dur = {0, 0};
-		Com_Printf( "VM file %s compiled to %i bytes of code (%p - %p)\n",
-			vm->name, vm->codeLength, vm->codeBase, vm->codeBase+vm->codeLength );
+	ps3_jit_icache_sync( slot->base, vm->codeLength );
+	return qtrue;
+}
 
-		gettimeofday(&tvdone, NULL);
-		timersub(&tvdone, &tvstart, &dur);
-		Com_Printf( "compilation took %lu.%06lu seconds\n",
-			(long unsigned int)dur.tv_sec, (long unsigned int)dur.tv_usec );
+
+// Boot self-test (QVM_JIT_TODO.md S5): small QVM programs run on the interpreter and on the JIT,
+// which must agree on the return value and the data image. Any difference keeps the JIT off.
+
+#define VMJIT_T_LABEL	0x100	// marks label arg at the next instruction
+#define VMJIT_T_CONSTL	0x101	// OP_CONST of label arg's instruction number
+#define VMJIT_T_LABELS	64
+
+typedef struct {
+	unsigned short	op;
+	int		arg;	// a label number for OP_EQ .. OP_GEF
+} vmjit_top_t;
+
+typedef struct {
+	const char		*name;
+	const vmjit_top_t	*ops;
+	int			numOps;
+	int			arg1, arg2, arg3;	// vmMain args 1-3
+	qboolean		guard;	// JIT only: must stop in the OP_CALL guard
+} vmjit_test_t;
+
+// the test image; the stack is its top, so stackBottom is 0 and the data below is compared
+#define VT_IMAGE	0x10000
+#define VT_NEG5		0x100	// -5
+#define VT_MIN		0x104	// INT_MIN
+#define VT_M1		0x108	// -1
+#define VT_F1		0x110	// 3.75f
+#define VT_F2		0x114	// -2.5f
+#define VT_BYTES	0x118	// 0x817FFF01
+#define VT_HALVES	0x11C	// 0x80017FFF
+#define VT_PTR		0x120	// function pointers the programs store
+#define VT_SRC		0x200	// 256 pattern bytes
+#define VT_JTAB		0x300	// a jump table the program stores
+#define VT_RES		0x400	// results
+#define VT_DATA		0x800
+
+#define T0( op )	{ OP_##op, 0 }
+#define T1( op, x )	{ OP_##op, (int)( x ) }
+#define TLABEL( n )	{ VMJIT_T_LABEL, n }
+#define TCONSTL( n )	{ VMJIT_T_CONSTL, n }
+
+// results[ r ] = vmMain arg 1 op arg 2 (frame 8); results[ r ] = f1 op f2
+#define VT_BIN( r, op )	T1( CONST, VT_RES + 4 * (r) ), T1( LOCAL, 20 ), T0( LOAD4 ), T1( LOCAL, 24 ), T0( LOAD4 ), T0( op ), T0( STORE4 )
+#define VT_FBIN( r, op )	T1( CONST, VT_RES + 4 * (r) ), T1( CONST, VT_F1 ), T0( LOAD4 ), T1( CONST, VT_F2 ), T0( LOAD4 ), T0( op ), T0( STORE4 )
+// compare args a, b (frame 16): bit k of the mask at local 8 stays clear when the compare branches
+#define VT_BIT( k, lbl )	T1( LOCAL, 8 ), T1( LOCAL, 8 ), T0( LOAD4 ), T1( CONST, 1 << (k) ), T0( BOR ), T0( STORE4 ), TLABEL( lbl )
+#define VT_CMP( op, k, lbl )	T1( LOCAL, 24 ), T0( LOAD4 ), T1( LOCAL, 28 ), T0( LOAD4 ), T1( op, lbl ), VT_BIT( k, lbl )
+#define VT_CMPK( op, x, k, lbl )	T1( LOCAL, 24 ), T0( LOAD4 ), T1( CONST, x ), T1( op, lbl ), VT_BIT( k, lbl )
+// results[ r ] = function lbl( x, y )
+#define VT_CALL2( r, x, y, lbl )	T1( CONST, x ), T1( ARG, 8 ), T1( CONST, y ), T1( ARG, 12 ), \
+	T1( CONST, VT_RES + 4 * (r) ), TCONSTL( lbl ), T0( CALL ), T0( STORE4 )
+// results[ i ] = v, i at local 8
+#define VT_JRES( v )	T1( CONST, VT_RES ), T1( LOCAL, 8 ), T0( LOAD4 ), T1( CONST, 2 ), T0( LSH ), T0( ADD ), \
+	T1( CONST, v ), T0( STORE4 )
+
+// lwz zero-extends the -5: only the entry stub's extsw makes it -5 for C
+static const vmjit_top_t vt_return[] = {
+	T1( ENTER, 8 ), T1( CONST, VT_NEG5 ), T0( LOAD4 ), T1( LEAVE, 8 ),
+};
+
+static const vmjit_top_t vt_intmath[] = {
+	T1( ENTER, 8 ),
+	VT_BIN( 0, ADD ), VT_BIN( 1, SUB ), VT_BIN( 2, MULI ), VT_BIN( 3, MULU ),
+	VT_BIN( 4, DIVI ), VT_BIN( 5, DIVU ), VT_BIN( 6, MODI ), VT_BIN( 7, MODU ),
+	VT_BIN( 8, BAND ), VT_BIN( 9, BOR ), VT_BIN( 10, BXOR ),
+	VT_BIN( 11, LSH ), VT_BIN( 12, RSHI ), VT_BIN( 13, RSHU ),
+	T1( CONST, VT_RES + 56 ), T1( LOCAL, 28 ), T0( LOAD4 ), T1( LOCAL, 24 ), T0( LOAD4 ), T0( RSHI ), T0( STORE4 ),
+	T1( CONST, VT_RES + 60 ), T1( LOCAL, 28 ), T0( LOAD4 ), T1( LOCAL, 24 ), T0( LOAD4 ), T0( RSHU ), T0( STORE4 ),
+	T1( CONST, VT_RES + 64 ), T1( LOCAL, 20 ), T0( LOAD4 ), T0( NEGI ), T0( STORE4 ),
+	T1( CONST, VT_RES + 68 ), T1( LOCAL, 28 ), T0( LOAD4 ), T0( BCOM ), T0( STORE4 ),
+	T1( CONST, VT_RES + 72 ), T1( LOCAL, 28 ), T0( LOAD4 ), T0( SEX8 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 76 ), T1( LOCAL, 28 ), T0( LOAD4 ), T0( SEX16 ), T0( STORE4 ),
+	// constants: folded into OP_ADD (addis + addi), then lis/ori, li/ori and li
+	T1( CONST, VT_RES + 80 ), T1( LOCAL, 20 ), T0( LOAD4 ), T1( CONST, 0x12345 ), T0( ADD ), T0( STORE4 ),
+	T1( CONST, VT_RES + 84 ), T1( LOCAL, 20 ), T0( LOAD4 ), T1( CONST, -40000 ), T0( ADD ), T0( STORE4 ),
+	T1( CONST, VT_RES + 88 ), T1( LOCAL, 20 ), T0( LOAD4 ), T1( CONST, 0x8000 ), T0( ADD ), T0( STORE4 ),
+	T1( CONST, VT_RES + 92 ), T1( CONST, 0x89ABCDEF ), T0( STORE4 ),
+	T1( CONST, VT_RES + 96 ), T1( CONST, 0xC000 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 100 ), T1( CONST, -0x8000 ), T0( STORE4 ),
+	// loaded negatives are zero-extended in the registers: the low word must still be right
+	T1( CONST, VT_RES + 104 ), T1( CONST, VT_NEG5 ), T0( LOAD4 ), T1( CONST, VT_M1 ), T0( LOAD4 ), T0( ADD ), T0( STORE4 ),
+	T1( CONST, VT_RES + 108 ), T1( CONST, VT_NEG5 ), T0( LOAD4 ), T1( CONST, VT_MIN ), T0( LOAD4 ), T0( MULI ), T0( STORE4 ),
+	T1( CONST, VT_RES + 112 ), T1( CONST, VT_NEG5 ), T0( LOAD4 ), T1( CONST, 2 ), T0( DIVI ), T0( STORE4 ),
+	T1( CONST, VT_RES + 104 ), T0( LOAD4 ), T1( LEAVE, 8 ),
+};
+
+// no call, so no frame: CVIF, CVFI and the float return use the red zone (STACK_RTEMP)
+static const vmjit_top_t vt_floatleaf[] = {
+	T1( ENTER, 8 ),
+	VT_FBIN( 0, ADDF ), VT_FBIN( 1, SUBF ), VT_FBIN( 2, MULF ), VT_FBIN( 3, DIVF ),
+	T1( CONST, VT_RES + 16 ), T1( CONST, VT_F2 ), T0( LOAD4 ), T0( NEGF ), T0( STORE4 ),
+	T1( CONST, VT_RES + 20 ), T1( LOCAL, 20 ), T0( LOAD4 ), T0( CVIF ), T0( STORE4 ),
+	T1( CONST, VT_RES + 24 ), T1( CONST, VT_F2 ), T0( LOAD4 ), T0( CVFI ), T0( STORE4 ),
+	T1( CONST, VT_RES + 28 ), T1( CONST, VT_F1 ), T0( LOAD4 ), T1( CONST, 0x3FC00000 ), T0( MULF ), T0( CVFI ), T0( STORE4 ),
+	T1( CONST, VT_RES + 32 ), T1( CONST, VT_MIN ), T0( LOAD4 ), T0( CVIF ), T0( STORE4 ),
+	T1( CONST, VT_RES + 36 ), T1( LOCAL, 24 ), T0( LOAD4 ), T0( CVIF ), T1( CONST, 0x40490FDB ), T0( MULF ), T0( STORE4 ),
+	T1( CONST, VT_RES + 40 ), T1( CONST, VT_F1 ), T0( LOAD4 ), T0( CVFI ), T0( CVIF ), T0( STORE4 ),
+	T1( CONST, VT_F1 ), T0( LOAD4 ), T1( CONST, VT_F2 ), T0( LOAD4 ), T0( MULF ), T1( LEAVE, 8 ),
+};
+
+// the same with a call, so the conversions use STACK_TEMP in the frame
+static const vmjit_top_t vt_floatcall[] = {
+	T1( ENTER, 16 ),
+	T1( LOCAL, 28 ), T0( LOAD4 ), T1( ARG, 8 ),
+	T1( LOCAL, 12 ), TCONSTL( 1 ), T0( CALL ), T0( STORE4 ),
+	T1( CONST, VT_RES + 0 ), T1( LOCAL, 12 ), T0( LOAD4 ), T0( CVIF ), T1( CONST, VT_F1 ), T0( LOAD4 ), T0( MULF ), T0( STORE4 ),
+	T1( CONST, VT_RES + 4 ), T1( CONST, VT_F2 ), T0( LOAD4 ), T1( CONST, VT_F1 ), T0( LOAD4 ), T0( DIVF ), T0( CVFI ), T0( STORE4 ),
+	T1( CONST, VT_RES + 8 ), T1( CONST, VT_F1 ), T0( LOAD4 ), T0( NEGF ), T1( CONST, 0x447A0000 ), T0( MULF ), T0( CVFI ), T0( STORE4 ),
+	T1( CONST, VT_RES + 12 ), T1( LOCAL, 32 ), T0( LOAD4 ), T0( CVIF ), T0( STORE4 ),
+	T1( CONST, VT_F1 ), T0( LOAD4 ), T1( CONST, VT_F2 ), T0( LOAD4 ), T0( SUBF ), T0( NEGF ), T1( LEAVE, 16 ),
+	TLABEL( 1 ),
+	T1( ENTER, 8 ), T1( LOCAL, 16 ), T0( LOAD4 ), T1( CONST, 3 ), T0( MULI ), T1( LEAVE, 8 ),
+};
+
+// every compare-and-branch, on registers and on immediates; function 1 is int, 2 float
+static const vmjit_top_t vt_compare[] = {
+	T1( ENTER, 16 ),
+	VT_CALL2( 0, 5, 5, 1 ), VT_CALL2( 1, -3, 7, 1 ), VT_CALL2( 2, 7, -3, 1 ),
+	VT_CALL2( 3, 0x7FFFFFFF, 0x80000000, 1 ), VT_CALL2( 4, 0x9000, 0xC000, 1 ),
+	VT_CALL2( 5, 0xC000, 0xC000, 1 ), VT_CALL2( 6, -100, -100, 1 ), VT_CALL2( 7, 0, -1, 1 ),
+	VT_CALL2( 8, 0xFFFF, 0x10000, 1 ),
+	VT_CALL2( 9, 0x3F800000, 0x3F800000, 2 ), VT_CALL2( 10, 0xC0200000, 0x40700000, 2 ),
+	VT_CALL2( 11, 0x40700000, 0xC0200000, 2 ), VT_CALL2( 12, 0, 0x80000000, 2 ),
+	VT_CALL2( 13, 0x0DA24260, 0, 2 ),
+	T1( CONST, VT_RES ), T0( LOAD4 ), T1( LEAVE, 16 ),
+	TLABEL( 1 ),
+	T1( ENTER, 16 ),
+	T1( LOCAL, 8 ), T1( CONST, 0 ), T0( STORE4 ),
+	VT_CMP( EQ, 0, 10 ), VT_CMP( NE, 1, 11 ), VT_CMP( LTI, 2, 12 ), VT_CMP( LEI, 3, 13 ),
+	VT_CMP( GTI, 4, 14 ), VT_CMP( GEI, 5, 15 ), VT_CMP( LTU, 6, 16 ), VT_CMP( LEU, 7, 17 ),
+	VT_CMP( GTU, 8, 18 ), VT_CMP( GEU, 9, 19 ),
+	VT_CMPK( EQ, 0xC000, 10, 20 ), VT_CMPK( NE, -1, 11, 21 ), VT_CMPK( LTI, -100, 12, 22 ),
+	VT_CMPK( GEI, 7, 13, 23 ), VT_CMPK( LTU, 0x9000, 14, 24 ), VT_CMPK( GTU, 5, 15, 25 ),
+	VT_CMPK( LEI, 0x7FFF, 16, 26 ), VT_CMPK( GEU, 0xFFFF, 17, 27 ), VT_CMPK( LTI, 0x12345, 18, 28 ),
+	VT_CMPK( EQ, 0x7FFFFFFF, 19, 29 ),
+	T1( LOCAL, 8 ), T0( LOAD4 ), T1( LEAVE, 16 ),
+	TLABEL( 2 ),
+	T1( ENTER, 16 ),
+	T1( LOCAL, 8 ), T1( CONST, 0 ), T0( STORE4 ),
+	VT_CMP( EQF, 0, 30 ), VT_CMP( NEF, 1, 31 ), VT_CMP( LTF, 2, 32 ),
+	VT_CMP( LEF, 3, 33 ), VT_CMP( GTF, 4, 34 ), VT_CMP( GEF, 5, 35 ),
+	VT_CMPK( LTF, 0x3F800000, 6, 36 ), VT_CMPK( GEF, 0xC0200000, 7, 37 ),
+	T1( LOCAL, 8 ), T0( LOAD4 ), T1( LEAVE, 16 ),
+};
+
+static const vmjit_top_t vt_loadstore[] = {
+	T1( ENTER, 8 ),
+	T1( CONST, VT_RES + 0 ), T1( CONST, VT_BYTES ), T0( LOAD1 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 4 ), T1( CONST, VT_BYTES + 1 ), T0( LOAD1 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 8 ), T1( CONST, VT_BYTES + 3 ), T0( LOAD1 ), T0( SEX8 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 12 ), T1( CONST, VT_HALVES ), T0( LOAD2 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 16 ), T1( CONST, VT_HALVES + 2 ), T0( LOAD2 ), T0( SEX16 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 20 ), T1( CONST, VT_NEG5 ), T0( LOAD4 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 24 ), T1( CONST, 0x1234ABCD ), T0( STORE1 ),
+	T1( CONST, VT_RES + 25 ), T1( LOCAL, 20 ), T0( LOAD4 ), T0( STORE1 ),
+	T1( CONST, VT_RES + 26 ), T1( CONST, -2 ), T0( STORE1 ),
+	T1( CONST, VT_RES + 27 ), T1( CONST, 0x180 ), T0( STORE1 ),
+	T1( CONST, VT_RES + 28 ), T1( CONST, -2 ), T0( STORE2 ),
+	T1( CONST, VT_RES + 30 ), T1( LOCAL, 20 ), T0( LOAD4 ), T0( STORE2 ),
+	// a float through lfsx / stfsx
+	T1( CONST, VT_RES + 32 ), T1( CONST, VT_F2 ), T0( LOAD4 ), T0( NEGF ), T0( STORE4 ),
+	// addresses wrap at the data mask, as in the interpreter
+	T1( CONST, VT_RES + 36 + VT_IMAGE ), T1( CONST, 77 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 40 ), T1( CONST, VT_NEG5 + 3 * VT_IMAGE ), T0( LOAD4 ), T0( STORE4 ),
+	T1( CONST, VT_RES + 44 - VT_IMAGE ), T1( CONST, VT_BYTES - 5 * VT_IMAGE ), T0( LOAD1 ), T0( STORE2 ),
+	T1( CONST, VT_RES + 20 ), T0( LOAD4 ), T1( LEAVE, 8 ),
+};
+
+static const vmjit_top_t vt_blockcopy[] = {
+	T1( ENTER, 8 ),
+	T1( CONST, VT_RES + 0 ), T1( CONST, VT_SRC ), T1( BLOCK_COPY, 12 ),
+	T1( CONST, VT_RES + 16 ), T1( CONST, VT_SRC + 3 ), T1( BLOCK_COPY, 7 ),
+	T1( CONST, VT_RES + 32 ), T1( CONST, VT_SRC ), T1( BLOCK_COPY, 32 ),
+	T1( CONST, VT_RES + 64 ), T1( CONST, VT_SRC + 1 ), T1( BLOCK_COPY, 200 ),
+	T1( LOCAL, 20 ), T0( LOAD4 ), T1( CONST, VT_SRC + 16 ), T1( BLOCK_COPY, 16 ),
+	// this add carries into the high word of the register: VM_BlockCopy needs it cleared
+	T1( CONST, VT_RES + 0x1A5 ), T1( CONST, VT_NEG5 ), T0( LOAD4 ), T0( ADD ), T1( CONST, VT_SRC + 32 ), T1( BLOCK_COPY, 8 ),
+	T1( CONST, VT_RES + 4 ), T0( LOAD4 ), T1( LEAVE, 8 ),
+};
+
+// direct calls, a value kept across a call, and recursion: fib( n ) and a - 2 * b + c
+static const vmjit_top_t vt_calls[] = {
+	T1( ENTER, 24 ),
+	T1( CONST, 10 ), T1( ARG, 8 ),
+	T1( CONST, VT_RES + 0 ), TCONSTL( 1 ), T0( CALL ), T0( STORE4 ),
+	T1( CONST, 100 ), T1( ARG, 8 ), T1( CONST, -20 ), T1( ARG, 12 ), T1( CONST, 3 ), T1( ARG, 16 ),
+	T1( CONST, VT_RES + 4 ), TCONSTL( 2 ), T0( CALL ), T0( STORE4 ),
+	T1( LOCAL, 36 ), T0( LOAD4 ), T1( ARG, 8 ),
+	T1( CONST, VT_RES + 8 ), TCONSTL( 1 ), T0( CALL ), T0( STORE4 ),
+	T1( CONST, VT_RES + 0 ), T0( LOAD4 ), T1( LEAVE, 24 ),
+	TLABEL( 1 ),
+	T1( ENTER, 24 ),
+	T1( LOCAL, 32 ), T0( LOAD4 ), T1( CONST, 2 ), T1( GEI, 3 ),
+	T1( LOCAL, 32 ), T0( LOAD4 ), T1( LEAVE, 24 ),
+	TLABEL( 3 ),
+	T1( LOCAL, 32 ), T0( LOAD4 ), T1( CONST, 1 ), T0( SUB ), T1( ARG, 8 ),
+	T1( LOCAL, 12 ), TCONSTL( 1 ), T0( CALL ), T0( STORE4 ),
+	T1( LOCAL, 32 ), T0( LOAD4 ), T1( CONST, 2 ), T0( SUB ), T1( ARG, 8 ),
+	T1( LOCAL, 12 ), T0( LOAD4 ), TCONSTL( 1 ), T0( CALL ), T0( ADD ), T1( LEAVE, 24 ),
+	TLABEL( 2 ),
+	T1( ENTER, 8 ),
+	T1( LOCAL, 16 ), T0( LOAD4 ), T1( LOCAL, 20 ), T0( LOAD4 ), T1( CONST, 2 ), T0( MULI ), T0( SUB ),
+	T1( LOCAL, 24 ), T0( LOAD4 ), T0( ADD ), T1( LEAVE, 8 ),
+};
+
+// a direct syscall, syscalls through pointers (zero-extended negatives), a VM call through one
+static const vmjit_top_t vt_syscalls[] = {
+	T1( ENTER, 32 ),
+	T1( CONST, 11 ), T1( ARG, 8 ), T1( CONST, -22 ), T1( ARG, 12 ), T1( CONST, 33 ), T1( ARG, 16 ),
+	T1( CONST, -44 ), T1( ARG, 20 ), T1( CONST, 0x7FFFFFFF ), T1( ARG, 24 ),
+	T1( CONST, VT_RES + 0 ), T1( CONST, -1 ), T0( CALL ), T0( STORE4 ),
+	T1( CONST, VT_PTR ), T1( CONST, -2 ), T0( STORE4 ),
+	T1( CONST, 5 ), T1( ARG, 8 ), T1( CONST, -6 ), T1( ARG, 12 ),
+	T1( CONST, VT_RES + 4 ), T1( CONST, VT_PTR ), T0( LOAD4 ), T0( CALL ), T0( STORE4 ),
+	T1( CONST, 7 ), T1( ARG, 8 ), T1( CONST, 8 ), T1( ARG, 12 ),
+	T1( CONST, VT_RES + 8 ), T1( LOCAL, 44 ), T0( LOAD4 ), T0( CALL ), T0( STORE4 ),
+	T1( CONST, VT_PTR + 4 ), TCONSTL( 1 ), T0( STORE4 ),
+	T1( CONST, 9 ), T1( ARG, 8 ),
+	T1( CONST, VT_RES + 12 ), T1( CONST, VT_PTR + 4 ), T0( LOAD4 ), T0( CALL ), T0( STORE4 ),
+	T1( CONST, VT_RES + 4 ), T0( LOAD4 ), T1( LEAVE, 32 ),
+	TLABEL( 1 ),
+	T1( ENTER, 8 ), T1( LOCAL, 16 ), T0( LOAD4 ), T1( CONST, 1000 ), T0( ADD ), T1( LEAVE, 8 ),
+};
+
+// a switch: the table holds instruction numbers, OP_JUMP goes through the guard
+static const vmjit_top_t vt_jumptable[] = {
+	T1( ENTER, 16 ),
+	T1( CONST, VT_JTAB + 0 ), TCONSTL( 12 ), T0( STORE4 ),
+	T1( CONST, VT_JTAB + 4 ), TCONSTL( 10 ), T0( STORE4 ),
+	T1( CONST, VT_JTAB + 8 ), TCONSTL( 13 ), T0( STORE4 ),
+	T1( CONST, VT_JTAB + 12 ), TCONSTL( 11 ), T0( STORE4 ),
+	T1( LOCAL, 8 ), T1( CONST, 0 ), T0( STORE4 ),
+	TLABEL( 1 ),
+	T1( LOCAL, 8 ), T0( LOAD4 ), T1( CONST, 2 ), T0( LSH ), T1( CONST, VT_JTAB ), T0( ADD ), T0( LOAD4 ), T0( JUMP ),
+	TLABEL( 10 ), VT_JRES( 100 ), TCONSTL( 2 ), T0( JUMP ),
+	TLABEL( 11 ), VT_JRES( 200 ), TCONSTL( 2 ), T0( JUMP ),
+	TLABEL( 12 ), VT_JRES( 300 ), TCONSTL( 2 ), T0( JUMP ),
+	TLABEL( 13 ),
+	T1( CONST, VT_RES ), T1( LOCAL, 8 ), T0( LOAD4 ), T1( CONST, 2 ), T0( LSH ), T0( ADD ),
+	T1( LOCAL, 8 ), T0( LOAD4 ), T1( LOCAL, 8 ), T0( LOAD4 ), T0( MULI ), T1( CONST, 1000 ), T0( ADD ), T0( STORE4 ),
+	TLABEL( 2 ),
+	T1( LOCAL, 8 ), T1( LOCAL, 8 ), T0( LOAD4 ), T1( CONST, 1 ), T0( ADD ), T0( STORE4 ),
+	T1( LOCAL, 8 ), T0( LOAD4 ), T1( CONST, 4 ), T1( LTI, 1 ),
+	T1( CONST, VT_RES + 8 ), T0( LOAD4 ), T1( LEAVE, 16 ),
+};
+
+// an indirect call far past instructionCount: the guard must stop it
+static const vmjit_top_t vt_guard[] = {
+	T1( ENTER, 8 ), T1( LOCAL, 20 ), T0( LOAD4 ), T0( CALL ), T1( LEAVE, 8 ),
+};
+
+#define VT( name, prog, a1, a2, a3, guard )	{ name, prog, ARRAY_LEN( prog ), a1, a2, a3, guard }
+
+static const vmjit_test_t vmjit_tests[] = {
+	VT( "negative return", vt_return, 0, 0, 0, qfalse ),
+	VT( "int math", vt_intmath, -7, 3, (int)0x9234C6F0, qfalse ),
+	VT( "float leaf", vt_floatleaf, -7, 12345, 0, qfalse ),
+	VT( "float call", vt_floatcall, -7, -100, 0, qfalse ),
+	VT( "compare", vt_compare, 0, 0, 0, qfalse ),
+	VT( "load store", vt_loadstore, 0x1234ABCD, 0, 0, qfalse ),
+	VT( "block copy", vt_blockcopy, VT_RES + 0x180, 0, 0, qfalse ),
+	VT( "calls", vt_calls, 12, 0, 0, qfalse ),
+	VT( "syscalls", vt_syscalls, -2, 0, 0, qfalse ),
+	VT( "jump table", vt_jumptable, 0, 0, 0, qfalse ),
+	VT( "call guard", vt_guard, 0x7FFF0000, 0, 0, qtrue ),
+};
+
+#undef T0
+#undef T1
+#undef TLABEL
+#undef TCONSTL
+#undef VT
+
+static int vmjit_selftest;	// 0 not run, 1 passed, -1 failed
+
+static intptr_t
+VM_JitTestSyscall( intptr_t *args )
+{
+	switch ( args[ 0 ] ) {
+		case 0:
+			return args[ 1 ] - 2 * args[ 2 ] + 3 * args[ 3 ] - 4 * args[ 4 ] + 5 * args[ 5 ];
+		case 1:
+			return args[ 1 ] * 1000 + args[ 2 ];
+		default:
+			return -12345;
+	}
+}
+
+static void
+VM_JitTestImage( byte *image )
+{
+	int i;
+
+	Com_Memset( image, 0, VT_IMAGE + 4 );
+	*(int *)( image + VT_NEG5 ) = -5;
+	*(int *)( image + VT_MIN ) = (int)0x80000000;
+	*(int *)( image + VT_M1 ) = -1;
+	*(unsigned int *)( image + VT_F1 ) = 0x40700000;
+	*(unsigned int *)( image + VT_F2 ) = 0xC0200000;
+	*(unsigned int *)( image + VT_BYTES ) = 0x817FFF01;
+	*(unsigned int *)( image + VT_HALVES ) = 0x80017FFF;
+	for ( i = 0; i < 256; i++ )
+		image[ VT_SRC + i ] = (byte)( i * 37 + 11 );
+}
+
+// Builds a .qvm code segment: labels resolved, immediates little-endian. NULL on a bad label.
+static vmHeader_t *
+VM_JitTestAssemble( const vmjit_test_t *t )
+{
+	int label[ VMJIT_T_LABELS ];
+	int i, n, len;
+	vmHeader_t *h;
+	byte *code;
+
+	for ( i = 0; i < VMJIT_T_LABELS; i++ )
+		label[ i ] = -1;
+	for ( i = n = len = 0; i < t->numOps; i++ ) {
+		int op = t->ops[ i ].op;
+
+		if ( op == VMJIT_T_LABEL ) {
+			label[ t->ops[ i ].arg ] = n;
+			continue;
+		}
+		if ( op == VMJIT_T_CONSTL )
+			op = OP_CONST;
+		n++;
+		len += 1 + ( ( vm_opInfo[ op ] & opImm4 ) ? 4 : ( vm_opInfo[ op ] & opImm1 ) ? 1 : 0 );
+	}
+
+	h = Z_Malloc( sizeof( *h ) + len );
+	h->vmMagic = VM_MAGIC;
+	h->instructionCount = n;
+	h->codeOffset = sizeof( *h );
+	h->codeLength = len;
+	code = (byte *)h + h->codeOffset;
+
+	for ( i = 0; i < t->numOps; i++ ) {
+		int op = t->ops[ i ].op, arg = t->ops[ i ].arg;
+
+		if ( op == VMJIT_T_LABEL )
+			continue;
+		if ( op == VMJIT_T_CONSTL || ( op >= OP_EQ && op <= OP_GEF ) ) {
+			if ( label[ arg ] < 0 ) {
+				Z_Free( h );
+				return NULL;
+			}
+			arg = label[ arg ];
+			if ( op == VMJIT_T_CONSTL )
+				op = OP_CONST;
+		}
+		*code++ = op;
+		if ( vm_opInfo[ op ] & opImm4 ) {
+			*code++ = arg;
+			*code++ = arg >> 8;
+			*code++ = arg >> 16;
+			*code++ = arg >> 24;
+		} else if ( vm_opInfo[ op ] & opImm1 ) {
+			*code++ = arg;
+		}
+	}
+	return h;
+}
+
+static void
+VM_JitTestVM( vm_t *vm, const vmHeader_t *h, byte *image )
+{
+	Com_Memset( vm, 0, sizeof( *vm ) );
+	Q_strncpyz( vm->name, "selftest", sizeof( vm->name ) );
+	vm->systemCall = VM_JitTestSyscall;
+	vm->dataBase = image;
+	vm->dataMask = VT_IMAGE - 1;
+	vm->dataAlloc = VT_IMAGE + 4;
+	vm->instructionCount = h->instructionCount;
+	vm->instructionPointers = Z_Malloc( h->instructionCount * sizeof( *vm->instructionPointers ) );
+	vm->codeLength = h->codeLength;
+	vm->programStack = VT_IMAGE;
+	vm->stackBottom = VT_IMAGE - PROGRAM_STACK_SIZE;
+}
+
+// Runs compiled code; -1 when it returned, else the guard that stopped it. ret is volatile so the
+// test sees all 64 bits of r3, as a caller that widens the int would.
+static int
+VM_JitTestCall( vm_t *vm, int *args, volatile intptr_t *ret )
+{
+	vmjit_testcode = -1;
+	vmjit_testing = qtrue;
+	if ( !setjmp( vmjit_testjmp ) )
+		*ret = VM_CallCompiled( vm, args );
+	vmjit_testing = qfalse;
+	return vmjit_testcode;
+}
+
+static qboolean
+VM_JitTestOne( const vmjit_test_t *t, vmjit_slot_t *slot, byte *image, byte *saved )
+{
+	static vm_t ivm, jvm;
+	int args[ MAX_VMMAIN_ARGS ] = { 0 };
+	volatile intptr_t jret = 0;
+	int iret = 0, code, i;
+	qboolean ok = qfalse;
+	vmHeader_t *h;
+
+	h = VM_JitTestAssemble( t );
+	if ( !h ) {
+		Com_Printf( S_COLOR_YELLOW "[vmjit] self-test %s: undefined label\n", t->name );
+		return qfalse;
+	}
+	args[ 1 ] = t->arg1;
+	args[ 2 ] = t->arg2;
+	args[ 3 ] = t->arg3;
+	ivm.instructionPointers = jvm.instructionPointers = NULL;
+
+	if ( !t->guard ) {
+		VM_JitTestVM( &ivm, h, image );
+		VM_PrepareInterpreter( &ivm, h );
+		VM_JitTestImage( image );
+		currentVM = &ivm;
+		iret = VM_CallInterpreted( &ivm, args );
+		Com_Memcpy( saved, image, VT_DATA );
+	}
+
+	VM_JitTestVM( &jvm, h, image );
+	if ( !PPC_Compile( &jvm, h, slot ) ) {
+		Com_Printf( S_COLOR_YELLOW "[vmjit] self-test %s: %s\n", t->name, vmjit_error );
+		goto done;
+	}
+	VM_JitTestImage( image );
+	code = VM_JitTestCall( &jvm, args, &jret );
+
+	if ( t->guard ) {
+		if ( code == VMJIT_ERR_CALL )
+			ok = qtrue;
+		else
+			Com_Printf( S_COLOR_YELLOW "[vmjit] self-test %s: the guard did not stop it (%d)\n",
+				t->name, code );
+		goto done;
+	}
+	if ( code >= 0 ) {
+		Com_Printf( S_COLOR_YELLOW "[vmjit] self-test %s: stopped by guard %d\n", t->name, code );
+		goto done;
+	}
+	if ( jret != (intptr_t)iret ) {
+		Com_Printf( S_COLOR_YELLOW "[vmjit] self-test %s: returned 0x%llx, interpreter 0x%x\n",
+			t->name, (unsigned long long)jret, iret );
+		goto done;
+	}
+	for ( i = 0; i < VT_DATA; i++ ) {
+		if ( image[ i ] != saved[ i ] ) {
+			Com_Printf( S_COLOR_YELLOW "[vmjit] self-test %s: data at 0x%x is 0x%02x, interpreter 0x%02x\n",
+				t->name, i, image[ i ], saved[ i ] );
+			goto done;
+		}
+	}
+	ok = qtrue;
+
+done:
+	if ( ivm.instructionPointers )
+		Z_Free( ivm.instructionPointers );
+	if ( jvm.instructionPointers )
+		Z_Free( jvm.instructionPointers );
+	Z_Free( h );
+	return ok;
+}
+
+// Runs once, at boot when ps3_vmjit is 2 (vm.c), else before the first compile that may run.
+// A failure keeps every VM on the interpreter for the session.
+qboolean
+VM_JitSelfTest( void )
+{
+	const int total = ARRAY_LEN( vmjit_tests );
+	vmjit_slot_t *slot = NULL;
+	vm_t *savedVM = currentVM;
+	byte *image, *saved;
+	int i, passed = 0;
+
+	if ( !VMJIT_CAN_RUN )
+		return qfalse;
+	if ( vmjit_selftest )
+		return vmjit_selftest > 0;
+
+	for ( i = 0; i < ARRAY_LEN( vmjit_slots ) && !slot; i++ ) {
+		if ( vmjit_slots[ i ].size && !vmjit_slots[ i ].busy )
+			slot = &vmjit_slots[ i ];
+	}
+	if ( !slot ) {
+		Com_Printf( S_COLOR_YELLOW "[vmjit] self-test: no free code slot\n" );
+		return qfalse;
+	}
+
+	image = Z_Malloc( VT_IMAGE + 4 );
+	saved = Z_Malloc( VT_DATA );
+	for ( i = 0; i < total; i++ ) {
+		// logged first: a fault in generated code freezes without a word
+		Com_Printf( "[vmjit] self-test %d/%d: %s\n", i + 1, total, vmjit_tests[ i ].name );
+		if ( VM_JitTestOne( &vmjit_tests[ i ], slot, image, saved ) )
+			passed++;
+	}
+	Z_Free( saved );
+	Z_Free( image );
+	currentVM = savedVM;
+
+	vmjit_selftest = ( passed == total ) ? 1 : -1;
+	if ( vmjit_selftest > 0 )
+		Com_Printf( "[vmjit] self-test PASS %d/%d\n", passed, total );
+	else
+		Com_Printf( S_COLOR_YELLOW "[vmjit] self-test FAIL %d/%d, every VM stays interpreted\n", passed, total );
+	return vmjit_selftest > 0;
+}
+
+// Compiles into the VM's own slot. Any failure leaves vm->compiled false, and VM_Create then
+// prepares the interpreter.
+void
+VM_Compile( vm_t *vm, vmHeader_t *header )
+{
+	vmjit_slot_t *slot = NULL;
+	int i, mode, startTime;
+
+	vm->compiled = qfalse;
+	mode = Cvar_VariableIntegerValue( "ps3_vmjit" );
+
+	for ( i = 0; i < ARRAY_LEN( vmjit_slots ); i++ ) {
+		if ( !Q_stricmp( vm->name, vmjit_slots[ i ].name ) )
+			slot = &vmjit_slots[ i ];
+	}
+	if ( !slot || !slot->size || slot->busy ) {
+		Com_Printf( S_COLOR_YELLOW "[vmjit] %s: no free code slot, using the interpreter\n",
+			vm->name );
+		return;
+	}
+
+	if ( mode >= 2 && VMJIT_CAN_RUN && !VM_JitSelfTest() ) {
+		Com_Printf( S_COLOR_YELLOW "[vmjit] %s: self-test failed, using the interpreter\n", vm->name );
+		return;
+	}
+
+	Com_Printf( "[vmjit] %s: compiling %d ops\n", vm->name, header->instructionCount );
+	startTime = Sys_Milliseconds();
+
+	if ( !PPC_Compile( vm, header, slot ) ) {
+		Com_Printf( S_COLOR_YELLOW "[vmjit] %s: %s, using the interpreter\n",
+			vm->name, vmjit_error );
+		return;
+	}
+	slot->busy = qtrue;
+
+	Com_Printf( "[vmjit] %s: %d ops -> %d B in %d ms (slot %d)\n", vm->name,
+		header->instructionCount, vm->codeLength, Sys_Milliseconds() - startTime,
+		(int)slot->size );
+
+	if ( mode < 2 || !VMJIT_CAN_RUN ) {
+		if ( mode >= 2 )
+			Com_Printf( "[vmjit] %s: VMJIT_CAN_RUN is 0, dry run only\n", vm->name );
+		VM_Destroy_Compiled( vm );
+		vm->destroy = NULL;
+		vm->compiled = qfalse;
+		vm->codeLength = header->codeLength;
 	}
 }
 
@@ -3209,11 +3598,7 @@ VM_CallCompiled( vm_t *vm, int *args )
 	/* call generated code */
 	{
 		int ( *entry )( void *, int, void * );
-#ifdef __PPC64__
 		entry = (void *)&(vm_dataAndCode->opd);
-#else
-		entry = (void *)(vm->codeBase + vm_dataAndCode->dataLength);
-#endif
 		retVal = entry( vm->codeBase, programStack, vm->dataBase );
 	}
 

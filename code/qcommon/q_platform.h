@@ -329,6 +329,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #define IOAPI_NO_64BIT
 
+// vm_powerpc.c, gated by ps3_vmjit in VM_Create
+#define HAVE_VM_COMPILED
+
 #endif
 
 //============================================================ EMSCRIPTEN ===
