@@ -115,18 +115,18 @@ static void PS3_RSX_SetRenderTarget(int index)
 
 /* Public interface */
 
-/* GCM IO buffer: 1 MB cmd + 32 MB IO (standard PSL1GHT pattern). */
-#define RSX_CB_SIZE     (1 * 1024 * 1024)   /* 1 MB command buffer */
-#define RSX_HOST_SIZE   (32 * 1024 * 1024)  /* 32 MB IO buffer     */
+/* rsxInit puts only the cmd buffer in the IO window. 8 MB is HW-proven in xash/flycast;
+ * if init fails go to 16/32 MB, never lower (rsx.h's 64 KB/1 MB defaults failed on HW). */
+#define RSX_CB_SIZE     (1 * 1024 * 1024)
+#define RSX_HOST_SIZE   (8 * 1024 * 1024)
 
 void PS3_RSX_Init(void)
 {
     ps3_log("PS3_RSX_Init: entered");
 
-    /* Allocate 1 MB-aligned IO buffer (32 MB). */
     void *host_addr = memalign(1024 * 1024, RSX_HOST_SIZE);
     if (!host_addr) {
-        ps3_log("PS3_RSX_Init: FATAL memalign failed for 32MB IO buffer");
+        ps3_log("PS3_RSX_Init: FATAL memalign failed for IO buffer");
         return;
     }
 

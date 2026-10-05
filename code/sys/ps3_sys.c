@@ -447,7 +447,7 @@ void Sys_PlatformInit(void)
 
     Sys_SetFloatEnv();
 
-    /* Real ceiling before Com_InitHunkMemory. ~145MB free is all we get (GameOS
+    /* Real ceiling before Com_InitHunkMemory. ~167MB free is all we get (GameOS
      * eats the rest) — don't raise DEF_COMHUNKMEGS unless this clears hunk+zone with room to spare. */
     free_mb = ps3_probe_free_user_mem_mb();
     snprintf(line, sizeof(line),
