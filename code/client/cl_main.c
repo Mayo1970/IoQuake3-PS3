@@ -3799,9 +3799,16 @@ void CL_Init( void ) {
 	m_filter = Cvar_Get ("m_filter", "0", CVAR_ARCHIVE);
 #endif
 
+#ifdef __PS3__
+	// DS3 right-stick speed. Must be the Cvar_Get default: a Cvar_Set in IN_Init
+	// runs after the config exec and overwrites the saved value on every launch.
+	j_pitch =        Cvar_Get ("j_pitch",        "0.011", CVAR_ARCHIVE);
+	j_yaw =          Cvar_Get ("j_yaw",          "-0.011", CVAR_ARCHIVE);
+#else
 	j_pitch =        Cvar_Get ("j_pitch",        "0.022", CVAR_ARCHIVE);
 	j_yaw =          Cvar_Get ("j_yaw",          "-0.022", CVAR_ARCHIVE);
-	j_forward =      Cvar_Get ("j_forward",      "-0.25", CVAR_ARCHIVE);
+#endif
+	j_forward =     Cvar_Get ("j_forward",      "-0.25", CVAR_ARCHIVE);
 	j_side =         Cvar_Get ("j_side",         "0.25", CVAR_ARCHIVE);
 	j_up =           Cvar_Get ("j_up",           "0", CVAR_ARCHIVE);
 

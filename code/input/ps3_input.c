@@ -746,8 +746,9 @@ void IN_Init(void *windowData)
     Cvar_Set("j_yaw_axis",   "4");
     Cvar_Set("j_forward_axis", "1");
     Cvar_Set("j_side_axis",  "0");
-    Cvar_Set("j_pitch",  "0.011");
-    Cvar_Set("j_yaw",   "-0.011");
+    /* q3_ui's "right thumb speed" slider copies this into j_pitch/j_yaw when the
+       Controls menu opens; unarchived, it came back as 0 after every launch. */
+    Cvar_Get("joy_threshold", "0.011", CVAR_ARCHIVE);
     Cvar_Set("j_forward", "-0.25");
     Cvar_Set("j_side",    "0.25");
 

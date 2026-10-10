@@ -212,6 +212,9 @@ typedef struct
 	menuaction_s		togglemenu;
 	menuradiobutton_s	joyenable;
 	menuslider_s		joythreshold;
+	float				joyspeedorig;
+	qboolean			joyspeedmoved;
+	qboolean			joyspeeddefault;
 	menuradiobutton_s	rumbleenable;
 	menuslider_s    zoomfov;
 	int					section;
@@ -279,7 +282,6 @@ static configcvar_t g_configcvars[] =
 	{"cg_autoswitch",	0,					0},
 	{"sensitivity",		0,					0},
 	{"in_joystick",		0,					0},
-	{"joy_threshold",	0,					0},
 	{"m_filter",		0,					0},
 	{"cl_freelook",		0,					0},
 	{"ps3_rumbleEnable",		0,					0},
@@ -424,6 +426,33 @@ static float Controls_GetCvarValue( char* name )
 	}
 
 	return (cvarptr->value);
+}
+
+// "right thumb speed" slider step (0-20) for a speed |j_pitch| of 0.0045-0.0145
+static float Controls_JoySpeedStep( float speed )
+{
+	if (speed < 0)
+		speed = -speed;
+	if (speed < 0.0045f)
+		speed = 0.0045f;
+	if (speed > 0.0145f)
+		speed = 0.0145f;
+
+	return (float)((int)((speed - 0.0045f) / 0.01f * 20.0f + 0.5f));
+}
+
+// j_pitch reset value; the exact string goes back, so a console value stays as typed
+static float Controls_JoySpeedDefault( void )
+{
+	char	cur[MAX_CVAR_VALUE_STRING];
+	float	def;
+
+	trap_Cvar_VariableStringBuffer( "j_pitch", cur, sizeof(cur) );
+	trap_Cvar_Reset( "j_pitch" );
+	def = trap_Cvar_VariableValue( "j_pitch" );
+	trap_Cvar_Set( "j_pitch", cur );
+
+	return def;
 }
 
 
@@ -798,7 +827,7 @@ static void Controls_GetConfig( void )
     int     i;
     bind_t* bindptr;
     char    buf[32];
-    float   f, pitch, yaw;
+    float   f;
 
     // put the bindings into a local store
     bindptr = g_bindings;
@@ -824,30 +853,12 @@ static void Controls_GetConfig( void )
     s_controls.freelook.curvalue     = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "cl_freelook" ) );
     s_controls.rumbleenable.curvalue = UI_ClampCvar( 0, 1, Controls_GetCvarValue( "ps3_rumbleEnable" ) );
 
-    /* joy_threshold: read directly from cvar string */
-    trap_Cvar_VariableStringBuffer("joy_threshold", buf, sizeof(buf));
-    f = atof(buf);
-    if (f < 0.0045f) f = 0.0045f;
-    if (f > 0.0145f) f = 0.0145f;                    /* CHANGED: max 0.0145 */
-    s_controls.joythreshold.curvalue = (float)((int)((f - 0.0045f) / 0.01f * 20.0f + 0.5f));  /* CHANGED: divide by 0.01 */
-    
-    /* Sync j_pitch/j_yaw to match joy_threshold if they differ */
-    trap_Cvar_VariableStringBuffer("j_pitch", buf, sizeof(buf));
-    pitch = (float)atof(buf);
-    if (pitch < 0) pitch = -pitch;
-    if (pitch != f) {
-        Com_sprintf(buf, sizeof(buf), "%.4f", f);
-        trap_Cvar_Set("j_pitch", buf);
-    }
-    
-    trap_Cvar_VariableStringBuffer("j_yaw", buf, sizeof(buf));
-    yaw = (float)atof(buf);
-    if (yaw < 0) yaw = -yaw;
-    if (yaw != f) {
-        Com_sprintf(buf, sizeof(buf), "-%.4f", f);
-        trap_Cvar_Set("j_yaw", buf);
-    }
-    
+    // the slider shows |j_pitch|; SetConfig writes the cvars only after a move
+    s_controls.joythreshold.curvalue = Controls_JoySpeedStep( trap_Cvar_VariableValue( "j_pitch" ) );
+    s_controls.joyspeedorig    = s_controls.joythreshold.curvalue;
+    s_controls.joyspeedmoved   = qfalse;
+    s_controls.joyspeeddefault = qfalse;
+
     /* cg_zoomfov: read directly from cvar string */
     trap_Cvar_VariableStringBuffer("cg_zoomfov", buf, sizeof(buf));
     f = atof(buf);
@@ -898,17 +909,21 @@ static void Controls_SetConfig( void )
     trap_Cvar_SetValue( "cl_freelook", s_controls.freelook.curvalue );
     trap_Cvar_SetValue( "ps3_rumbleEnable", s_controls.rumbleenable.curvalue );
 
-    /* Joystick threshold slider (0-20 steps → 0.0045-0.0145) */
-    threshold = 0.0045f + (s_controls.joythreshold.curvalue / 20.0f) * 0.01f;  /* CHANGED: multiply by 0.01 */
-    Com_sprintf(buf, sizeof(buf), "%.4f", threshold);
-    trap_Cvar_Set("joy_threshold", buf);
-    
-    /* ALSO update j_pitch and j_yaw so right-stick sensitivity matches */
-    Com_sprintf(buf, sizeof(buf), "%.4f", threshold);
-    trap_Cvar_Set("j_pitch", buf);
-    Com_sprintf(buf, sizeof(buf), "-%.4f", threshold);
-    trap_Cvar_Set("j_yaw", buf);
-    
+    if ( s_controls.joyspeeddefault ) {
+        trap_Cvar_Reset( "j_pitch" );
+        trap_Cvar_Reset( "j_yaw" );
+    }
+
+    // a console value off the slider steps stays unless the slider moved;
+    // an inverted axis keeps its sign
+    if ( s_controls.joyspeedmoved ) {
+        threshold = 0.0045f + (s_controls.joythreshold.curvalue / 20.0f) * 0.01f;
+        Com_sprintf(buf, sizeof(buf), trap_Cvar_VariableValue("j_pitch") < 0 ? "-%.4f" : "%.4f", threshold);
+        trap_Cvar_Set("j_pitch", buf);
+        Com_sprintf(buf, sizeof(buf), trap_Cvar_VariableValue("j_yaw") > 0 ? "%.4f" : "-%.4f", threshold);
+        trap_Cvar_Set("j_yaw", buf);
+    }
+
     /* Zoom FOV slider (0-20 steps → 60-40, decreasing) */
     {
         float fov = 60.0f - (s_controls.zoomfov.curvalue / 20.0f) * 20.0f;
@@ -946,22 +961,10 @@ static void Controls_SetDefaults( void )
 	s_controls.autoswitch.curvalue   = Controls_GetCvarDefault( "cg_autoswitch" );
 	s_controls.sensitivity.curvalue  = Controls_GetCvarDefault( "sensitivity" );
 	s_controls.joyenable.curvalue    = Controls_GetCvarDefault( "in_joystick" );
-	{
-    char buf[32];
-    float f;
-    trap_Cvar_VariableStringBuffer("joy_threshold", buf, sizeof(buf));
-    f = atof(buf);
-    /* Reset to get default, then restore */
-    trap_Cvar_Reset("joy_threshold");
-    trap_Cvar_VariableStringBuffer("joy_threshold", buf, sizeof(buf));
-    f = atof(buf);
-    if (f < 0.0045f) f = 0.0045f;
-    if (f > 0.0145f) f = 0.0145f;                    /* CHANGED: max 0.0145 */
-    s_controls.joythreshold.curvalue = (float)((int)((f - 0.0045f) / 0.01f * 20.0f + 0.5f));  /* CHANGED: divide by 0.01 */
-    /* Restore user's current value */
-    trap_Cvar_SetValue("joy_threshold", Controls_GetCvarValue("joy_threshold"));
-    
-  }
+	s_controls.joythreshold.curvalue = Controls_JoySpeedStep( Controls_JoySpeedDefault() );
+	s_controls.joyspeedorig    = s_controls.joythreshold.curvalue;
+	s_controls.joyspeedmoved   = qfalse;
+	s_controls.joyspeeddefault = qtrue;
   {
   	char buf[32];
     float f;
@@ -1206,10 +1209,19 @@ static void Controls_MenuEvent( void* ptr, int event )
 		case ID_ALWAYSRUN:
 		case ID_AUTOSWITCH:
 		case ID_JOYENABLE:
-		case ID_JOYTHRESHOLD:
 		case ID_ENABLERUMBLE:
 			if (event == QM_ACTIVATED)
 			{
+				s_controls.changesmade = qtrue;
+			}
+			break;
+
+		case ID_JOYTHRESHOLD:
+			if (event == QM_ACTIVATED)
+			{
+				// the buzz at a slider end is not a move
+				if (s_controls.joythreshold.curvalue != s_controls.joyspeedorig)
+					s_controls.joyspeedmoved = qtrue;
 				s_controls.changesmade = qtrue;
 			}
 			break;
