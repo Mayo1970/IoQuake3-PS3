@@ -16,6 +16,7 @@
 #include "renderercommon/tr_types.h"
 #include "renderercommon/tr_public.h"
 #include "../sys/ps3_glimp.h"
+#include "../sys/ps3_prof.h"
 #include "../gl/ps3gl.h"
 
 extern void ps3_log(const char *msg);
@@ -287,11 +288,13 @@ void PS3_RSX_BeginFrame(void)
 
     if ((uintptr_t)ps3_gcm_context <= 0x1000) return;
 
-    /* Block until a buffer is free to render into. */
+    /* Block until a buffer is free to render into. ps3_prof gpu: this and the vring fence wait. */
+    PS3_PROF_START(prof_gpu);
     PS3_RSX_WaitFlips();
 
     PS3_RSX_SetRenderTarget(ps3_current_fb);
     ps3gl_begin_frame();
+    PS3_PROF_STOP(prof_gpu, gpu);
 }
 
 void PS3_RSX_EndFrame(void)

@@ -20,12 +20,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
 #include "tr_local.h"
+#ifdef __PS3__
+#include "../sys/ps3_prof.h"
+#endif
 
-/*
-=====================
-R_PerformanceCounters
-=====================
-*/
 void R_PerformanceCounters( void ) {
 	if ( !r_speeds->integer ) {
 		// clear the counters even if we aren't printing
@@ -70,11 +68,6 @@ void R_PerformanceCounters( void ) {
 }
 
 
-/*
-====================
-R_IssueRenderCommands
-====================
-*/
 void R_IssueRenderCommands( qboolean runPerformanceCounters ) {
 	renderCommandList_t	*cmdList;
 
@@ -93,18 +86,18 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters ) {
 	// actually start the commands going
 	if ( !r_skipBackEnd->integer ) {
 		// let it start on the new batch
+#ifdef __PS3__
+		PS3_PROF_START( profBk );
+#endif
 		RB_ExecuteRenderCommands( cmdList->cmds );
+#ifdef __PS3__
+		PS3_PROF_STOP( profBk, bk );
+#endif
 	}
 }
 
 
-/*
-====================
-R_IssuePendingRenderCommands
-
-Issue any pending commands and wait for them to complete.
-====================
-*/
+// Issue any pending commands and wait for them to complete.
 void R_IssuePendingRenderCommands( void ) {
 	if ( !tr.registered ) {
 		return;
@@ -112,13 +105,7 @@ void R_IssuePendingRenderCommands( void ) {
 	R_IssueRenderCommands( qfalse );
 }
 
-/*
-============
-R_GetCommandBufferReserved
-
-make sure there is enough command space
-============
-*/
+// make sure there is enough command space
 void *R_GetCommandBufferReserved( int bytes, int reservedBytes ) {
 	renderCommandList_t	*cmdList;
 
@@ -140,24 +127,12 @@ void *R_GetCommandBufferReserved( int bytes, int reservedBytes ) {
 	return cmdList->cmds + cmdList->used - bytes;
 }
 
-/*
-=============
-R_GetCommandBuffer
-
-returns NULL if there is not enough space for important commands
-=============
-*/
+// returns NULL if there is not enough space for important commands
 void *R_GetCommandBuffer( int bytes ) {
 	return R_GetCommandBufferReserved( bytes, PAD( sizeof( swapBuffersCommand_t ), sizeof(void *) ) );
 }
 
 
-/*
-=============
-R_AddDrawSurfCmd
-
-=============
-*/
 void	R_AddDrawSurfCmd( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	drawSurfsCommand_t	*cmd;
 
@@ -175,13 +150,7 @@ void	R_AddDrawSurfCmd( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 }
 
 
-/*
-=============
-RE_SetColor
-
-Passing NULL will set the color to white
-=============
-*/
+// Passing NULL will set the color to white
 void	RE_SetColor( const float *rgba ) {
 	setColorCommand_t	*cmd;
 
@@ -206,11 +175,6 @@ void	RE_SetColor( const float *rgba ) {
 }
 
 
-/*
-=============
-RE_StretchPic
-=============
-*/
 void RE_StretchPic ( float x, float y, float w, float h, 
 					  float s1, float t1, float s2, float t2, qhandle_t hShader ) {
 	stretchPicCommand_t	*cmd;
@@ -278,14 +242,7 @@ void R_SetColorMode(GLboolean *rgba, stereoFrame_t stereoFrame, int colormode)
 }
 
 
-/*
-====================
-RE_BeginFrame
-
-If running in stereo, RE_BeginFrame will be called twice
-for each RE_EndFrame
-====================
-*/
+// If running in stereo, RE_BeginFrame will be called twice for each RE_EndFrame
 void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 	drawBufferCommand_t	*cmd = NULL;
 	colorMaskCommand_t *colcmd = NULL;
@@ -298,9 +255,7 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 	tr.frameCount++;
 	tr.frameSceneNum = 0;
 
-	//
 	// do overdraw measurement
-	//
 	if ( r_measureOverdraw->integer )
 	{
 		if ( glConfig.stencilBits < 4 )
@@ -336,18 +291,14 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 		r_measureOverdraw->modified = qfalse;
 	}
 
-	//
 	// texturemode stuff
-	//
 	if ( r_textureMode->modified ) {
 		R_IssuePendingRenderCommands();
 		GL_TextureMode( r_textureMode->string );
 		r_textureMode->modified = qfalse;
 	}
 
-	//
 	// gamma stuff
-	//
 	if ( r_gamma->modified ) {
 		r_gamma->modified = qfalse;
 
@@ -453,13 +404,7 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 }
 
 
-/*
-=============
-RE_EndFrame
-
-Returns the number of msec spent in the back end
-=============
-*/
+// Returns the number of msec spent in the back end
 void RE_EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	swapBuffersCommand_t	*cmd;
 
@@ -486,11 +431,6 @@ void RE_EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	backEnd.pc.msec = 0;
 }
 
-/*
-=============
-RE_TakeVideoFrame
-=============
-*/
 void RE_TakeVideoFrame( int width, int height,
 		byte *captureBuffer, byte *encodeBuffer, qboolean motionJpeg )
 {

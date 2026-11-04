@@ -64,7 +64,6 @@ IOQ3_SRCS := \
   code/qcommon/unzip.c \
   code/qcommon/vm.c \
   code/qcommon/vm_interpreted.c \
-  code/qcommon/vm_powerpc.c \
   code/client/cl_cgame.c \
   code/client/cl_cin.c \
   code/client/cl_console.c \
@@ -288,28 +287,33 @@ CFLAGS_VMX := $(filter-out -mno-altivec,$(CFLAGS)) -maltivec
 
 CXXFLAGS := $(CFLAGS)
 
-#--- QVM JIT (vm_powerpc.c, cvar ps3_vmjit): .text code slot per VM in KB, "ui cgame qagame" ----
-# 0 = no slot, that VM stays interpreted. The slots are loaded EBOOT image: they come out of the free pool.
+#--- QVM JIT (vm_powerpc.c, cvar ps3_vmjit): not built, VMJIT=1 brings it back. .text slot per VM in KB, ----
+# "ui cgame qagame"; 0 = no slot, that VM stays interpreted. The slots are loaded EBOOT image: they come out of the free pool.
+VMJIT ?= 0
+ifeq ($(VMJIT),1)
 ifeq ($(FLAVOR),ta)
   VMJIT_KB := 768 1280 0
-  VMJIT_DEFAULT := 2
+  VMJIT_DEFAULT := 0
 else ifeq ($(FLAVOR),oa)
   VMJIT_KB := 768 1024 0
-  VMJIT_DEFAULT := 2
+  VMJIT_DEFAULT := 0
 else ifeq ($(FLAVOR),classic)
   VMJIT_KB := 768 768 1024
-  VMJIT_DEFAULT := 2
+  VMJIT_DEFAULT := 0
 else ifeq ($(FLAVOR),ef)
   VMJIT_KB := 1024 1024 1280
-  VMJIT_DEFAULT := 2
+  VMJIT_DEFAULT := 0
 else
   VMJIT_KB := 768 768 0
-  VMJIT_DEFAULT := 2
+  VMJIT_DEFAULT := 0
 endif
 VMJIT_CFLAGS := -DVMJIT_UI_KB=$(word 1,$(VMJIT_KB)) -DVMJIT_CGAME_KB=$(word 2,$(VMJIT_KB)) \
   -DVMJIT_GAME_KB=$(word 3,$(VMJIT_KB))
 # ps3_vmjit's default (vm.c) per flavor; 0 puts that flavor back on the interpreter
-CFLAGS += -DPS3_VMJIT_DEFAULT=$(VMJIT_DEFAULT)
+CFLAGS     += -DPS3_VMJIT -DPS3_VMJIT_DEFAULT=$(VMJIT_DEFAULT)
+CFLAGS_VMX += -DPS3_VMJIT
+IOQ3_SRCS  += code/qcommon/vm_powerpc.c
+endif
 
 #--- Linked-in native qagame (vm_game 0): Q3/TA build code/game (TA -DMISSIONPACK), OA its code/oa/.
 # Not EF (no Holomatch game source; ioEF ships Q3's) or Classic (proto-43 matches neither).
@@ -415,6 +419,86 @@ GAME_LDS    := code/sys/ps3_qagame.ld
 GAME_NATIVE_OBJ := $(BUILD)/qagame_native.o
 endif
 
+#--- Linked-in native cgame (vm_cgame 0): same flavors and gamecode as the native qagame. VM_Create runs it
+# only for a known retail cgame pak checksum (vm.c), on pure servers too; any other cgame.qvm stays a QVM.
+ifneq ($(filter $(FLAVOR),q3 ta oa),)
+  NATIVE_CGAME ?= 1
+endif
+
+ifeq ($(NATIVE_CGAME),1)
+ifeq ($(FLAVOR),oa)
+# oa-0.8.8's Q3CGOBJ_ + cg_syscalls.o (no bg_lib.c, as for the game)
+CGAME_SRCS := \
+  code/oa/code/cgame/cg_main.c \
+  code/oa/code/cgame/cg_syscalls.c \
+  code/oa/code/game/bg_misc.c \
+  code/oa/code/game/bg_pmove.c \
+  code/oa/code/game/bg_slidemove.c \
+  code/oa/code/cgame/cg_challenges.c \
+  code/oa/code/cgame/cg_consolecmds.c \
+  code/oa/code/cgame/cg_draw.c \
+  code/oa/code/cgame/cg_drawtools.c \
+  code/oa/code/cgame/cg_effects.c \
+  code/oa/code/cgame/cg_ents.c \
+  code/oa/code/cgame/cg_event.c \
+  code/oa/code/cgame/cg_info.c \
+  code/oa/code/cgame/cg_localents.c \
+  code/oa/code/cgame/cg_marks.c \
+  code/oa/code/cgame/cg_players.c \
+  code/oa/code/cgame/cg_playerstate.c \
+  code/oa/code/cgame/cg_predict.c \
+  code/oa/code/cgame/cg_scoreboard.c \
+  code/oa/code/cgame/cg_servercmds.c \
+  code/oa/code/cgame/cg_snapshot.c \
+  code/oa/code/cgame/cg_unlagged.c \
+  code/oa/code/cgame/cg_view.c \
+  code/oa/code/cgame/cg_weapons.c \
+  code/oa/code/qcommon/q_math.c \
+  code/oa/code/qcommon/q_shared.c
+else
+CGAME_SRCS := \
+  code/cgame/cg_main.c \
+  code/cgame/cg_syscalls.c \
+  code/game/bg_misc.c \
+  code/game/bg_pmove.c \
+  code/game/bg_slidemove.c \
+  code/cgame/cg_consolecmds.c \
+  code/cgame/cg_draw.c \
+  code/cgame/cg_drawtools.c \
+  code/cgame/cg_effects.c \
+  code/cgame/cg_ents.c \
+  code/cgame/cg_event.c \
+  code/cgame/cg_info.c \
+  code/cgame/cg_localents.c \
+  code/cgame/cg_marks.c \
+  code/cgame/cg_particles.c \
+  code/cgame/cg_players.c \
+  code/cgame/cg_playerstate.c \
+  code/cgame/cg_predict.c \
+  code/cgame/cg_scoreboard.c \
+  code/cgame/cg_servercmds.c \
+  code/cgame/cg_snapshot.c \
+  code/cgame/cg_view.c \
+  code/cgame/cg_weapons.c \
+  code/qcommon/q_math.c \
+  code/qcommon/q_shared.c
+# TA's cgame draws its HUD and scoreboard through the .menu code, as the SDK builds missionpack/vm/cgame.qvm
+ifeq ($(FLAVOR),ta)
+CGAME_SRCS += code/cgame/cg_newdraw.c code/ui/ui_shared.c
+endif
+endif
+
+CFLAGS     += -DPS3_NATIVE_CGAME
+CFLAGS_VMX += -DPS3_NATIVE_CGAME
+CGAME_CFLAGS := $(CFLAGS) -DCGAME -fno-common -mminimal-toc
+ifeq ($(FLAVOR),ta)
+CGAME_CFLAGS += -DMISSIONPACK
+endif
+CGAME_OBJS   := $(patsubst %.c,$(BUILD)/cgame/%.o,$(CGAME_SRCS))
+CGAME_LDS    := code/sys/ps3_cgame.ld
+CGAME_NATIVE_OBJ := $(BUILD)/cgame_native.o
+endif
+
 # --no-multi-toc: small-model only, so a .got over 64 KB makes ld split the TOC with r2off stubs, which
 # hang the PS3 at boot. Fail the link instead; if it fires, shrink TOC use (-mminimal-toc), keep the flag.
 LDFLAGS := \
@@ -446,7 +530,7 @@ prebuild:
 	@test -f $(ZLIB_DIR)/zconf.h && cp $(ZLIB_DIR)/zconf.h $(ZCONF_H_COPY) || true
 
 #--- Link -------------------------------------------------------------------------
-$(BUILD)/$(TARGET).elf: prebuild $(ASM_OBJS) $(OBJS) $(GAME_NATIVE_OBJ)
+$(BUILD)/$(TARGET).elf: prebuild $(ASM_OBJS) $(OBJS) $(GAME_NATIVE_OBJ) $(CGAME_NATIVE_OBJ)
 	@echo "Linking $@"
 	$(LD) $(CFLAGS) $(LDFLAGS) $(filter %.o,$^) $(LIBS) -o $@
 
@@ -467,6 +551,24 @@ $(GAME_NATIVE_OBJ): $(GAME_OBJS) $(GAME_LDS)
 	  -G __qagame_data_start -G __qagame_data_end \
 	  -G __qagame_bss_start -G __qagame_bss_end \
 	  $(BUILD)/qagame_renamed.o $@
+endif
+
+ifeq ($(NATIVE_CGAME),1)
+$(BUILD)/cgame/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "CC $< [cgame]"
+	@$(CC) $(CGAME_CFLAGS) -c $< -o $@
+
+# Same partial link and symbol hiding as the qagame blob
+$(CGAME_NATIVE_OBJ): $(CGAME_OBJS) $(CGAME_LDS)
+	@echo "LD $@ [cgame]"
+	@$(PREFIX)ld -r -T $(CGAME_LDS) $(CGAME_OBJS) -o $(BUILD)/cgame_partial.o
+	@$(OBJCOPY) --redefine-sym dllEntry=cgame_dllEntry --redefine-sym vmMain=cgame_vmMain \
+	  $(BUILD)/cgame_partial.o $(BUILD)/cgame_renamed.o
+	@$(OBJCOPY) -G cgame_dllEntry -G cgame_vmMain \
+	  -G __cgame_data_start -G __cgame_data_end \
+	  -G __cgame_bss_start -G __cgame_bss_end \
+	  $(BUILD)/cgame_renamed.o $@
 endif
 
 #--- Assembly files: must NOT use $(CFLAGS) ---------------------------------------

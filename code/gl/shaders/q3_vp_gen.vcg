@@ -1,0 +1,127 @@
+/* q3_vp_gen.vcg -- ps3_vprog 1 VP (VERTEX_OFFLOAD_TODO.md V1-V5): deforms, colors, texcoords from per-draw uniforms;
+ * identity uniforms match q3_vp. Built with cgc -ifcvt none: each feature is a branch, a draw pays only for what it uses. */
+
+/* Q3's waveform tables as periodic functions of p (period 1): table[(int)(p * 1024) & 1023] */
+float waveval(float4 b, float4 c, float p)
+{
+    float f   = frac(p);
+    float sq  = 1.0 - 2.0 * step(0.5, f);
+    float tri = sq * (1.0 - abs(2.0 * frac(2.0 * f) - 1.0));
+    return b.y * sin(6.2831853 * p) + b.z * sq + b.w * tri + c.x * f + c.y * (1.0 - f);
+}
+
+/* deformVertexes wave / bulge / move: pos += n * (A + B * wave(p)) + M, p = (x + y + z) * spread + s * stw + c */
+float3 deform(float3 pos, float3 n, float s, float4 a, float4 b, float4 c, float4 m)
+{
+    float p = (pos.x + pos.y + pos.z) * a.z + s * a.w + b.x;
+    return pos + n * (a.x + a.y * waveval(b, c, p)) + m.xyz;
+}
+
+/* RB_CalcEnvironmentTexCoords; the max() keeps a vertex on the eye from turning into NaN */
+float2 envmap(float3 pos, float3 n, float3 eye)
+{
+    float3 v = eye - pos;
+    v *= rsqrt(max(dot(v, v), 1e-20));
+    float3 r = n * (2.0 * dot(n, v)) - v;
+    return float2(0.5 + r.y * 0.5, 0.5 - r.z * 0.5);
+}
+
+/* RB_CalcTurbulentTexCoords offset, through the 2x2 of the tcMods after the turb */
+float2 turbulent(float4 b, float4 turb, float4 turbm)
+{
+    float2 d = turb.x * sin(6.2831853 * (float2(b.x + b.z, b.y) * (1.0 / 1024.0) + turb.y));
+    return float2(dot(turbm.xy, d), dot(turbm.zw, d));
+}
+
+void main(
+    float4 position : ATTR0,
+    float3 normal   : ATTR2,
+    float4 color    : ATTR3,
+    float2 st       : ATTR8,
+    float2 lm       : ATTR9,
+
+    uniform float4x4 mvp,
+    uniform float4   cmul,
+    uniform float4   cadd,
+    /* per bundle, rows: s over (st, lm), s over (xyz, 1), t over (st, lm), t over (xyz, 1) */
+    uniform float4x4 tm0,
+    uniform float4x4 tm1,
+    uniform float4   tsel,      /* x, y: bundle 0 / 1 reads env in lm's place; z, w: bundle 0 / 1 has a turb */
+    uniform float4   turb0,     /* amp, frac(now) */
+    uniform float4   turb1,
+    uniform float4   turbm0,    /* s += x ds + y dt, t += z ds + w dt */
+    uniform float4   turbm1,
+    uniform float4   csel,      /* x lightingDiffuse rgb, y lightingSpecular alpha, z portal alpha, w any */
+    uniform float4   lamb,      /* ambientLight / 255 */
+    uniform float4   lambi,     /* ambientLightInt / 255, the unlit side */
+    uniform float4   ldir,      /* entity lightDir */
+    uniform float4   ldirc,     /* directedLight / 255 */
+    uniform float4   vorg,      /* backEnd.or.viewOrigin */
+    uniform float4   porg,      /* viewParms.or.origin, w = 1 / portalRange */
+    /* deform slots: a = (A, B, spread, stw), b = (c, sin, square, triangle), c = (saw, invsaw, on), m = M */
+    uniform float4   dfa0, uniform float4 dfb0, uniform float4 dfc0, uniform float4 dfm0,
+    uniform float4   dfa1, uniform float4 dfb1, uniform float4 dfc1, uniform float4 dfm1,
+    uniform float4   dfa2, uniform float4 dfb2, uniform float4 dfc2, uniform float4 dfm2,
+
+    out float4 oPosition : POSITION,
+    out float4 oColor    : COLOR0,
+    out float2 oTc0      : TEXCOORD0,
+    out float2 oTc1      : TEXCOORD1
+)
+{
+    float3 pos = position.xyz;
+
+    if (dfc0.z > 0.0) {
+        pos = deform(pos, normal, st.x, dfa0, dfb0, dfc0, dfm0);
+        if (dfc1.z > 0.0) {
+            pos = deform(pos, normal, st.x, dfa1, dfb1, dfc1, dfm1);
+            if (dfc2.z > 0.0)
+                pos = deform(pos, normal, st.x, dfa2, dfb2, dfc2, dfm2);
+        }
+    }
+
+    float4 b = float4(pos, 1.0);
+    oPosition = mul(mvp, b);
+
+    float4 c = color * cmul + cadd;
+    if (csel.w > 0.0) {
+        if (csel.x > 0.0) {
+            /* RB_CalcDiffuseColor: the unlit side takes the byte-packed ambient */
+            float inc = dot(normal, ldir.xyz);
+            float3 lit = saturate(lamb.rgb + inc * ldirc.rgb);
+            c.rgb += lambi.rgb + (lit - lambi.rgb) * (float)(inc > 0.0);
+        }
+        if (csel.y > 0.0) {
+            /* RB_CalcSpecularAlpha, with its fixed lightOrigin */
+            float3 l = float3(-960.0, 1980.0, 96.0) - pos;
+            l *= rsqrt(max(dot(l, l), 1e-20));
+            float3 r = normal * (2.0 * dot(normal, l)) - l;
+            float3 v = vorg.xyz - pos;
+            float s = max(dot(r, v) * rsqrt(max(dot(v, v), 1e-20)), 0.0);
+            s *= s;
+            c.a += min(s * s, 1.0);
+        }
+        if (csel.z > 0.0) {
+            float3 d = pos - porg.xyz;
+            c.a += saturate(sqrt(dot(d, d)) * porg.w);
+        }
+    }
+    oColor = c;
+
+    float4 a0 = float4(st, lm), a1 = a0;
+    float2 t0, t1;
+    if (dot(tsel, float4(1.0, 1.0, 1.0, 1.0)) > 0.0) {
+        if (tsel.x > 0.0)
+            a0.zw = envmap(pos, normal, vorg.xyz);
+        if (tsel.y > 0.0)
+            a1.zw = envmap(pos, normal, vorg.xyz);
+    }
+    t0 = float2(dot(tm0[0], a0) + dot(tm0[1], b), dot(tm0[2], a0) + dot(tm0[3], b));
+    t1 = float2(dot(tm1[0], a1) + dot(tm1[1], b), dot(tm1[2], a1) + dot(tm1[3], b));
+    if (tsel.z > 0.0)
+        t0 += turbulent(b, turb0, turbm0);
+    if (tsel.w > 0.0)
+        t1 += turbulent(b, turb1, turbm1);
+    oTc0 = t0;
+    oTc1 = t1;
+}

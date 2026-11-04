@@ -1,6 +1,7 @@
 /* GL-to-RSX layer: vertex array / glDrawElements path */
 
 #include "ps3gl.h"
+#include "../sys/ps3_prof.h"
 #include <stdio.h>
 
 extern void ps3gl_inc_draw_count(void);
@@ -10,9 +11,8 @@ extern const float *ps3gl_get_mvp(void);
 extern const void *ps3_rsx_io_base;
 extern size_t      ps3_rsx_io_size;
 
-/* gcmAddressToOffset is undefined for main memory outside the RSX IO window: it
- * can report success with a bogus offset, which wedges the RSX vertex fetch.
- * Q3's tess arrays are plain .bss, so prove the span is mapped before asking. */
+/* gcmAddressToOffset can report success with a bogus offset outside the RSX IO window, which wedges
+ * the RSX vertex fetch. Q3's tess arrays are plain .bss, so prove the span is mapped before asking. */
 static int ps3gl_io_mapped(const void *ptr, size_t len)
 {
     uintptr_t base = (uintptr_t)ps3_rsx_io_base;
@@ -74,6 +74,7 @@ void ps3gl_LockArraysEXT(GLint first, GLsizei count)
     ps3gl.va_locked     = 1;
     ps3gl.va_lock_first = first;
     ps3gl.va_lock_count = count;
+    ps3gl.va_lock_serial++;
 }
 
 void ps3gl_UnlockArraysEXT(void)
@@ -91,15 +92,24 @@ void ps3gl_DrawArrays(GLenum mode, GLint first, GLsizei count)
 void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
                         const void *indices)
 {
+    /* ps3_vprog 1: V1 params belong to this draw only, even if it drops out below */
+    const ps3gl_vparams_t *vpp = NULL;
+    if (ps3gl.vp_pending) {
+        ps3gl.vp_pending = 0;
+        vpp = &ps3gl.vp_next;
+    }
+
     if (count <= 0) return;
     if (!ps3gl.va_vertex.ptr) return;
     ps3gl_inc_draw_count();
+    PS3_PROF_COUNT(draws, 1);
 
     /* Apply all deferred state */
     ps3gl_apply_states();
     ps3gl_apply_matrices();
     ps3gl_apply_textures();
     ps3gl_apply_shader();
+    ps3gl_apply_vparams(vpp);
 
     gcmContextData *ctx = ps3gl_get_ctx();
     if (!ctx) return;
@@ -133,6 +143,15 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
     const uint8_t *cp  = (const uint8_t *)ps3gl.va_color.ptr;
     int cs = ps3gl.va_color.stride;
     if (cs == 0) cs = 4;
+
+    /* V1: the raw tess arrays replace the svars ones the renderer bound; q3_vp_gen does the math */
+    if (vpp) {
+        tp0 = (const uint8_t *)vpp->st;
+        tp1 = (const uint8_t *)vpp->lm;
+        ts0 = ts1 = vpp->tc_stride;
+        cp  = (const uint8_t *)vpp->color;
+        cs  = 4;
+    }
 
     const int has_z = (ps3gl.va_vertex.size >= 3);
 
@@ -176,47 +195,79 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
                                          GCM_VERTEX_DATA_TYPE_U8,
                                          GCM_LOCATION_CELL);
         } else {
-            /* Fallback: interleave-copy into RSX ring buffer. */
-            uint32_t vb_offset;
-            ps3gl_vertex_t *verts = ps3gl_vring_alloc(num_verts, &vb_offset);
-            if (!verts) return;
+            /* Fallback: interleave-copy into RSX ring buffer. V2: every V1 stage of a surface reads the
+             * same raw arrays, so reuse the copy; it sits in this frame's segment, under its fence. */
+            uint32_t vb_offset, n_offset = 0;
+            ps3gl_vcopy_t *vc = &ps3gl.vcopy;
+            const int v1_locked = vpp && ps3gl.va_locked;
+            const void *np = vpp ? vpp->normal : NULL;
 
-            const uint32_t imm_c = ps3gl.imm.color;
-
-            if (tp0 && tp1 && cp) {
-                for (int i = 0; i < num_verts; i++) {
-                    const float   *pos = (const float *)(vp  + i * vs);
-                    const float   *tc0 = (const float *)(tp0 + i * ts0);
-                    const float   *tc1 = (const float *)(tp1 + i * ts1);
-                    const uint8_t *c   = cp + i * cs;
-                    ps3gl_vertex_t *v  = &verts[i];
-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
-                    v->u0 = tc0[0]; v->v0 = tc0[1];
-                    v->u1 = tc1[0]; v->v1 = tc1[1];
-                    v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
-                }
-            } else if (tp0 && cp) {
-                for (int i = 0; i < num_verts; i++) {
-                    const float   *pos = (const float *)(vp  + i * vs);
-                    const float   *tc0 = (const float *)(tp0 + i * ts0);
-                    const uint8_t *c   = cp + i * cs;
-                    ps3gl_vertex_t *v  = &verts[i];
-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
-                    v->u0 = tc0[0]; v->v0 = tc0[1];
-                    v->u1 = 0.0f;  v->v1 = 0.0f;
-                    v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
-                }
+            if (v1_locked && vc->valid && vc->serial == ps3gl.va_lock_serial &&
+                vc->vp == vp && vc->vs == vs && vc->vsize == ps3gl.va_vertex.size &&
+                vc->tp0 == tp0 && vc->tp1 == tp1 && vc->cp == cp && vc->ts == ts0 &&
+                vc->np == np && vc->num_verts == num_verts) {
+                vb_offset = vc->offset;
+                n_offset = vc->n_offset;
             } else {
-                for (int i = 0; i < num_verts; i++) {
-                    const float   *pos = (const float *)(vp + i * vs);
-                    ps3gl_vertex_t *v  = &verts[i];
-                    v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
-                    if (tp0) { const float *tc = (const float *)(tp0 + i * ts0); v->u0 = tc[0]; v->v0 = tc[1]; }
-                    else     { v->u0 = 0.0f; v->v0 = 0.0f; }
-                    if (tp1) { const float *tc = (const float *)(tp1 + i * ts1); v->u1 = tc[0]; v->v1 = tc[1]; }
-                    else     { v->u1 = 0.0f; v->v1 = 0.0f; }
-                    if (cp)  { const uint8_t *c = cp + i * cs; v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]); }
-                    else     { v->color = imm_c; }
+                PS3_PROF_START(prof_cp);
+                ps3gl_vertex_t *verts = ps3gl_vring_alloc(num_verts, &vb_offset);
+                if (!verts) return;
+
+                const uint32_t imm_c = ps3gl.imm.color;
+
+                if (tp0 && tp1 && cp) {
+                    for (int i = 0; i < num_verts; i++) {
+                        const float   *pos = (const float *)(vp  + i * vs);
+                        const float   *tc0 = (const float *)(tp0 + i * ts0);
+                        const float   *tc1 = (const float *)(tp1 + i * ts1);
+                        const uint8_t *c   = cp + i * cs;
+                        ps3gl_vertex_t *v  = &verts[i];
+                        v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+                        v->u0 = tc0[0]; v->v0 = tc0[1];
+                        v->u1 = tc1[0]; v->v1 = tc1[1];
+                        v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
+                    }
+                } else if (tp0 && cp) {
+                    for (int i = 0; i < num_verts; i++) {
+                        const float   *pos = (const float *)(vp  + i * vs);
+                        const float   *tc0 = (const float *)(tp0 + i * ts0);
+                        const uint8_t *c   = cp + i * cs;
+                        ps3gl_vertex_t *v  = &verts[i];
+                        v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+                        v->u0 = tc0[0]; v->v0 = tc0[1];
+                        v->u1 = 0.0f;  v->v1 = 0.0f;
+                        v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]);
+                    }
+                } else {
+                    for (int i = 0; i < num_verts; i++) {
+                        const float   *pos = (const float *)(vp + i * vs);
+                        ps3gl_vertex_t *v  = &verts[i];
+                        v->x = pos[0]; v->y = pos[1]; v->z = has_z ? pos[2] : 0.0f; v->w = 1.0f;
+                        if (tp0) { const float *tc = (const float *)(tp0 + i * ts0); v->u0 = tc[0]; v->v0 = tc[1]; }
+                        else     { v->u0 = 0.0f; v->v0 = 0.0f; }
+                        if (tp1) { const float *tc = (const float *)(tp1 + i * ts1); v->u1 = tc[0]; v->v1 = tc[1]; }
+                        else     { v->u1 = 0.0f; v->v1 = 0.0f; }
+                        if (cp)  { const uint8_t *c = cp + i * cs; v->color = ps3gl_pack_color_ub(c[0], c[1], c[2], c[3]); }
+                        else     { v->color = imm_c; }
+                    }
+                }
+                /* tess.normal (vec4, stride 16) as its own 16-byte aligned carve, one sequential pass */
+                if (np) {
+                    void *nd = ps3gl_vring_alloc_bytes((uint32_t)num_verts * 16, &n_offset);
+                    if (!nd) return;
+                    memcpy(nd, np, (size_t)num_verts * 16);
+                }
+                PS3_PROF_STOP(prof_cp, cp);
+                PS3_PROF_COUNT(verts, num_verts);
+
+                if (v1_locked) {
+                    vc->valid = 1;
+                    vc->serial = ps3gl.va_lock_serial;
+                    vc->vp = vp;   vc->vs = vs;   vc->vsize = ps3gl.va_vertex.size;
+                    vc->tp0 = tp0; vc->tp1 = tp1; vc->cp = cp; vc->ts = ts0; vc->np = np;
+                    vc->num_verts = num_verts;
+                    vc->offset = vb_offset;
+                    vc->n_offset = n_offset;
                 }
             }
 
@@ -240,6 +291,16 @@ void ps3gl_DrawElements(GLenum mode, GLsizei count, GLenum type,
                                      PS3GL_VERTEX_SIZE, 4,
                                      GCM_VERTEX_DATA_TYPE_U8,
                                      GCM_LOCATION_RSX);
+            /* q3_vp_gen fetches ATTR2 on every draw; without normals it reads the positions, unused */
+            if (ps3gl.vpgen.vp && ps3gl.active_vp == ps3gl.vpgen.vp) {
+                if (np)
+                    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_NORMAL, 0, n_offset, 16, 3,
+                                             GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
+                else
+                    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_NORMAL, 0,
+                                             vb_offset + PS3GL_VATTR_POS_OFF, PS3GL_VERTEX_SIZE, 3,
+                                             GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
+            }
         }
     }
 

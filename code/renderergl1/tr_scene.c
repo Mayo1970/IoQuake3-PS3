@@ -21,6 +21,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "tr_local.h"
+#ifdef __PS3__
+#include "../sys/ps3_prof.h"
+#endif
 
 int			r_firstSceneDrawSurf;
 
@@ -36,12 +39,6 @@ int			r_firstScenePoly;
 int			r_numpolyverts;
 
 
-/*
-====================
-R_InitNextFrame
-
-====================
-*/
 void R_InitNextFrame( void ) {
 	backEndData->commands.used = 0;
 
@@ -60,33 +57,15 @@ void R_InitNextFrame( void ) {
 }
 
 
-/*
-====================
-RE_ClearScene
-
-====================
-*/
 void RE_ClearScene( void ) {
 	r_firstSceneDlight = r_numdlights;
 	r_firstSceneEntity = r_numentities;
 	r_firstScenePoly = r_numpolys;
 }
 
-/*
-===========================================================================
+// DISCRETE POLYS
 
-DISCRETE POLYS
-
-===========================================================================
-*/
-
-/*
-=====================
-R_AddPolygonSurfaces
-
-Adds all the scene's polys into this view's drawsurf list
-=====================
-*/
+// Adds all the scene's polys into this view's drawsurf list
 void R_AddPolygonSurfaces( void ) {
 	int			i;
 	shader_t	*sh;
@@ -101,12 +80,6 @@ void R_AddPolygonSurfaces( void ) {
 	}
 }
 
-/*
-=====================
-RE_AddPolyToScene
-
-=====================
-*/
 void RE_AddPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts, int numPolys ) {
 	srfPoly_t	*poly;
 	int			i, j;
@@ -125,12 +98,8 @@ void RE_AddPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts
 
 	for ( j = 0; j < numPolys; j++ ) {
 		if ( r_numpolyverts + numVerts > max_polyverts || r_numpolys >= max_polys ) {
-      /*
-      NOTE TTimo this was initially a PRINT_WARNING
-      but it happens a lot with high fighting scenes and particles
-      since we don't plan on changing the const and making for room for those effects
-      simply cut this message to developer only
-      */
+      // NOTE TTimo: was a PRINT_WARNING, but heavy fights and particles hit it a lot and the
+      // limits stay as they are, so it is developer only
 			ri.Printf( PRINT_DEVELOPER, "WARNING: RE_AddPolyToScene: r_max_polys or r_max_polyverts reached\n");
 			return;
 		}
@@ -190,12 +159,6 @@ void RE_AddPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts
 //=================================================================================
 
 
-/*
-=====================
-RE_AddRefEntityToScene
-
-=====================
-*/
 void RE_AddRefEntityToScene( const refEntity_t *ent ) {
 	if ( !tr.registered ) {
 		return;
@@ -223,12 +186,6 @@ void RE_AddRefEntityToScene( const refEntity_t *ent ) {
 }
 
 
-/*
-=====================
-RE_AddDynamicLightToScene
-
-=====================
-*/
 void RE_AddDynamicLightToScene( const vec3_t org, float intensity, float r, float g, float b, int additive ) {
 	dlight_t	*dl;
 
@@ -254,37 +211,16 @@ void RE_AddDynamicLightToScene( const vec3_t org, float intensity, float r, floa
 	dl->additive = additive;
 }
 
-/*
-=====================
-RE_AddLightToScene
-
-=====================
-*/
 void RE_AddLightToScene( const vec3_t org, float intensity, float r, float g, float b ) {
 	RE_AddDynamicLightToScene( org, intensity, r, g, b, qfalse );
 }
 
-/*
-=====================
-RE_AddAdditiveLightToScene
-
-=====================
-*/
 void RE_AddAdditiveLightToScene( const vec3_t org, float intensity, float r, float g, float b ) {
 	RE_AddDynamicLightToScene( org, intensity, r, g, b, qtrue );
 }
 
-/*
-@@@@@@@@@@@@@@@@@@@@@
-RE_RenderScene
-
-Draw a 3D view into a part of the window, then return
-to 2D drawing.
-
-Rendering a scene may require multiple views to be rendered
-to handle mirrors,
-@@@@@@@@@@@@@@@@@@@@@
-*/
+// Draw a 3D view into a part of the window, then return to 2D drawing. Rendering a scene may
+// require multiple views to be rendered to handle mirrors.
 void RE_RenderScene( const refdef_t *fd ) {
 	viewParms_t		parms;
 	int				startTime;
@@ -368,20 +304,13 @@ void RE_RenderScene( const refdef_t *fd ) {
 		tr.refdef.num_dlights = 0;
 	}
 
-	// a single frame may have multiple scenes draw inside it --
-	// a 3D game view, 3D status bar renderings, 3D menus, etc.
-	// They need to be distinguished by the light flare code, because
-	// the visibility state for a given surface may be different in
-	// each scene / view.
+	// a frame may draw several scenes (game view, 3D status bar, 3D menus); the flare code tells
+	// them apart, because a surface's visibility can differ per scene / view
 	tr.frameSceneNum++;
 	tr.sceneCount++;
 
-	// setup view parms for the initial view
-	//
-	// set up viewport
-	// The refdef takes 0-at-the-top y coordinates, so
-	// convert to GL's 0-at-the-bottom space
-	//
+	// view parms and viewport for the initial view; the refdef's 0-at-the-top y becomes GL's
+	// 0-at-the-bottom
 	Com_Memset( &parms, 0, sizeof( parms ) );
 	parms.viewportX = tr.refdef.x;
 	parms.viewportY = glConfig.vidHeight - ( tr.refdef.y + tr.refdef.height );
@@ -401,7 +330,14 @@ void RE_RenderScene( const refdef_t *fd ) {
 
 	VectorCopy( fd->vieworg, parms.pvsOrigin );
 
+#ifdef __PS3__
+	// ps3_prof rf: outermost view only, portal views recurse inside it
+	PS3_PROF_START( profRf );
+#endif
 	R_RenderView( &parms );
+#ifdef __PS3__
+	PS3_PROF_STOP( profRf, rf );
+#endif
 
 	// the next scene rendered in this frame will tack on after this one
 	r_firstSceneDrawSurf = tr.refdef.numDrawSurfs;

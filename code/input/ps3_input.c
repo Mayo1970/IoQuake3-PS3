@@ -411,12 +411,20 @@ static void Mouse_Frame(qboolean syncOnly)
         Com_QueueEvent(0, SE_MOUSE, dx, dy, 0, NULL);
 }
 
+/* Read by cl_input.c: a connected mouse blocks aim assist, like the Wii U's Nunchuk. */
+qboolean PS3_Input_MouseActive(void)
+{
+    return s_mouse_connected;
+}
+
 /* ============================================================ */
 
 /* Can't reuse BTN_CROSS -- those are padData bitfield member names. */
 #define PS3_BTN_IDX_CROSS     0
 #define PS3_BTN_IDX_CIRCLE    1
 #define PS3_BTN_IDX_TRIANGLE  3
+#define PS3_BTN_IDX_L1        4
+#define PS3_BTN_IDX_R1        5
 #define PS3_BTN_IDX_L3        8
 #define PS3_BTN_IDX_R3        9
 #define PS3_BTN_IDX_SELECT   11
@@ -605,12 +613,42 @@ void PS3_Input_Frame(void)
         goto skip_buttons;
     }
 
+    /* L1+R1 (edge-detected): toggle cl_aimAssist, restoring the last non-zero mode.
+     * Releases whichever shoulder was already down and swallows both until let go. */
+    static int aim_combo_held = 0;
+    if (!s_mouse_connected &&
+        btn_cur[PS3_BTN_IDX_L1] && btn_cur[PS3_BTN_IDX_R1] &&
+        (!ps3_btn_prev[PS3_BTN_IDX_L1] || !ps3_btn_prev[PS3_BTN_IDX_R1])) {
+        static int aim_last_mode = 1;
+        int mode = (int)Cvar_VariableValue("cl_aimAssist");
+        if (mode > 0) {
+            aim_last_mode = mode;
+            Cvar_Set("cl_aimAssist", "0");
+            Com_Printf("DISABLED AIM ASSIST\n");
+        } else {
+            Cvar_Set("cl_aimAssist", va("%d", aim_last_mode));
+            Com_Printf("ENABLED AIM ASSIST\n");
+        }
+        PS3_SetRumble(200, 1, 150);
+
+        if (ps3_btn_prev[PS3_BTN_IDX_L1])
+            Com_QueueEvent(0, SE_KEY, q3_key_map[PS3_BTN_IDX_L1], qfalse, 0, NULL);
+        if (ps3_btn_prev[PS3_BTN_IDX_R1])
+            Com_QueueEvent(0, SE_KEY, q3_key_map[PS3_BTN_IDX_R1], qfalse, 0, NULL);
+        aim_combo_held = 1;
+    }
+
     for (i = 0; i < NUM_PS3_BUTTONS; i++) {
         /* Digital L2/R2 are handled via the analog-threshold indices 16/17. */
         if (i == 6 || i == 7) continue;
 
         int cur  = btn_cur[i] ? 1 : 0;
         int prev = ps3_btn_prev[i];
+
+        if (aim_combo_held && (i == PS3_BTN_IDX_L1 || i == PS3_BTN_IDX_R1)) {
+            ps3_btn_prev[i] = cur;
+            continue;
+        }
 
         if (cur != prev) {
             if (i == PS3_BTN_IDX_TRIANGLE && triangle_consumed && cur) {
@@ -641,6 +679,8 @@ void PS3_Input_Frame(void)
         }
         ps3_btn_prev[i] = cur;
     }
+    if (!btn_cur[PS3_BTN_IDX_L1] && !btn_cur[PS3_BTN_IDX_R1])
+        aim_combo_held = 0;
     skip_buttons:;
 
     {
@@ -727,7 +767,14 @@ void IN_Init(void *windowData)
     PS3_SetDefaultBind(K_JOY5,  "+moveleft");    /* L1 */
     PS3_SetDefaultBind(K_JOY6,  "+moveright");   /* R1 */
     PS3_SetDefaultBind(K_JOY7,  "+zoom");        /* L2 */
-    PS3_SetDefaultBind(K_JOY8,  "+attack");      /* R2 */
+    /* R2 is +attack on every boot, over the saved config. CTRL loses default.cfg's +attack:
+     * while CTRL holds it, CIRCLE also fires on remote servers (seen on HW). */
+    Key_SetBinding(K_JOY8, "+attack");
+    {
+        char *ctrl = Key_GetBinding(K_CTRL);
+        if (ctrl && !Q_stricmp(ctrl, "+attack"))
+            Key_SetBinding(K_CTRL, "");
+    }
     PS3_SetDefaultBind(K_JOY9,  "+speed");       /* L3 */
 #ifdef ELITEFORCE
     PS3_SetDefaultBind(K_JOY10, "+info");        /* R3 - EF scoreboard cvar */

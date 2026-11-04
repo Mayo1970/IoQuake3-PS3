@@ -1497,6 +1497,16 @@ const char *FS_SearchPathGameDir(void *startSearch)
 		return search->pack->pakGamename;
 	return NULL;
 }
+
+// Pak checksum of the search path FS_FindVM returned, 0 for a directory; picks the linked-in cgame.
+unsigned int FS_SearchPathPakChecksum(void *startSearch)
+{
+	searchpath_t *search = startSearch;
+
+	if(!search || !search->pack)
+		return 0;
+	return search->pack->checksum;
+}
 #endif
 
 /*

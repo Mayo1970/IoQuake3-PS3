@@ -1,20 +1,6 @@
 #!/bin/bash
-#
-# compile_shaders.sh -- Compile Cg shaders to binary .vpo/.fpo files,
-# then generate C header with embedded byte arrays.
-#
-# Two-step process:
-#   1. cgc.exe (NVIDIA Cg compiler, 32-bit native) compiles .vcg/.fcg -> assembly
-#   2. cgcomp -a (PSL1GHT tool, assembly mode) converts assembly -> .vpo/.fpo
-#
-# This avoids the 64-bit cgcomp needing a 64-bit cg.dll (which NVIDIA
-# no longer distributes).
-#
-# Requirements:
-#   - cgcomp from PSL1GHT (ps3toolchain step 8)
-#   - cgc.exe from NVIDIA Cg Toolkit 3.1 (32-bit)
-#
-# Output: ../ps3gl_shader_data.h (included by ps3gl_shaders.c)
+# compile_shaders.sh -- cgc.exe (Cg 3.1, 32-bit) -> vp40/fp40 assembly -> PSL1GHT cgcomp -a -> .vpo/.fpo -> ../ps3gl_shader_data.h.
+# Two steps because the 64-bit cgcomp would need a 64-bit cg.dll, which NVIDIA no longer ships.
 
 set -e
 
@@ -46,10 +32,8 @@ if [ -z "$CGCOMP" ] || [ ! -x "$CGCOMP" ]; then
     echo "ERROR: cgcomp not found. Build ps3toolchain first."
     echo "Generating stub shader data header..."
     cat > ../ps3gl_shader_data.h <<'STUBEOF'
-/*
- * ps3gl_shader_data.h -- STUB: no compiled shaders available.
- * Regenerate with: cd shaders && ./compile_shaders.sh
- */
+/* ps3gl_shader_data.h -- STUB: no compiled shaders available.
+ * Regenerate with: cd shaders && ./compile_shaders.sh */
 #ifndef PS3GL_SHADER_DATA_H
 #define PS3GL_SHADER_DATA_H
 
@@ -75,10 +59,11 @@ echo "Using cgc:    $CGC"
 compile_vp() {
     local src="$1"
     local out="$2"
+    local flags="$3"
     local asm="${out}.asm"
 
-    echo "  cgc -profile vp40: $src -> $asm"
-    "$CGC" -profile vp40 -o "$asm" "$src"
+    echo "  cgc -profile vp40 $flags: $src -> $asm"
+    "$CGC" -profile vp40 $flags -o "$asm" "$src"
 
     echo "  cgcomp -a -v: $asm -> $out"
     "$CGCOMP" -a -v "$asm" "$out"
@@ -101,8 +86,10 @@ compile_fp() {
 }
 
 echo ""
-echo "Compiling vertex program..."
+echo "Compiling vertex programs..."
 compile_vp q3_vp.vcg q3_vp.vpo
+# -ifcvt none keeps q3_vp_gen's feature ifs as branches; flattened, every draw would run all 199 instructions
+compile_vp q3_vp_gen.vcg q3_vp_gen.vpo "-ifcvt none"
 
 echo ""
 echo "Compiling fragment programs..."
@@ -126,12 +113,11 @@ files = [
     ("q3_fp_add.fpo",        "shader_fp_add_data"),
     ("q3_fp_blend.fpo",      "shader_fp_blend_data"),
     ("q3_fp_modulate2.fpo",  "shader_fp_modulate2_data"),
+    ("q3_vp_gen.vpo",        "shader_vp_gen_data"),
 ]
 lines = [
-    "/*",
-    " * ps3gl_shader_data.h -- Auto-generated embedded shader binaries.",
-    " * Do not edit manually. Regenerate with: cd shaders && ./compile_shaders.sh",
-    " */",
+    "/* ps3gl_shader_data.h -- Auto-generated embedded shader binaries. Do not edit manually.",
+    " * Regenerate with: cd shaders && ./compile_shaders.sh */",
     "#ifndef PS3GL_SHADER_DATA_H",
     "#define PS3GL_SHADER_DATA_H",
     "",

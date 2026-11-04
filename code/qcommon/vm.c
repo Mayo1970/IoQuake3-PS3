@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #ifdef __PS3__
 #include <ppu-asm.h>
 #include <sys/systime.h>
+#include "../sys/ps3_prof.h"
 #endif
 
 #include "vm_local.h"
@@ -43,22 +44,27 @@ static int forced_unload;
 vm_t	vmTable[MAX_VM];
 
 #ifdef __PS3__
+#ifdef HAVE_VM_COMPILED
 // ps3_vmjit's default, per flavor from the Makefile; not on the boot cmdline, which would beat
 // a "set ps3_vmjit 0" in autoexec.cfg
 #ifndef PS3_VMJIT_DEFAULT
 #define PS3_VMJIT_DEFAULT	0
 #endif
+#endif
 
-// ps3_vmjit (not archived): 0 interpreter, 1 JIT dry run, 2 JIT. ps3_prof: VM_ProfFrame.
+// ps3_vmjit (not archived, VMJIT=1 builds only): 0 interpreter, 1 JIT dry run, 2 JIT. ps3_prof: VM_ProfFrame.
 static struct {
+#ifdef HAVE_VM_COMPILED
 	cvar_t	*jit;
+#endif
 	cvar_t	*prof;
-	int		profOn;
 	int		frames;
 	unsigned long long	tbFreq;
 	unsigned long long	winStart;
 	unsigned long long	frameSum;
 } vmPS3;
+
+ps3prof_t ps3prof;
 #endif
 
 
@@ -84,7 +90,9 @@ void VM_Init( void ) {
 	Cvar_Get( "vm_game", "2", CVAR_ARCHIVE );	// !@# SHIP WITH SET TO 2
 	Cvar_Get( "vm_ui", "2", CVAR_ARCHIVE );		// !@# SHIP WITH SET TO 2
 #ifdef __PS3__
+#ifdef HAVE_VM_COMPILED
 	vmPS3.jit = Cvar_Get( "ps3_vmjit", XSTRING( PS3_VMJIT_DEFAULT ), 0 );
+#endif
 	vmPS3.prof = Cvar_Get( "ps3_prof", "0", 0 );
 #endif
 
@@ -93,7 +101,7 @@ void VM_Init( void ) {
 
 	Com_Memset( vmTable, 0, sizeof( vmTable ) );
 
-#ifdef __PS3__
+#if defined(__PS3__) && defined(HAVE_VM_COMPILED)
 	// the JIT self-test runs at boot; VM_Compile runs it if ps3_vmjit is set to 2 later
 	if ( vmPS3.jit->integer >= 2 )
 		VM_JitSelfTest();
@@ -500,6 +508,50 @@ vm_t *VM_Restart(vm_t *vm, qboolean unpure)
 	return vm;
 }
 
+#if defined(PS3_NATIVE_GAME) || defined(PS3_NATIVE_CGAME)
+// Which gamedir's qagame.qvm the linked-in code is allowed to stand in for. TA's
+// game ships in missionpack (loaded via fs_game), not in BASEGAME's baseq3.
+#ifdef STANDALONETA
+#define PS3_NATIVE_GAME_DIR "missionpack"
+#else
+#define PS3_NATIVE_GAME_DIR BASEGAME
+#endif
+
+#ifdef PS3_NATIVE_CGAME
+// Paks whose vm/cgame.qvm the linked-in cgame matches: Q3 pak8; TA pak3 and our pak4-ps3 (update it
+// when that pak is rebuilt); OA pak6-patch088. A server's own cgame pak never matches, so it stays a QVM.
+static const unsigned int vmPS3NativeCgamePaks[] = {
+#if defined(STANDALONETA)
+	1438664554u, 1947621361u
+#elif defined(STANDALONEOA)
+	3601704695u
+#else
+	977125798u
+#endif
+};
+#endif
+
+static qboolean VM_PS3NativeAllowed( const char *module, void *search ) {
+#ifdef PS3_NATIVE_GAME
+	if ( !Q_stricmp( module, "qagame" ) )
+		return !Q_stricmp( FS_SearchPathGameDir( search ), PS3_NATIVE_GAME_DIR );
+#endif
+#ifdef PS3_NATIVE_CGAME
+	if ( !Q_stricmp( module, "cgame" ) ) {
+		unsigned int checksum = FS_SearchPathPakChecksum( search );
+		int i;
+
+		for ( i = 0; i < ARRAY_LEN( vmPS3NativeCgamePaks ); i++ ) {
+			if ( checksum == vmPS3NativeCgamePaks[i] )
+				return qtrue;
+		}
+		Com_Printf( "cgame: pak checksum %u is not a known retail cgame, using the qvm\n", checksum );
+	}
+#endif
+	return qfalse;
+}
+#endif
+
 // If image ends in .qvm it will be interpreted, otherwise it will attempt to load as a system dll
 vm_t *VM_Create( const char *module, intptr_t (*systemCalls)(intptr_t *),
 				vmInterpret_t interpret ) {
@@ -558,21 +610,15 @@ vm_t *VM_Create( const char *module, intptr_t (*systemCalls)(intptr_t *),
 		}
 		else if(retval == VMI_COMPILED)
 		{
-#ifdef PS3_NATIVE_GAME
-// Which gamedir's qagame.qvm the linked-in code is allowed to stand in for. TA's
-// game ships in missionpack (loaded via fs_game), not in BASEGAME's baseq3.
-#ifdef STANDALONETA
-#define PS3_NATIVE_GAME_DIR "missionpack"
-#else
-#define PS3_NATIVE_GAME_DIR BASEGAME
-#endif
-			// PS3 has no dll loader: qagame is linked into the EBOOT and only replaces that gamedir's qvm, so mods stay interpreted.
-			if(interpret == VMI_NATIVE && !Q_stricmp(module, "qagame") &&
-			   !Q_stricmp(FS_SearchPathGameDir(startSearch), PS3_NATIVE_GAME_DIR))
+#if defined(PS3_NATIVE_GAME) || defined(PS3_NATIVE_CGAME)
+			// PS3 has no dll loader: qagame/cgame are linked into the EBOOT and only replace the qvm they were built from.
+			if(interpret == VMI_NATIVE && VM_PS3NativeAllowed(module, startSearch))
 			{
 				vm->dllHandle = Sys_LoadGameDll(module, &vm->entryPoint, VM_DllSyscall);
 				if(vm->dllHandle)
 				{
+					// read the qvm as VM_LoadQVM would, so a pure server still gets its pak in the "cp" list
+					FS_ReadFileDir(va("vm/%s.qvm", module), startSearch, qfalse, NULL);
 					Com_Printf("%s: using linked-in native code\n", module);
 					vm->systemCall = systemCalls;
 					return vm;
@@ -602,7 +648,7 @@ vm_t *VM_Create( const char *module, intptr_t (*systemCalls)(intptr_t *),
 
 	vm->compiled = qfalse;
 
-#ifdef __PS3__
+#if defined(__PS3__) && defined(HAVE_VM_COMPILED)
 	// vm_* are archived with default 2, so they alone must not turn the JIT on
 	if(interpret != VMI_BYTECODE && !vmPS3.jit->integer)
 		interpret = VMI_BYTECODE;
@@ -752,7 +798,7 @@ intptr_t QDECL VM_Call( vm_t *vm, int callnum, ... )
 	}
 
 #ifdef __PS3__
-	if ( vmPS3.profOn && !vm->callLevel )
+	if ( ps3prof.on && !vm->callLevel )
 		profStart = __gettime();
 #endif
 	++vm->callLevel;
@@ -930,7 +976,7 @@ intptr_t VM_ProfSystemCall( vm_t *vm, intptr_t *args )
 	unsigned long long start;
 	intptr_t r;
 
-	if ( !vmPS3.profOn || vm->callLevel != 1 )
+	if ( !ps3prof.on || vm->callLevel != 1 )
 		return vm->systemCall( args );
 
 	start = __gettime();
@@ -944,28 +990,34 @@ static unsigned VM_ProfUsec( unsigned long long ticks )
 	return (unsigned)( ticks * 1000000ULL / vmPS3.tbFreq / vmPS3.frames );
 }
 
-// ps3_main.c calls this after each Com_Frame. With ps3_prof 1 it prints, every 5 s, per-frame
-// averages in us: the frame, and each VM's VM_Call time with the syscall time inside it.
+static unsigned VM_ProfCount( unsigned long long n )
+{
+	return (unsigned)( n / vmPS3.frames );
+}
+
+// ps3_main.c calls this after each Com_Frame. With ps3_prof 1 it prints per-frame averages every 5 s:
+// us for the frame, each VM_Call with its syscalls and the ps3prof buckets, then the ps3prof counts.
 void VM_ProfFrame( unsigned long long frameTicks )
 {
 	unsigned long long now, vmTicks[3] = { 0 }, sysTicks[3] = { 0 };
 	int i, j;
 
 	if ( !vmPS3.prof || !vmPS3.prof->integer ) {
-		vmPS3.profOn = 0;
+		ps3prof.on = 0;
 		return;
 	}
 
 	now = __gettime();
-	if ( !vmPS3.profOn ) {
+	if ( !ps3prof.on ) {
 		if ( !vmPS3.tbFreq )
 			vmPS3.tbFreq = sysGetTimebaseFrequency();
 		for ( i = 0; i < MAX_VM; i++ )
 			vmTable[i].profVm = vmTable[i].profSys = 0;
+		Com_Memset( &ps3prof, 0, sizeof( ps3prof ) );
+		ps3prof.on = 1;
 		vmPS3.frames = 0;
 		vmPS3.frameSum = 0;
 		vmPS3.winStart = now;
-		vmPS3.profOn = 1;
 		return;
 	}
 
@@ -990,12 +1042,20 @@ void VM_ProfFrame( unsigned long long frameTicks )
 		vm->profVm = vm->profSys = 0;
 	}
 
-	Com_Printf( "[prof] frame=%u cg=%u (sys %u) ui=%u (sys %u) gm=%u (sys %u)\n",
+	Com_Printf( "[prof] frame=%u cg=%u (sys %u) ui=%u (sys %u) gm=%u (sys %u) "
+		"rf=%u bk=%u gpu=%u idle=%u vc=%u cp=%u dl=%u surf=%u draws=%u verts=%u\n",
 		VM_ProfUsec( vmPS3.frameSum ),
 		VM_ProfUsec( vmTicks[0] ), VM_ProfUsec( sysTicks[0] ),
 		VM_ProfUsec( vmTicks[1] ), VM_ProfUsec( sysTicks[1] ),
-		VM_ProfUsec( vmTicks[2] ), VM_ProfUsec( sysTicks[2] ) );
+		VM_ProfUsec( vmTicks[2] ), VM_ProfUsec( sysTicks[2] ),
+		VM_ProfUsec( ps3prof.rf ), VM_ProfUsec( ps3prof.bk ),
+		VM_ProfUsec( ps3prof.gpu ), VM_ProfUsec( ps3prof.idle ),
+		VM_ProfUsec( ps3prof.vc ), VM_ProfUsec( ps3prof.cp ), VM_ProfUsec( ps3prof.dl ),
+		VM_ProfCount( ps3prof.surf ), VM_ProfCount( ps3prof.draws ),
+		VM_ProfCount( ps3prof.verts ) );
 
+	Com_Memset( &ps3prof, 0, sizeof( ps3prof ) );
+	ps3prof.on = 1;
 	vmPS3.frames = 0;
 	vmPS3.frameSum = 0;
 	vmPS3.winStart = now;

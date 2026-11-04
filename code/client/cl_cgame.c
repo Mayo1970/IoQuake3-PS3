@@ -783,7 +783,12 @@ void CL_InitCGame( void ) {
 
 	// load the dll or bytecode
 	interpret = Cvar_VariableValue("vm_cgame");
+#ifdef PS3_NATIVE_CGAME
+	// the linked-in cgame comes from the signed EBOOT; VM_Create allows it only for a known retail cgame pak
+	if(cl_connectedToPureServer && interpret != VMI_NATIVE)
+#else
 	if(cl_connectedToPureServer)
+#endif
 	{
 		// if sv_pure is set we only allow qvms to be loaded
 		if(interpret != VMI_COMPILED && interpret != VMI_BYTECODE)

@@ -11,6 +11,7 @@
 #include <rsx/gcm_sys.h>
 
 #include "GL/gl.h"
+#include "ps3gl_vprog.h"
 
 /* Constants */
 #define PS3GL_MAX_TMUS          2
@@ -134,6 +135,25 @@ typedef struct {
     uint32_t            fp_offset;
 } ps3gl_shader_t;
 
+/* ps3_vprog 1's vertex program (q3_vp_gen); NULL vp if it failed to load. u[] follows ps3gl_shaders.c's table. */
+#define PS3GL_VP_UNIFORMS       28
+typedef struct {
+    rsxVertexProgram   *vp;
+    void               *ucode;
+    uint32_t            ucode_size;
+    rsxProgramConst    *mvp;
+    rsxProgramConst    *u[PS3GL_VP_UNIFORMS];
+} ps3gl_vpgen_t;
+
+/* V2: the last V1 vring copy; a V1 draw with the same sources in the same lock reuses it */
+typedef struct {
+    int                 valid;
+    uint32_t            serial;
+    const void         *vp, *tp0, *tp1, *cp, *np;
+    int                 vs, vsize, ts, num_verts;
+    uint32_t            offset, n_offset;
+} ps3gl_vcopy_t;
+
 /* Global GL state */
 typedef struct {
     gcmContextData     *ctx;
@@ -200,6 +220,8 @@ typedef struct {
     int                 va_locked;
     GLint               va_lock_first;
     GLsizei             va_lock_count;
+    uint32_t            va_lock_serial;    /* bumped per glLockArraysEXT: tess is one global, equal pointers prove nothing */
+    ps3gl_vcopy_t       vcopy;
 
     ps3gl_vring_t       vring;
 
@@ -210,6 +232,15 @@ typedef struct {
     int                 active_shader;
     rsxVertexProgram   *active_vp;      /* physical VP currently loaded on RSX; all shader slots share one VP, so this is tracked separately from active_shader (the FP key) */
     uint32_t            mvp_uploaded_gen; /* last ps3gl_get_mvp_generation() value uploaded to active_vp */
+    rsxVertexProgram   *loaded_vp;      /* last VP really loaded; active_vp is cleared every frame */
+
+    /* ps3_vprog: vp_next is the pending one-shot V1 draw, vp_up the q3_vp_gen uniforms the RSX holds */
+    int                 vprog;
+    ps3gl_vpgen_t       vpgen;
+    int                 vp_pending;
+    ps3gl_vparams_t     vp_next;
+    int                 vp_up_valid;
+    ps3gl_vparams_t     vp_up;          /* only the uniform floats are used */
 
 } ps3gl_state_t;
 
@@ -243,9 +274,11 @@ void ps3gl_apply_states(void);
 void ps3gl_apply_matrices(void);
 void ps3gl_apply_textures(void);
 void ps3gl_apply_shader(void);
+void ps3gl_apply_vparams(const ps3gl_vparams_t *p);   /* after ps3gl_apply_shader; NULL = identity */
 
 /* Vertex ring buffer */
 ps3gl_vertex_t *ps3gl_vring_alloc(int count, uint32_t *out_offset);
+void *ps3gl_vring_alloc_bytes(uint32_t bytes, uint32_t *out_offset);
 
 /* Texture helpers */
 ps3gl_texture_t *ps3gl_texture_find(GLuint name);

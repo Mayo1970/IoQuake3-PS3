@@ -365,6 +365,9 @@ int main(int argc, char *argv[])
 #ifdef PS3_NATIVE_GAME
         "+set vm_game 0 "             /* linked-in qagame; beats the archived ioq3 default of 2 */
 #endif
+#ifdef PS3_NATIVE_CGAME
+        "+set vm_cgame 0 "            /* linked-in cgame, same reason */
+#endif
         "+set sv_maxclients 8 "
         "+set in_joystick 1 "
         "+set in_joystickUseAnalog 1 "

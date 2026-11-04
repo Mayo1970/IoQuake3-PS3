@@ -8,5 +8,6 @@ void     PS3_Input_Shutdown(void);
 void     PS3_Input_Frame(void);
 qboolean PS3_Input_QuitPressed(void);
 void     PS3_SetRumble(uint8_t large, uint8_t small_motor, int durationMs);
+qboolean PS3_Input_MouseActive(void);
 
 #endif /* PS3_INPUT_H */
